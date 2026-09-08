@@ -29,8 +29,6 @@ KNT does **not** use a permanent ticker whitelist. Discovery is scanner-plan dri
 
 The currently validated runtime adapter is `STK / STK.US.MAJOR / MOST_ACTIVE`. Additional IBKR scanner segments can plug into the same discovery service via `ScannerPlan`/`scan_many` without changing strategy code. Asset-specific risk/execution models must be added before autonomous order execution is allowed for derivatives/FX.
 
-IBKR documents scanner instrument/location combinations through its scanner parameters response. Do not assume every scanner combination works for every account/data subscription.
-
 ## Safe Paper configuration
 
 ```env
@@ -39,13 +37,11 @@ IBKR_PORT=7497
 IBKR_CLIENT_ID=901
 IBKR_READONLY=false
 ALLOW_LIVE_TRADING=false
-
 MAX_TRADE_RISK_PCT=0.10
 MAX_DAILY_LOSS_PCT=0.10
 MAX_POSITION_PCT=0.10
 KILL_SWITCH_ENABLED=true
 KILL_SWITCH_DRY_RUN=true
-
 MARKET_DATA_TYPE=3
 SUPERVISOR_POLL_SECONDS=15
 REQUIRE_FLAT_STARTUP=true
@@ -57,43 +53,20 @@ SHADOW_TRADING_ENABLED=true
 SHADOW_INTERVAL_SECONDS=900
 ```
 
-## Tests
+## Local validation
 
 ```bash
+git fetch origin
+git checkout feature/paper-alpha
+git pull
 pytest -q
-```
-
-## One-strategy baseline backtest
-
-```bash
-python run_backtest.py SPY --duration "30 D" --bar-size "1 hour"
-```
-
-## Compare the strategy suite
-
-```bash
 python run_strategy_suite.py SPY --duration "180 D" --bar-size "1 hour"
-```
-
-This prints return, max drawdown, trades, win rate, profit factor and Sharpe for every single-asset strategy plus the original momentum baseline. Backtest results are research evidence, not a profitability guarantee.
-
-## Multi-strategy shadow engine
-
-```bash
 python paper_alpha.py
 ```
 
-The shadow process:
+The suite runner prints return, max drawdown, trades, win rate, profit factor and Sharpe for every single-asset family plus the original momentum baseline.
 
-- discovers candidates dynamically from IBKR;
-- filters/ranks them by execution quality;
-- downloads historical bars;
-- detects the current market regime;
-- evaluates every applicable single-asset strategy;
-- applies only a **soft** regime preference rather than a hard strategy assignment;
-- selects the strongest valid setup or `NO_TRADE`;
-- evaluates pair opportunities among the analyzed candidates;
-- never sends strategy orders.
+The shadow process discovers candidates dynamically, detects regime, evaluates all applicable strategies, selects the strongest setup or `NO_TRADE`, evaluates pair opportunities and sends no strategy orders.
 
 Look for `SHADOW DECISION`, `SHADOW SETUP` and `SHADOW PAIR` in the log.
 
@@ -103,5 +76,5 @@ Look for `SHADOW DECISION`, `SHADOW SETUP` and `SHADOW PAIR` in the log.
 - `ALLOW_LIVE_TRADING=false` blocks standard live ports.
 - Persistent daily-loss state and sticky kill switch are retained.
 - Kill-switch liquidation remains dry-run by default until explicitly Paper-tested.
-- Cross-asset discovery is being expanded, but autonomous execution must use the correct contract multiplier/currency/options risk model for each asset class.
+- Cross-asset discovery is scanner-plan ready, but autonomous execution must use the correct contract multiplier/currency/options risk model for each asset class.
 - No strategy currently has a claim of durable edge. The next stages are broad backtesting, out-of-sample/walk-forward validation, persistent strategy performance evidence, portfolio risk and controlled Paper execution.

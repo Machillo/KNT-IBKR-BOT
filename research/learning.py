@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from enum import Enum
 
 from research.performance import PerformanceEvidence, StrategyPerformanceStore
@@ -20,6 +21,7 @@ class LearningAssessment:
     selector_bonus: float
     evidence: PerformanceEvidence | None
     reason: str
+    freshness_factor: float = 1.0
 
 
 class LearningEngine:
@@ -27,10 +29,36 @@ class LearningEngine:
 
     The engine may change strategy confidence, but it has no authority over broker
     permissions, kill switches, daily-loss limits, or absolute portfolio-risk limits.
+    Research evidence also loses influence as it ages so stale backtests cannot keep
+    a strategy permanently trusted or avoided without fresh validation.
     """
 
     def __init__(self, store: StrategyPerformanceStore) -> None:
         self.store = store
+
+    def _freshness_factor(self, *, symbol: str, asset_class: str, timeframe: str) -> float:
+        status_reader = getattr(self.store, "research_status", None)
+        if status_reader is None:
+            return 1.0
+        row = status_reader(symbol=symbol, asset_class=asset_class, timeframe=timeframe)
+        if row is None:
+            return 1.0
+        try:
+            researched_at = datetime.fromisoformat(str(row["researched_at"]))
+        except (KeyError, TypeError, ValueError):
+            return 0.5
+        if researched_at.tzinfo is None:
+            researched_at = researched_at.replace(tzinfo=timezone.utc)
+        age_hours = max(0.0, (datetime.now(timezone.utc) - researched_at).total_seconds() / 3600.0)
+        if age_hours <= 24.0:
+            return 1.0
+        if age_hours <= 72.0:
+            return 0.85
+        if age_hours <= 168.0:
+            return 0.65
+        if age_hours <= 720.0:
+            return 0.40
+        return 0.20
 
     def assess(
         self,
@@ -50,7 +78,7 @@ class LearningEngine:
         )
         if evidence is None:
             return LearningAssessment(
-                LearningStatus.UNKNOWN, 0.0, 0.0, None, "no_context_evidence"
+                LearningStatus.UNKNOWN, 0.0, 0.0, None, "no_context_evidence", 1.0
             )
 
         # Evidence quality grows with independent samples, trades and OOS coverage.
@@ -59,16 +87,27 @@ class LearningEngine:
         oos_quality = min(1.0, evidence.oos_samples / 3.0)
         quality = 0.25 * sample_quality + 0.35 * trade_quality + 0.40 * oos_quality
 
+        # Recent validation matters more than stale research. The coordinator refreshes
+        # old contexts, while this decay prevents old evidence from retaining full power
+        # between refresh opportunities.
+        freshness = self._freshness_factor(
+            symbol=symbol, asset_class=asset_class, timeframe=timeframe
+        )
+        effective_quality = quality * freshness
+
         # Convert the store's deliberately bounded [-20,+20] evidence score into
         # directional conviction. Poor evidence is allowed to veto confidence.
         directional = max(-1.0, min(1.0, evidence.evidence_score / 20.0))
-        confidence = max(0.0, min(100.0, 50.0 + directional * 40.0 * quality))
-        selector_bonus = max(-20.0, min(20.0, evidence.evidence_score * quality))
+        confidence = max(0.0, min(100.0, 50.0 + directional * 40.0 * effective_quality))
+        selector_bonus = max(-20.0, min(20.0, evidence.evidence_score * effective_quality))
 
         if evidence.oos_samples == 0 or evidence.trades < 20:
             status = LearningStatus.DEVELOPING
             selector_bonus *= 0.5
             reason = "insufficient_oos_or_trades"
+        elif freshness < 0.65:
+            status = LearningStatus.DEVELOPING
+            reason = "stale_evidence_requires_refresh"
         elif selector_bonus <= -6.0:
             status = LearningStatus.AVOID
             reason = "negative_validated_evidence"
@@ -85,4 +124,5 @@ class LearningEngine:
             selector_bonus=round(selector_bonus, 2),
             evidence=evidence,
             reason=reason,
+            freshness_factor=round(freshness, 2),
         )

@@ -5,6 +5,7 @@ from itertools import combinations
 
 from engine.strategy_selector import StrategySelection, StrategySelector
 from market.history import HistoricalDataService, PriceBar
+from research.performance import StrategyPerformanceStore
 from strategies.library import PairSignal, PairsTradingStrategy
 from strategies.momentum import SignalSide
 from utils.logger import logger
@@ -33,7 +34,8 @@ class ShadowTradingEngine:
                  max_candidates: int = 5) -> None:
         self.intelligence = market_intelligence
         self.history = HistoricalDataService(ib)
-        self.selector = StrategySelector(minimum_signal_score)
+        self.performance_store = StrategyPerformanceStore()
+        self.selector = StrategySelector(minimum_signal_score, self.performance_store)
         self.pairs = PairsTradingStrategy()
         self.max_candidates = max_candidates
 
@@ -47,13 +49,18 @@ class ShadowTradingEngine:
             try:
                 bars = await self.history.bars(candidate.contract)
                 history_by_symbol[candidate.symbol] = bars
-                selection = self.selector.evaluate(bars)
+                selection = self.selector.evaluate(
+                    bars,
+                    symbol=candidate.symbol,
+                    asset_class=candidate.contract.secType or "STK",
+                    timeframe="1 hour",
+                )
                 selected = selection.selected
                 action = "NO_TRADE" if selected is None else f"WOULD_{selected.signal.side.value}"
                 decision = ShadowDecision(candidate.symbol, candidate.score, selection, action)
                 decisions.append(decision)
                 top = [
-                    f"{item.strategy}:{item.signal.side.value}:{item.adjusted_score:.1f}"
+                    f"{item.strategy}:{item.signal.side.value}:{item.adjusted_score:.1f}:hist={item.evidence_bonus:+.1f}"
                     for item in selection.evaluations[:3]
                 ]
                 logger.info(
@@ -69,9 +76,10 @@ class ShadowTradingEngine:
                 if selected is not None:
                     s = selected.signal
                     logger.info(
-                        "SHADOW SETUP | symbol=%s strategy=%s side=%s score=%.2f entry=%s stop=%s target=%s signal_reason=%s",
+                        "SHADOW SETUP | symbol=%s strategy=%s side=%s score=%.2f evidence_bonus=%+.2f entry=%s stop=%s target=%s signal_reason=%s",
                         candidate.symbol, selected.strategy, s.side.value,
-                        selected.adjusted_score, s.entry, s.stop, s.target, s.reason,
+                        selected.adjusted_score, selected.evidence_bonus,
+                        s.entry, s.stop, s.target, s.reason,
                     )
             except Exception as exc:
                 logger.warning("SHADOW candidate skipped | symbol=%s error=%s", candidate.symbol, exc)

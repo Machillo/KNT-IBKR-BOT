@@ -14,9 +14,13 @@ def make_bars(count=100, start=100.0, step=0.5):
     return bars
 
 
+def test_seven_single_asset_plus_pairs_make_eight_families():
+    assert len(SINGLE_ASSET_STRATEGIES) == 7
+    assert PairsTradingStrategy.name == "pairs_market_neutral_v1"
+
+
 def test_all_single_asset_strategies_evaluate_without_error():
     bars=make_bars()
-    assert len(SINGLE_ASSET_STRATEGIES) == 7
     for factory in SINGLE_ASSET_STRATEGIES:
         signal=factory().evaluate(bars)
         assert signal.side in {SignalSide.LONG, SignalSide.SHORT, SignalSide.FLAT}
@@ -32,7 +36,6 @@ def test_selector_returns_ranked_evaluations():
 def test_pairs_strategy_detects_ratio_extension():
     a=make_bars(count=60, start=100, step=0.1)
     b=make_bars(count=60, start=100, step=0.1)
-    # Stretch only the final A bar to create a large positive ratio z-score.
     last=a[-1]
     a[-1]=PriceBar(last.time, last.open, last.high+20, last.low, last.close+20, last.volume)
     signal=PairsTradingStrategy().evaluate_pair(a,b)

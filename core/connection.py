@@ -69,11 +69,11 @@ class IBKRConnection:
             self._reconnect_task = loop.create_task(self._reconnect_loop())
 
     def _on_error(self, req_id: int, error_code: int, error_string: str, contract=None) -> None:
-        # IBKR emits normal connectivity/status notices through errorEvent too.
         informational_codes = {202, 2104, 2106, 2107, 2108, 2158, 10167, 10349}
         warning_codes = {1100, 1101, 1102}
+        scanner_cancelled = error_code == 162 and "scanner subscription cancelled" in error_string.lower()
 
-        if error_code in informational_codes:
+        if error_code in informational_codes or scanner_cancelled:
             log = logger.info
         elif error_code in warning_codes:
             log = logger.warning
@@ -92,15 +92,11 @@ class IBKRConnection:
         for attempt in range(1, self.settings.max_reconnect_attempts + 1):
             if self._stopping or self.ib.isConnected():
                 return
-
             logger.warning(
                 "Reconnect attempt %s/%s in %.1fs",
-                attempt,
-                self.settings.max_reconnect_attempts,
-                self.settings.reconnect_delay,
+                attempt, self.settings.max_reconnect_attempts, self.settings.reconnect_delay,
             )
             await asyncio.sleep(self.settings.reconnect_delay)
-
             try:
                 await self.connect()
                 if self.ib.isConnected():
@@ -108,7 +104,6 @@ class IBKRConnection:
                     return
             except Exception as exc:
                 logger.error("Reconnect attempt failed: %s", exc)
-
         logger.critical("IBKR reconnect attempts exhausted")
 
     async def disconnect(self) -> None:

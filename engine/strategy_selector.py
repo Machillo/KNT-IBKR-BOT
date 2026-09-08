@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 from market.history import PriceBar
 from market.regime import MarketRegime, RegimeDetector, RegimeSnapshot
+from research.learning import LearningAssessment, LearningEngine, LearningStatus
 from research.performance import PerformanceEvidence, StrategyPerformanceStore
 from strategies.library import SINGLE_ASSET_STRATEGIES
 from strategies.momentum import SignalSide, StrategySignal
@@ -39,6 +40,7 @@ class StrategyEvaluation:
     regime_bonus: float = 0.0
     evidence_bonus: float = 0.0
     evidence: PerformanceEvidence | None = None
+    learning: LearningAssessment | None = None
 
 
 @dataclass(frozen=True)
@@ -50,7 +52,7 @@ class StrategySelection:
 
 
 class StrategySelector:
-    """Evaluate all strategies and blend current signal, regime and stored evidence."""
+    """Evaluate all strategies and blend signal, regime and bounded learned evidence."""
 
     def __init__(
         self,
@@ -61,6 +63,7 @@ class StrategySelector:
         self.regime_detector = RegimeDetector()
         self.strategies = [factory() for factory in SINGLE_ASSET_STRATEGIES]
         self.performance_store = performance_store
+        self.learning_engine = LearningEngine(performance_store) if performance_store else None
 
     def evaluate(
         self,
@@ -75,29 +78,45 @@ class StrategySelector:
         for strategy in self.strategies:
             signal = strategy.evaluate(bars)
             regime_bonus = REGIME_BONUS.get(regime.regime, {}).get(strategy.name, 0.0)
+            learning = None
             evidence = None
             evidence_bonus = 0.0
-            if self.performance_store is not None and symbol:
-                evidence = self.performance_store.evidence(
+            if self.learning_engine is not None and symbol:
+                learning = self.learning_engine.assess(
                     symbol=symbol,
                     asset_class=asset_class,
                     timeframe=timeframe,
                     regime=regime.regime.value,
                     strategy=strategy.name,
                 )
-                if evidence is not None:
-                    evidence_bonus = evidence.evidence_score
+                evidence = learning.evidence
+                evidence_bonus = learning.selector_bonus
+
             adjusted = max(0.0, min(100.0, signal.score + regime_bonus + evidence_bonus))
             evaluations.append(StrategyEvaluation(
-                strategy.name, signal, adjusted, regime_bonus, evidence_bonus, evidence
+                strategy.name, signal, adjusted, regime_bonus, evidence_bonus, evidence, learning
             ))
 
         evaluations.sort(key=lambda x: x.adjusted_score, reverse=True)
         tradable = [x for x in evaluations if x.signal.side != SignalSide.FLAT]
         if not tradable:
             return StrategySelection(regime, None, tuple(evaluations), "all_strategies_flat")
+
+        # Strong negative validated evidence can veto a strategy even if today's raw
+        # signal is attractive. Unknown/developing evidence never blocks by itself.
+        tradable = [
+            x for x in tradable
+            if x.learning is None or x.learning.status != LearningStatus.AVOID
+        ]
+        if not tradable:
+            return StrategySelection(regime, None, tuple(evaluations), "all_tradable_strategies_avoided")
+
         best = tradable[0]
         if best.adjusted_score < self.minimum_score:
             return StrategySelection(regime, None, tuple(evaluations), "best_signal_below_threshold")
-        reason = "best_evidence_adjusted_signal" if best.evidence is not None else "best_context_adjusted_signal"
+        reason = (
+            "best_learned_context_signal"
+            if best.learning is not None and best.learning.evidence is not None
+            else "best_context_adjusted_signal"
+        )
         return StrategySelection(regime, best, tuple(evaluations), reason)

@@ -25,3 +25,13 @@ def test_discovery_shortlist_respects_quote_budget_and_rank():
     ]
     shortlisted = MarketIntelligenceService._discovery_shortlist(candidates, 3)
     assert [x.rank for x in shortlisted] == [1, 2, 5]
+
+
+def test_discovery_shortlist_rejects_ambiguous_stock_wrappers():
+    candidates = [
+        DiscoveryCandidate(rank=0, symbol="RIV RT", sec_type="STK", exchange="SMART", currency="USD", contract=Contract(1)),
+        DiscoveryCandidate(rank=1, symbol="EP PRC", sec_type="STK", exchange="SMART", currency="USD", contract=Contract(2)),
+        DiscoveryCandidate(rank=2, symbol="NVDA", sec_type="STK", exchange="SMART", currency="USD", contract=Contract(3)),
+    ]
+    shortlisted = MarketIntelligenceService._discovery_shortlist(candidates, 10)
+    assert [x.symbol for x in shortlisted] == ["NVDA"]

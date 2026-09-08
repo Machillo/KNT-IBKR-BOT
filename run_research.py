@@ -24,13 +24,14 @@ async def run(symbol: str, duration: str, bar_size: str) -> None:
             raise RuntimeError(f"Could not qualify {symbol}")
         bars = await HistoricalDataService(ib).bars(qualified[0], duration=duration, bar_size=bar_size)
         store = StrategyPerformanceStore()
+        removed = store.clear_context(symbol=symbol.upper(), asset_class="STK", timeframe=bar_size)
         research = WalkForwardResearch(store, BacktestEngine())
         strategies = [MomentumStrategy(), *[factory() for factory in SINGLE_ASSET_STRATEGIES]]
         summaries = research.evaluate(
             symbol=symbol.upper(), asset_class="STK", timeframe=bar_size,
             bars=bars, strategies=strategies,
         )
-        print(f"research symbol={symbol.upper()} bars={len(bars)} timeframe={bar_size}")
+        print(f"research symbol={symbol.upper()} bars={len(bars)} timeframe={bar_size} replaced_records={removed}")
         for item in summaries:
             print(f"{item.strategy:28} train={item.train_windows:3d} oos={item.oos_windows:3d}")
         print("\nleaderboard")

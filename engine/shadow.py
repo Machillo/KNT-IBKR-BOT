@@ -31,14 +31,8 @@ class ShadowPairDecision:
 class ShadowTradingEngine:
     """Evaluates dynamic universe candidates with all strategy families; never sends an order."""
 
-    def __init__(
-        self,
-        ib,
-        market_intelligence,
-        minimum_signal_score: float = 55.0,
-        max_candidates: int = 12,
-        quote_budget: int = 40,
-    ) -> None:
+    def __init__(self, ib, market_intelligence, minimum_signal_score: float = 55.0,
+                 max_candidates: int = 12, quote_budget: int = 40) -> None:
         self.intelligence = market_intelligence
         self.history = HistoricalDataService(ib)
         self.performance_store = StrategyPerformanceStore()
@@ -49,14 +43,11 @@ class ShadowTradingEngine:
 
     async def run_once(self, rows_per_scanner: int = 25) -> list[ShadowDecision]:
         ranked = await self.intelligence.ranked_us_opportunity_universe(
-            rows_per_plan=rows_per_scanner,
-            quote_budget=self.quote_budget,
+            rows_per_plan=rows_per_scanner, quote_budget=self.quote_budget,
         )
         candidates = [x for x in ranked if x.eligible][:self.max_candidates]
-        logger.info(
-            "SHADOW FUNNEL | ranked=%s eligible=%s deep_analysis=%s",
-            len(ranked), sum(1 for x in ranked if x.eligible), len(candidates),
-        )
+        logger.info("SHADOW FUNNEL | ranked=%s eligible=%s deep_analysis=%s",
+                    len(ranked), sum(1 for x in ranked if x.eligible), len(candidates))
         decisions: list[ShadowDecision] = []
         history_by_symbol: dict[str, list[PriceBar]] = {}
 
@@ -65,36 +56,33 @@ class ShadowTradingEngine:
                 bars = await self.history.bars(candidate.contract)
                 history_by_symbol[candidate.symbol] = bars
                 selection = self.selector.evaluate(
-                    bars,
-                    symbol=candidate.symbol,
-                    asset_class=candidate.contract.secType or "STK",
-                    timeframe="1 hour",
+                    bars, symbol=candidate.symbol,
+                    asset_class=candidate.contract.secType or "STK", timeframe="1 hour",
                 )
                 selected = selection.selected
                 action = "NO_TRADE" if selected is None else f"WOULD_{selected.signal.side.value}"
-                decision = ShadowDecision(candidate.symbol, candidate.score, selection, action)
-                decisions.append(decision)
-                top = [
-                    f"{item.strategy}:{item.signal.side.value}:{item.adjusted_score:.1f}:hist={item.evidence_bonus:+.1f}"
-                    for item in selection.evaluations[:3]
-                ]
+                decisions.append(ShadowDecision(candidate.symbol, candidate.score, selection, action))
+                top = []
+                for item in selection.evaluations[:3]:
+                    learning = item.learning
+                    learned = "UNKNOWN" if learning is None else f"{learning.status.value}:{learning.confidence:.0f}%"
+                    top.append(
+                        f"{item.strategy}:{item.signal.side.value}:{item.adjusted_score:.1f}:learn={learned}:bonus={item.evidence_bonus:+.1f}"
+                    )
                 logger.info(
                     "SHADOW DECISION | symbol=%s liquidity=%.2f regime=%s action=%s selected=%s top=%s reason=%s",
-                    candidate.symbol,
-                    candidate.score,
-                    selection.regime.regime.value,
-                    action,
-                    None if selected is None else selected.strategy,
-                    top,
-                    selection.reason,
+                    candidate.symbol, candidate.score, selection.regime.regime.value, action,
+                    None if selected is None else selected.strategy, top, selection.reason,
                 )
                 if selected is not None:
                     s = selected.signal
+                    learning = selected.learning
                     logger.info(
-                        "SHADOW SETUP | symbol=%s strategy=%s side=%s score=%.2f evidence_bonus=%+.2f entry=%s stop=%s target=%s signal_reason=%s",
-                        candidate.symbol, selected.strategy, s.side.value,
-                        selected.adjusted_score, selected.evidence_bonus,
-                        s.entry, s.stop, s.target, s.reason,
+                        "SHADOW SETUP | symbol=%s strategy=%s side=%s score=%.2f learning=%s confidence=%.2f evidence_bonus=%+.2f entry=%s stop=%s target=%s signal_reason=%s",
+                        candidate.symbol, selected.strategy, s.side.value, selected.adjusted_score,
+                        "UNKNOWN" if learning is None else learning.status.value,
+                        0.0 if learning is None else learning.confidence,
+                        selected.evidence_bonus, s.entry, s.stop, s.target, s.reason,
                     )
             except Exception as exc:
                 logger.warning("SHADOW candidate skipped | symbol=%s error=%s", candidate.symbol, exc)
@@ -117,8 +105,7 @@ class ShadowTradingEngine:
         if n < 40:
             return None
         ra, rb = ra[-n:], rb[-n:]
-        ma = sum(ra) / n
-        mb = sum(rb) / n
+        ma, mb = sum(ra) / n, sum(rb) / n
         va = sum((x - ma) ** 2 for x in ra)
         vb = sum((x - mb) ** 2 for x in rb)
         if va <= 0 or vb <= 0:
@@ -127,15 +114,8 @@ class ShadowTradingEngine:
         return cov / sqrt(va * vb)
 
     def _evaluate_pairs(self, histories: dict[str, list[PriceBar]]) -> list[ShadowPairDecision]:
-        """Only evaluate pairs with a minimum historical relationship.
-
-        Raw ratio z-score alone is too permissive; a correlation screen prevents arbitrary
-        scanner neighbors from being treated as market-neutral pairs. Cointegration/hedge-ratio
-        research remains the next upgrade before any pair can become execution eligible.
-        """
         results: list[ShadowPairDecision] = []
-        considered = 0
-        relationship_eligible = 0
+        considered = relationship_eligible = 0
         for a, b in combinations(histories, 2):
             considered += 1
             corr = self._pair_correlation(histories[a], histories[b])
@@ -152,8 +132,6 @@ class ShadowTradingEngine:
                     "SHADOW PAIR | pair=%s/%s corr=%.2f strategy=%s z=%.2f score=%.2f action=%s reason=%s",
                     a, b, corr, self.pairs.name, signal.zscore, signal.score, action, signal.reason,
                 )
-        logger.info(
-            "SHADOW PAIR FUNNEL | combinations=%s relationship_eligible=%s",
-            considered, relationship_eligible,
-        )
+        logger.info("SHADOW PAIR FUNNEL | combinations=%s relationship_eligible=%s",
+                    considered, relationship_eligible)
         return results

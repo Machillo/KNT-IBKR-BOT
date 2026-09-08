@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from math import sqrt
 
 from market.history import PriceBar
-from strategies.momentum import MomentumStrategy, SignalSide
+from strategies.momentum import SignalSide
 
 
 @dataclass(frozen=True)
@@ -43,13 +43,13 @@ class BacktestEngine:
         self.risk_pct = risk_pct
         self.cost_bps = commission_bps + slippage_bps
 
-    def run(self, bars: list[PriceBar], strategy: MomentumStrategy) -> BacktestResult:
+    def run(self, bars: list[PriceBar], strategy) -> BacktestResult:
         equity = self.initial_equity
         peak = equity
         max_dd = 0.0
         trades: list[BacktestTrade] = []
         returns: list[float] = []
-        warmup = max(strategy.slow, strategy.atr_period + 1) + 1
+        warmup = int(getattr(strategy, "warmup", 60))
 
         position = None
         for i in range(warmup, len(bars)):
@@ -110,10 +110,10 @@ class BacktestEngine:
         pf = gains / loss_abs if loss_abs > 0 else (None if gains == 0 else float("inf"))
         sharpe = None
         if len(returns) > 1:
-            mean = sum(returns) / len(returns)
-            variance = sum((x - mean) ** 2 for x in returns) / (len(returns) - 1)
+            m = sum(returns) / len(returns)
+            variance = sum((x - m) ** 2 for x in returns) / (len(returns) - 1)
             if variance > 0:
-                sharpe = mean / sqrt(variance) * sqrt(len(returns))
+                sharpe = m / sqrt(variance) * sqrt(len(returns))
 
         return BacktestResult(
             self.initial_equity, equity,

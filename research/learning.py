@@ -60,6 +60,33 @@ class LearningEngine:
             return 0.40
         return 0.20
 
+    def _record(
+        self,
+        *,
+        symbol: str,
+        asset_class: str,
+        timeframe: str,
+        regime: str,
+        strategy: str,
+        assessment: LearningAssessment,
+    ) -> None:
+        recorder = getattr(self.store, "record_learning_assessment", None)
+        if recorder is None:
+            return
+        recorder(
+            symbol=symbol,
+            asset_class=asset_class,
+            timeframe=timeframe,
+            regime=regime,
+            strategy=strategy,
+            status=assessment.status.value,
+            confidence=assessment.confidence,
+            selector_bonus=assessment.selector_bonus,
+            freshness_factor=assessment.freshness_factor,
+            reason=assessment.reason,
+            evidence=assessment.evidence,
+        )
+
     def assess(
         self,
         *,
@@ -77,26 +104,25 @@ class LearningEngine:
             strategy=strategy,
         )
         if evidence is None:
-            return LearningAssessment(
+            assessment = LearningAssessment(
                 LearningStatus.UNKNOWN, 0.0, 0.0, None, "no_context_evidence", 1.0
             )
+            self._record(
+                symbol=symbol, asset_class=asset_class, timeframe=timeframe,
+                regime=regime, strategy=strategy, assessment=assessment,
+            )
+            return assessment
 
-        # Evidence quality grows with independent samples, trades and OOS coverage.
         sample_quality = min(1.0, evidence.samples / 6.0)
         trade_quality = min(1.0, evidence.trades / 120.0)
         oos_quality = min(1.0, evidence.oos_samples / 3.0)
         quality = 0.25 * sample_quality + 0.35 * trade_quality + 0.40 * oos_quality
 
-        # Recent validation matters more than stale research. The coordinator refreshes
-        # old contexts, while this decay prevents old evidence from retaining full power
-        # between refresh opportunities.
         freshness = self._freshness_factor(
             symbol=symbol, asset_class=asset_class, timeframe=timeframe
         )
         effective_quality = quality * freshness
 
-        # Convert the store's deliberately bounded [-20,+20] evidence score into
-        # directional conviction. Poor evidence is allowed to veto confidence.
         directional = max(-1.0, min(1.0, evidence.evidence_score / 20.0))
         confidence = max(0.0, min(100.0, 50.0 + directional * 40.0 * effective_quality))
         selector_bonus = max(-20.0, min(20.0, evidence.evidence_score * effective_quality))
@@ -118,7 +144,7 @@ class LearningEngine:
             status = LearningStatus.DEVELOPING
             reason = "evidence_still_developing"
 
-        return LearningAssessment(
+        assessment = LearningAssessment(
             status=status,
             confidence=round(confidence, 2),
             selector_bonus=round(selector_bonus, 2),
@@ -126,3 +152,8 @@ class LearningEngine:
             reason=reason,
             freshness_factor=round(freshness, 2),
         )
+        self._record(
+            symbol=symbol, asset_class=asset_class, timeframe=timeframe,
+            regime=regime, strategy=strategy, assessment=assessment,
+        )
+        return assessment

@@ -67,7 +67,9 @@ class RuntimeConfig:
     require_flat_startup: bool = field(default_factory=lambda: env_bool("REQUIRE_FLAT_STARTUP", True))
     run_broker_smoke_tests: bool = field(default_factory=lambda: env_bool("RUN_BROKER_SMOKE_TESTS", False))
     run_discovery_probe: bool = field(default_factory=lambda: env_bool("RUN_DISCOVERY_PROBE", False))
-    discovery_rows: int = field(default_factory=lambda: int(getenv("DISCOVERY_ROWS", "10")))
+    discovery_rows: int = field(default_factory=lambda: int(getenv("DISCOVERY_ROWS", "25")))
+    universe_quote_budget: int = field(default_factory=lambda: int(getenv("UNIVERSE_QUOTE_BUDGET", "40")))
+    shadow_max_candidates: int = field(default_factory=lambda: int(getenv("SHADOW_MAX_CANDIDATES", "12")))
     autonomous_trading_enabled: bool = field(default_factory=lambda: env_bool("AUTONOMOUS_TRADING_ENABLED", False))
     shadow_trading_enabled: bool = field(default_factory=lambda: env_bool("SHADOW_TRADING_ENABLED", True))
     shadow_interval_seconds: float = field(default_factory=lambda: float(getenv("SHADOW_INTERVAL_SECONDS", "900")))
@@ -77,6 +79,10 @@ class RuntimeConfig:
             raise ValueError("SUPERVISOR_POLL_SECONDS must be >= 1")
         if not 1 <= self.discovery_rows <= 50:
             raise ValueError("DISCOVERY_ROWS must be between 1 and 50")
+        if not 1 <= self.universe_quote_budget <= 200:
+            raise ValueError("UNIVERSE_QUOTE_BUDGET must be between 1 and 200")
+        if not 1 <= self.shadow_max_candidates <= self.universe_quote_budget:
+            raise ValueError("SHADOW_MAX_CANDIDATES must be >=1 and <= UNIVERSE_QUOTE_BUDGET")
         if self.shadow_interval_seconds < 60:
             raise ValueError("SHADOW_INTERVAL_SECONDS must be >= 60")
 

@@ -33,6 +33,7 @@ class MomentumStrategy:
         self.fast = fast
         self.slow = slow
         self.atr_period = atr_period
+        self.warmup = max(self.slow, self.atr_period + 1) + 1
 
     @staticmethod
     def _mean(values: list[float]) -> float:
@@ -50,7 +51,7 @@ class MomentumStrategy:
         return self._mean(trs) if trs else 0.0
 
     def evaluate(self, bars: list[PriceBar]) -> StrategySignal:
-        minimum = max(self.slow, self.atr_period + 1) + 1
+        minimum = self.warmup
         if len(bars) < minimum:
             return StrategySignal(SignalSide.FLAT, 0.0, None, None, None, "insufficient_history")
 

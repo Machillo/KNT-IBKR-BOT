@@ -28,20 +28,34 @@ class ShadowPairDecision:
 
 
 class ShadowTradingEngine:
-    """Evaluates discovered candidates with all strategy families; never sends an order."""
+    """Evaluates dynamic universe candidates with all strategy families; never sends an order."""
 
-    def __init__(self, ib, market_intelligence, minimum_signal_score: float = 55.0,
-                 max_candidates: int = 5) -> None:
+    def __init__(
+        self,
+        ib,
+        market_intelligence,
+        minimum_signal_score: float = 55.0,
+        max_candidates: int = 12,
+        quote_budget: int = 40,
+    ) -> None:
         self.intelligence = market_intelligence
         self.history = HistoricalDataService(ib)
         self.performance_store = StrategyPerformanceStore()
         self.selector = StrategySelector(minimum_signal_score, self.performance_store)
         self.pairs = PairsTradingStrategy()
         self.max_candidates = max_candidates
+        self.quote_budget = quote_budget
 
-    async def run_once(self, rows: int = 10) -> list[ShadowDecision]:
-        ranked = await self.intelligence.ranked_us_stocks(rows)
+    async def run_once(self, rows_per_scanner: int = 25) -> list[ShadowDecision]:
+        ranked = await self.intelligence.ranked_us_opportunity_universe(
+            rows_per_plan=rows_per_scanner,
+            quote_budget=self.quote_budget,
+        )
         candidates = [x for x in ranked if x.eligible][:self.max_candidates]
+        logger.info(
+            "SHADOW FUNNEL | ranked=%s eligible=%s deep_analysis=%s",
+            len(ranked), sum(1 for x in ranked if x.eligible), len(candidates),
+        )
         decisions: list[ShadowDecision] = []
         history_by_symbol: dict[str, list[PriceBar]] = {}
 

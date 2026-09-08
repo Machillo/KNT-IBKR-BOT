@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from backtest.engine import BacktestResult
-from research.performance import StrategyPerformanceStore
+from research.performance import PerformanceEvidence, StrategyPerformanceStore
 
 
 def _result(ret: float, dd: float, trades: int, pf: float, sharpe: float) -> BacktestResult:
@@ -41,3 +41,27 @@ def test_store_records_and_builds_oos_evidence(tmp_path: Path):
     assert evidence.trades == 80
     assert evidence.oos_samples == 1
     assert evidence.evidence_score > 0
+
+
+def test_store_persists_learning_assessment_history(tmp_path: Path):
+    store = StrategyPerformanceStore(tmp_path / "perf.db")
+    evidence = PerformanceEvidence(
+        samples=4, trades=90, mean_return_pct=5.0, mean_drawdown_pct=4.0,
+        mean_win_rate_pct=53.0, mean_profit_factor=1.3, mean_sharpe=0.8,
+        oos_samples=2, evidence_score=8.0,
+    )
+    store.record_learning_assessment(
+        symbol="NVDA", asset_class="STK", timeframe="1 hour", regime="TRENDING",
+        strategy="momentum_gap_v1", status="TRUSTED", confidence=64.0,
+        selector_bonus=7.0, freshness_factor=1.0,
+        reason="positive_validated_evidence", evidence=evidence,
+    )
+    history = store.learning_history(
+        symbol="NVDA", asset_class="STK", timeframe="1 hour", regime="TRENDING",
+        strategy="momentum_gap_v1",
+    )
+    assert len(history) == 1
+    assert history[0]["status"] == "TRUSTED"
+    assert history[0]["confidence"] == 64.0
+    assert history[0]["evidence_score"] == 8.0
+    assert history[0]["trades"] == 90

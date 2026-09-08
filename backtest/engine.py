@@ -33,15 +33,39 @@ class BacktestResult:
 
 
 class BacktestEngine:
-    """Long/short single-position simulator with stop/target and configurable costs."""
+    """Long/short single-position simulator with stop/target and configurable costs.
 
-    def __init__(self, initial_equity: float = 10_000.0, risk_pct: float = 0.01,
-                 commission_bps: float = 1.0, slippage_bps: float = 2.0) -> None:
+    Position size is bounded by both stop-risk and maximum notional exposure. This prevents
+    unrealistically tight stops from creating implicit leverage and contaminating research
+    evidence consumed by the Learning Engine.
+    """
+
+    def __init__(
+        self,
+        initial_equity: float = 10_000.0,
+        risk_pct: float = 0.01,
+        commission_bps: float = 1.0,
+        slippage_bps: float = 2.0,
+        max_position_pct: float = 0.25,
+    ) -> None:
         if initial_equity <= 0 or not 0 < risk_pct <= 0.10:
             raise ValueError("Invalid backtest capital/risk")
+        if not 0 < max_position_pct <= 1.0:
+            raise ValueError("Invalid max_position_pct")
         self.initial_equity = initial_equity
         self.risk_pct = risk_pct
+        self.max_position_pct = max_position_pct
         self.cost_bps = commission_bps + slippage_bps
+
+    def _position_qty(self, *, equity: float, entry: float, stop: float) -> float:
+        if equity <= 0 or entry <= 0:
+            return 0.0
+        per_unit_risk = abs(entry - stop)
+        if per_unit_risk <= 0:
+            return 0.0
+        qty_by_risk = (equity * self.risk_pct) / per_unit_risk
+        qty_by_notional = (equity * self.max_position_pct) / entry
+        return max(0.0, min(qty_by_risk, qty_by_notional))
 
     def run(self, bars: list[PriceBar], strategy) -> BacktestResult:
         equity = self.initial_equity
@@ -58,6 +82,7 @@ class BacktestEngine:
                 side, entry, stop, target, qty = position
                 exit_price = None
                 reason = ""
+                # Conservative same-bar assumption: stop wins if both stop and target are touched.
                 if side == SignalSide.LONG:
                     if bar.low <= stop:
                         exit_price, reason = stop, "stop"
@@ -84,9 +109,8 @@ class BacktestEngine:
             if position is None:
                 signal = strategy.evaluate(bars[:i + 1])
                 if signal.side != SignalSide.FLAT and signal.entry and signal.stop and signal.target:
-                    per_unit_risk = abs(signal.entry - signal.stop)
-                    if per_unit_risk > 0:
-                        qty = (equity * self.risk_pct) / per_unit_risk
+                    qty = self._position_qty(equity=equity, entry=signal.entry, stop=signal.stop)
+                    if qty > 0:
                         position = (signal.side, signal.entry, signal.stop, signal.target, qty)
 
         if position is not None and bars:

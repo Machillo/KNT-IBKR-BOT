@@ -40,7 +40,7 @@ class PerformanceEvidence:
 
 
 class StrategyPerformanceStore:
-    """SQLite-backed research memory for strategy performance."""
+    """SQLite-backed research memory for strategy performance and learning history."""
 
     def __init__(self, path: str | Path = "state/strategy_performance.db") -> None:
         self.path = Path(path)
@@ -93,6 +93,34 @@ class StrategyPerformanceStore:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS learning_assessments (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created_at TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    asset_class TEXT NOT NULL,
+                    timeframe TEXT NOT NULL,
+                    regime TEXT NOT NULL,
+                    strategy TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    confidence REAL NOT NULL,
+                    selector_bonus REAL NOT NULL,
+                    freshness_factor REAL NOT NULL,
+                    reason TEXT NOT NULL,
+                    evidence_score REAL,
+                    samples INTEGER,
+                    trades INTEGER,
+                    oos_samples INTEGER
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_learning_context
+                ON learning_assessments(symbol, asset_class, timeframe, regime, strategy, id)
+                """
+            )
 
     def clear_context(self, *, symbol: str, asset_class: str, timeframe: str) -> int:
         with self._connect() as conn:
@@ -121,6 +149,61 @@ class StrategyPerformanceStore:
                 "SELECT * FROM research_context WHERE symbol=? AND asset_class=? AND timeframe=?",
                 (symbol.upper(), asset_class.upper(), timeframe),
             ).fetchone()
+
+    def record_learning_assessment(
+        self,
+        *,
+        symbol: str,
+        asset_class: str,
+        timeframe: str,
+        regime: str,
+        strategy: str,
+        status: str,
+        confidence: float,
+        selector_bonus: float,
+        freshness_factor: float,
+        reason: str,
+        evidence: PerformanceEvidence | None,
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO learning_assessments (
+                    created_at, symbol, asset_class, timeframe, regime, strategy,
+                    status, confidence, selector_bonus, freshness_factor, reason,
+                    evidence_score, samples, trades, oos_samples
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    datetime.now(timezone.utc).isoformat(),
+                    symbol.upper(), asset_class.upper(), timeframe, regime, strategy,
+                    status, float(confidence), float(selector_bonus), float(freshness_factor), reason,
+                    None if evidence is None else float(evidence.evidence_score),
+                    None if evidence is None else int(evidence.samples),
+                    None if evidence is None else int(evidence.trades),
+                    None if evidence is None else int(evidence.oos_samples),
+                ),
+            )
+
+    def learning_history(
+        self,
+        *,
+        symbol: str,
+        asset_class: str,
+        timeframe: str,
+        regime: str,
+        strategy: str,
+        limit: int = 50,
+    ) -> list[sqlite3.Row]:
+        with self._connect() as conn:
+            return conn.execute(
+                """
+                SELECT * FROM learning_assessments
+                WHERE symbol=? AND asset_class=? AND timeframe=? AND regime=? AND strategy=?
+                ORDER BY id DESC LIMIT ?
+                """,
+                (symbol.upper(), asset_class.upper(), timeframe, regime, strategy, int(limit)),
+            ).fetchall()
 
     def record(self, item: PerformanceRecord) -> None:
         pf = item.profit_factor if item.profit_factor is None or isfinite(item.profit_factor) else None

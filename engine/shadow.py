@@ -8,6 +8,7 @@ from engine.strategy_selector import StrategySelection, StrategySelector
 from market.history import HistoricalDataService, PriceBar
 from research.coordinator import ContinuousResearchCoordinator
 from research.performance import StrategyPerformanceStore
+from research.scheduler import ContinuousResearchScheduler
 from strategies.library import PairSignal, PairsTradingStrategy
 from strategies.momentum import SignalSide
 from utils.logger import logger
@@ -40,6 +41,9 @@ class ShadowTradingEngine:
         self.performance_store = StrategyPerformanceStore()
         self.selector = StrategySelector(minimum_signal_score, self.performance_store)
         self.research = ContinuousResearchCoordinator(self.history, self.performance_store)
+        self.research_scheduler = ContinuousResearchScheduler(
+            self.research, self.performance_store, max_attempts_per_cycle=research_budget
+        )
         self.pairs = PairsTradingStrategy()
         self.max_candidates = max_candidates
         self.quote_budget = quote_budget
@@ -55,19 +59,10 @@ class ShadowTradingEngine:
         decisions: list[ShadowDecision] = []
         history_by_symbol: dict[str, list[PriceBar]] = {}
 
-        research_used = 0
+        await self.research_scheduler.run_cycle(candidates)
+
         for candidate in candidates:
             try:
-                if research_used < self.research_budget:
-                    research_result = await self.research.research_contract(candidate.contract)
-                    if research_result.status == "REFRESHED":
-                        research_used += 1
-                    logger.info(
-                        "LEARNING RESEARCH RESULT | symbol=%s status=%s bars=%s reason=%s budget=%s/%s",
-                        research_result.symbol, research_result.status, research_result.bars,
-                        research_result.reason, research_used, self.research_budget,
-                    )
-
                 bars = await self.history.bars(candidate.contract)
                 history_by_symbol[candidate.symbol] = bars
                 selection = self.selector.evaluate(

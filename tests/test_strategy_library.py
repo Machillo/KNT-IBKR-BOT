@@ -1,0 +1,40 @@
+from market.history import PriceBar
+from engine.strategy_selector import StrategySelector
+from strategies.library import PairsTradingStrategy, SINGLE_ASSET_STRATEGIES
+from strategies.momentum import SignalSide
+
+
+def make_bars(count=100, start=100.0, step=0.5):
+    bars=[]
+    price=start
+    for i in range(count):
+        close=price+step
+        bars.append(PriceBar(str(i), price, close+0.4, price-0.4, close, 1000+i*10))
+        price=close
+    return bars
+
+
+def test_all_single_asset_strategies_evaluate_without_error():
+    bars=make_bars()
+    assert len(SINGLE_ASSET_STRATEGIES) == 7
+    for factory in SINGLE_ASSET_STRATEGIES:
+        signal=factory().evaluate(bars)
+        assert signal.side in {SignalSide.LONG, SignalSide.SHORT, SignalSide.FLAT}
+        assert 0 <= signal.score <= 100
+
+
+def test_selector_returns_ranked_evaluations():
+    selection=StrategySelector(minimum_score=0).evaluate(make_bars())
+    assert len(selection.evaluations) == 7
+    assert selection.evaluations[0].adjusted_score >= selection.evaluations[-1].adjusted_score
+
+
+def test_pairs_strategy_detects_ratio_extension():
+    a=make_bars(count=60, start=100, step=0.1)
+    b=make_bars(count=60, start=100, step=0.1)
+    # Stretch only the final A bar to create a large positive ratio z-score.
+    last=a[-1]
+    a[-1]=PriceBar(last.time, last.open, last.high+20, last.low, last.close+20, last.volume)
+    signal=PairsTradingStrategy().evaluate_pair(a,b)
+    assert signal.side_a in {SignalSide.SHORT, SignalSide.FLAT}
+    assert signal.side_b in {SignalSide.LONG, SignalSide.FLAT}

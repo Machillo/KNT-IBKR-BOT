@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import sqlite3
-from typing import Iterable
 
 from backtest.engine import BacktestResult
 
@@ -41,9 +40,9 @@ class PerformanceEvidence:
 class StrategyPerformanceStore:
     """SQLite-backed research memory for strategy performance.
 
-    Records are intentionally contextual: symbol + asset class + timeframe + regime + strategy
-    + split (TRAIN/OOS). The selector consumes aggregate evidence but raw observations remain
-    auditable in SQLite.
+    Records are contextual: symbol + asset class + timeframe + regime + strategy + split.
+    Re-running research for the same symbol/asset/timeframe can replace that context so the
+    same historical sample is never counted twice.
     """
 
     def __init__(self, path: str | Path = "state/strategy_performance.db") -> None:
@@ -85,6 +84,14 @@ class StrategyPerformanceStore:
                 ON strategy_performance(symbol, asset_class, timeframe, regime, strategy, split)
                 """
             )
+
+    def clear_context(self, *, symbol: str, asset_class: str, timeframe: str) -> int:
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "DELETE FROM strategy_performance WHERE symbol=? AND asset_class=? AND timeframe=?",
+                (symbol.upper(), asset_class.upper(), timeframe),
+            )
+            return int(cursor.rowcount or 0)
 
     def record(self, item: PerformanceRecord) -> None:
         with self._connect() as conn:
@@ -136,8 +143,10 @@ class StrategyPerformanceStore:
 
         trades = sum(int(r["trades"]) for r in rows)
         weights = [max(1, int(r["trades"])) for r in rows]
-        total_w = sum(weights)
-        weighted = lambda key: sum(float(r[key]) * w for r, w in zip(rows, weights) if r[key] is not None) / max(1, sum(w for r, w in zip(rows, weights) if r[key] is not None))
+
+        def weighted(key: str) -> float:
+            usable = [(r, w) for r, w in zip(rows, weights) if r[key] is not None]
+            return sum(float(r[key]) * w for r, w in usable) / max(1, sum(w for _, w in usable))
 
         mean_return = weighted("total_return_pct")
         mean_dd = weighted("max_drawdown_pct")
@@ -146,7 +155,6 @@ class StrategyPerformanceStore:
         sharpe = weighted("sharpe") if any(r["sharpe"] is not None for r in rows) else None
         oos_samples = sum(1 for r in rows if str(r["split"]).upper() == "OOS")
 
-        # Conservative evidence score, centered on zero and capped. OOS and sample depth matter.
         score = 0.0
         score += max(-10.0, min(10.0, mean_return / 2.0))
         score += max(-8.0, min(8.0, ((pf or 1.0) - 1.0) * 10.0))

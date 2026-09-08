@@ -49,10 +49,19 @@ async def main() -> None:
             raise RuntimeError(f"Risk supervisor locked: {context.risk.lock_reason}")
 
         intelligence = MarketIntelligenceService(ib, market_data)
-        shadow = ShadowTradingEngine(ib, intelligence)
+        shadow = ShadowTradingEngine(
+            ib,
+            intelligence,
+            max_candidates=config.runtime.shadow_max_candidates,
+            quote_budget=config.runtime.universe_quote_budget,
+        )
         logger.info(
-            "PAPER ALPHA SHADOW running | account=%s interval=%ss rows=%s | NO STRATEGY ORDERS",
-            account.account, config.runtime.shadow_interval_seconds, config.runtime.discovery_rows,
+            "PAPER ALPHA SHADOW running | account=%s interval=%ss scanners=4 rows_per_scanner=%s quote_budget=%s deep_candidates=%s | NO STRATEGY ORDERS",
+            account.account,
+            config.runtime.shadow_interval_seconds,
+            config.runtime.discovery_rows,
+            config.runtime.universe_quote_budget,
+            config.runtime.shadow_max_candidates,
         )
         supervisor_task = asyncio.create_task(supervisor.run(stop))
         if config.runtime.shadow_trading_enabled:

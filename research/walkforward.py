@@ -17,7 +17,12 @@ class WalkForwardSummary:
 
 
 class WalkForwardResearch:
-    """Simple rolling train/OOS evaluator for strategy evidence generation."""
+    """Rolling train/OOS evaluator used to generate learning evidence.
+
+    Defaults deliberately leave enough bars in both TRAIN and OOS for strategies
+    with 50-60 bar warmups. This keeps the Learning Engine from treating tiny,
+    effectively untradeable test windows as meaningful evidence.
+    """
 
     def __init__(self, store: StrategyPerformanceStore, engine: BacktestEngine | None = None) -> None:
         self.store = store
@@ -32,11 +37,11 @@ class WalkForwardResearch:
         timeframe: str,
         bars: list[PriceBar],
         strategies: list[object],
-        train_bars: int = 120,
-        test_bars: int = 40,
-        step_bars: int = 40,
+        train_bars: int = 240,
+        test_bars: int = 80,
+        step_bars: int = 80,
     ) -> list[WalkForwardSummary]:
-        if train_bars < 40 or test_bars < 20 or step_bars < 1:
+        if train_bars < 120 or test_bars < 60 or step_bars < 1:
             raise ValueError("Invalid walk-forward window sizes")
         summaries: list[WalkForwardSummary] = []
         for strategy in strategies:

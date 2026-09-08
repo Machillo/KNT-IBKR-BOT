@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from itertools import combinations
+from math import sqrt
 
 from engine.strategy_selector import StrategySelection, StrategySelector
 from market.history import HistoricalDataService, PriceBar
@@ -101,9 +102,46 @@ class ShadowTradingEngine:
         self._evaluate_pairs(history_by_symbol)
         return decisions
 
+    @staticmethod
+    def _return_series(bars: list[PriceBar], lookback: int = 60) -> list[float]:
+        closes = [float(b.close) for b in bars[-(lookback + 1):] if float(b.close) > 0]
+        if len(closes) < lookback + 1:
+            return []
+        return [(closes[i] / closes[i - 1]) - 1.0 for i in range(1, len(closes))]
+
+    @classmethod
+    def _pair_correlation(cls, a: list[PriceBar], b: list[PriceBar]) -> float | None:
+        ra = cls._return_series(a)
+        rb = cls._return_series(b)
+        n = min(len(ra), len(rb))
+        if n < 40:
+            return None
+        ra, rb = ra[-n:], rb[-n:]
+        ma = sum(ra) / n
+        mb = sum(rb) / n
+        va = sum((x - ma) ** 2 for x in ra)
+        vb = sum((x - mb) ** 2 for x in rb)
+        if va <= 0 or vb <= 0:
+            return None
+        cov = sum((x - ma) * (y - mb) for x, y in zip(ra, rb))
+        return cov / sqrt(va * vb)
+
     def _evaluate_pairs(self, histories: dict[str, list[PriceBar]]) -> list[ShadowPairDecision]:
+        """Only evaluate pairs with a minimum historical relationship.
+
+        Raw ratio z-score alone is too permissive; a correlation screen prevents arbitrary
+        scanner neighbors from being treated as market-neutral pairs. Cointegration/hedge-ratio
+        research remains the next upgrade before any pair can become execution eligible.
+        """
         results: list[ShadowPairDecision] = []
+        considered = 0
+        relationship_eligible = 0
         for a, b in combinations(histories, 2):
+            considered += 1
+            corr = self._pair_correlation(histories[a], histories[b])
+            if corr is None or corr < 0.55:
+                continue
+            relationship_eligible += 1
             signal = self.pairs.evaluate_pair(histories[a], histories[b])
             action = "NO_TRADE"
             if signal.side_a != SignalSide.FLAT and signal.score >= 70:
@@ -111,7 +149,11 @@ class ShadowTradingEngine:
             results.append(ShadowPairDecision(a, b, signal, action))
             if action != "NO_TRADE":
                 logger.info(
-                    "SHADOW PAIR | pair=%s/%s strategy=%s z=%.2f score=%.2f action=%s reason=%s",
-                    a, b, self.pairs.name, signal.zscore, signal.score, action, signal.reason,
+                    "SHADOW PAIR | pair=%s/%s corr=%.2f strategy=%s z=%.2f score=%.2f action=%s reason=%s",
+                    a, b, corr, self.pairs.name, signal.zscore, signal.score, action, signal.reason,
                 )
+        logger.info(
+            "SHADOW PAIR FUNNEL | combinations=%s relationship_eligible=%s",
+            considered, relationship_eligible,
+        )
         return results

@@ -6,6 +6,7 @@ from math import sqrt
 
 from engine.strategy_selector import StrategySelection, StrategySelector
 from market.history import HistoricalDataService, PriceBar
+from research.coordinator import ContinuousResearchCoordinator
 from research.performance import StrategyPerformanceStore
 from strategies.library import PairSignal, PairsTradingStrategy
 from strategies.momentum import SignalSide
@@ -32,14 +33,17 @@ class ShadowTradingEngine:
     """Evaluates dynamic universe candidates with all strategy families; never sends an order."""
 
     def __init__(self, ib, market_intelligence, minimum_signal_score: float = 55.0,
-                 max_candidates: int = 12, quote_budget: int = 40) -> None:
+                 max_candidates: int = 12, quote_budget: int = 40,
+                 research_budget: int = 2) -> None:
         self.intelligence = market_intelligence
         self.history = HistoricalDataService(ib)
         self.performance_store = StrategyPerformanceStore()
         self.selector = StrategySelector(minimum_signal_score, self.performance_store)
+        self.research = ContinuousResearchCoordinator(self.history, self.performance_store)
         self.pairs = PairsTradingStrategy()
         self.max_candidates = max_candidates
         self.quote_budget = quote_budget
+        self.research_budget = max(0, min(research_budget, max_candidates))
 
     async def run_once(self, rows_per_scanner: int = 25) -> list[ShadowDecision]:
         ranked = await self.intelligence.ranked_us_opportunity_universe(
@@ -51,8 +55,19 @@ class ShadowTradingEngine:
         decisions: list[ShadowDecision] = []
         history_by_symbol: dict[str, list[PriceBar]] = {}
 
+        research_used = 0
         for candidate in candidates:
             try:
+                if research_used < self.research_budget:
+                    research_result = await self.research.research_contract(candidate.contract)
+                    if research_result.status == "REFRESHED":
+                        research_used += 1
+                    logger.info(
+                        "LEARNING RESEARCH RESULT | symbol=%s status=%s bars=%s reason=%s budget=%s/%s",
+                        research_result.symbol, research_result.status, research_result.bars,
+                        research_result.reason, research_used, self.research_budget,
+                    )
+
                 bars = await self.history.bars(candidate.contract)
                 history_by_symbol[candidate.symbol] = bars
                 selection = self.selector.evaluate(

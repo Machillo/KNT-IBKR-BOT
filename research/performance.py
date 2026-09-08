@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from math import isfinite
 from pathlib import Path
 import sqlite3
 
@@ -38,12 +40,7 @@ class PerformanceEvidence:
 
 
 class StrategyPerformanceStore:
-    """SQLite-backed research memory for strategy performance.
-
-    Records are contextual: symbol + asset class + timeframe + regime + strategy + split.
-    Re-running research for the same symbol/asset/timeframe can replace that context so the
-    same historical sample is never counted twice.
-    """
+    """SQLite-backed research memory for strategy performance."""
 
     def __init__(self, path: str | Path = "state/strategy_performance.db") -> None:
         self.path = Path(path)
@@ -84,6 +81,18 @@ class StrategyPerformanceStore:
                 ON strategy_performance(symbol, asset_class, timeframe, regime, strategy, split)
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS research_context (
+                    symbol TEXT NOT NULL,
+                    asset_class TEXT NOT NULL,
+                    timeframe TEXT NOT NULL,
+                    researched_at TEXT NOT NULL,
+                    bars INTEGER NOT NULL,
+                    PRIMARY KEY(symbol, asset_class, timeframe)
+                )
+                """
+            )
 
     def clear_context(self, *, symbol: str, asset_class: str, timeframe: str) -> int:
         with self._connect() as conn:
@@ -93,7 +102,29 @@ class StrategyPerformanceStore:
             )
             return int(cursor.rowcount or 0)
 
+    def mark_researched(self, *, symbol: str, asset_class: str, timeframe: str, bars: int) -> None:
+        researched_at = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO research_context(symbol, asset_class, timeframe, researched_at, bars)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(symbol, asset_class, timeframe)
+                DO UPDATE SET researched_at=excluded.researched_at, bars=excluded.bars
+                """,
+                (symbol.upper(), asset_class.upper(), timeframe, researched_at, int(bars)),
+            )
+
+    def research_status(self, *, symbol: str, asset_class: str, timeframe: str) -> sqlite3.Row | None:
+        with self._connect() as conn:
+            return conn.execute(
+                "SELECT * FROM research_context WHERE symbol=? AND asset_class=? AND timeframe=?",
+                (symbol.upper(), asset_class.upper(), timeframe),
+            ).fetchone()
+
     def record(self, item: PerformanceRecord) -> None:
+        pf = item.profit_factor if item.profit_factor is None or isfinite(item.profit_factor) else None
+        sharpe = item.sharpe if item.sharpe is None or isfinite(item.sharpe) else None
         with self._connect() as conn:
             conn.execute(
                 """
@@ -106,7 +137,7 @@ class StrategyPerformanceStore:
                     item.symbol.upper(), item.asset_class.upper(), item.timeframe,
                     item.regime, item.strategy, item.split.upper(), item.bars, item.trades,
                     item.total_return_pct, item.max_drawdown_pct, item.win_rate_pct,
-                    item.profit_factor, item.sharpe,
+                    pf, sharpe,
                 ),
             )
 
@@ -196,7 +227,7 @@ class StrategyPerformanceStore:
             FROM strategy_performance
             {where}
             GROUP BY symbol, asset_class, timeframe, regime, strategy
-            ORDER BY avg_return DESC
+            ORDER BY (AVG(total_return_pct) - 0.5 * AVG(max_drawdown_pct)) DESC
             LIMIT ?
         """
         params.append(limit)

@@ -16,14 +16,32 @@ class MarketIntelligenceService:
         self.ranker = LiquidityRanker()
 
     @staticmethod
-    def _discovery_shortlist(candidates, quote_budget: int):
+    def _is_common_stock_candidate(candidate) -> bool:
+        """Reject obvious non-common-stock wrappers surfaced by STK scanners.
+
+        IBKR may encode rights/preferred/share-class style instruments as STK and expose
+        localSymbols containing spaces. Until we have explicit asset subtype handling,
+        fail closed for those candidates so they cannot contaminate stock strategy research.
+        """
+        symbol = (candidate.symbol or "").strip()
+        if not symbol:
+            return False
+        if candidate.sec_type != "STK":
+            return False
+        if " " in symbol:
+            return False
+        return True
+
+    @classmethod
+    def _discovery_shortlist(cls, candidates, quote_budget: int):
         """Prioritize broker rank before spending market-data requests.
 
-        This is not a ticker filter: every cycle starts from fresh scanner output. The budget
-        exists to respect IBKR pacing/data-line constraints while scanning a much broader
-        opportunity surface than the deep-analysis set.
+        This is not a ticker whitelist: every cycle starts from fresh scanner output. The
+        budget exists to respect IBKR pacing/data-line constraints. Obvious rights/preferred
+        wrappers are excluded until their own subtype-aware models exist.
         """
-        ordered = sorted(candidates, key=lambda c: (c.rank, c.symbol))
+        filtered = [c for c in candidates if cls._is_common_stock_candidate(c)]
+        ordered = sorted(filtered, key=lambda c: (c.rank, c.symbol))
         return ordered[:quote_budget]
 
     async def ranked_candidates(
@@ -35,9 +53,10 @@ class MarketIntelligenceService:
         self.market_data.configure()
         candidates = await self.discovery.scan_many(plans, rows_per_plan)
         shortlist = self._discovery_shortlist(candidates, quote_budget)
+        rejected = len(candidates) - len([c for c in candidates if self._is_common_stock_candidate(c)])
         logger.info(
-            "UNIVERSE FUNNEL | scanners=%s discovered_unique=%s quote_budget=%s quoted=%s",
-            len(plans), len(candidates), quote_budget, len(shortlist),
+            "UNIVERSE FUNNEL | scanners=%s discovered_unique=%s subtype_rejected=%s quote_budget=%s quoted=%s",
+            len(plans), len(candidates), rejected, quote_budget, len(shortlist),
         )
 
         evaluations: list[RankedCandidate] = []

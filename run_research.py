@@ -31,6 +31,10 @@ async def run(symbol: str, duration: str, bar_size: str) -> None:
             symbol=symbol.upper(), asset_class="STK", timeframe=bar_size,
             bars=bars, strategies=strategies,
         )
+        if any(item.oos_windows > 0 for item in summaries):
+            store.mark_researched(
+                symbol=symbol.upper(), asset_class="STK", timeframe=bar_size, bars=len(bars)
+            )
         print(f"research symbol={symbol.upper()} bars={len(bars)} timeframe={bar_size} replaced_records={removed}")
         for item in summaries:
             print(f"{item.strategy:28} train={item.train_windows:3d} oos={item.oos_windows:3d}")

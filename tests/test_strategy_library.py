@@ -14,8 +14,8 @@ def make_bars(count=100, start=100.0, step=0.5):
     return bars
 
 
-def test_seven_single_asset_plus_pairs_make_eight_families():
-    assert len(SINGLE_ASSET_STRATEGIES) == 7
+def test_ten_single_asset_plus_pairs_make_eleven_families():
+    assert len(SINGLE_ASSET_STRATEGIES) == 10
     assert PairsTradingStrategy.name == "pairs_market_neutral_v1"
 
 
@@ -27,9 +27,16 @@ def test_all_single_asset_strategies_evaluate_without_error():
         assert 0 <= signal.score <= 100
 
 
+def test_alex_ruiz_inspired_families_are_registered():
+    names = {factory.name for factory in SINGLE_ASSET_STRATEGIES}
+    assert "alex_fib_trend_pullback_v1" in names
+    assert "alex_liquidity_fib_reversal_v1" in names
+    assert "alex_structure_sr_confluence_v1" in names
+
+
 def test_selector_returns_ranked_evaluations():
     selection=StrategySelector(minimum_score=0).evaluate(make_bars())
-    assert len(selection.evaluations) == 7
+    assert len(selection.evaluations) == 10
     assert selection.evaluations[0].adjusted_score >= selection.evaluations[-1].adjusted_score
 
 

@@ -179,7 +179,7 @@ async def run(
                 f"OOS_DD={row.oos_max_drawdown_pct:6.2f}% candidate={row.candidate_5pct}"
             )
         print(
-            f"\nSUMMARY | rows={len(all_rows)} local_backtests≈{local_backtests} "
+            f"\nSUMMARY | rows={len(all_rows)} local_backtests~{local_backtests} "
             f"historical_requests={historical_requests} target={target_pct:.2f}%/month "
             f"qualified_candidates={len(candidates)}"
         )

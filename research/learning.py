@@ -39,7 +39,8 @@ class LearningEngine:
 
     def __init__(self, store: StrategyPerformanceStore) -> None:
         self.store = store
-        self.context_promotions = ContextPromotionStore(store.path)
+        store_path = getattr(store, "path", None)
+        self.context_promotions = ContextPromotionStore(store_path) if store_path is not None else None
 
     def _freshness_factor(self, *, symbol: str, asset_class: str, timeframe: str) -> float:
         status_reader = getattr(self.store, "research_status", None)
@@ -120,13 +121,15 @@ class LearningEngine:
         universe: str | None = None,
         horizon: str | None = None,
     ) -> LearningAssessment:
-        context_row = self.context_promotions.latest_best(
-            strategy=strategy,
-            symbol=symbol,
-            universe=universe,
-            timeframe=timeframe,
-            horizon=horizon,
-        )
+        context_row = None
+        if self.context_promotions is not None:
+            context_row = self.context_promotions.latest_best(
+                strategy=strategy,
+                symbol=symbol,
+                universe=universe,
+                timeframe=timeframe,
+                horizon=horizon,
+            )
         contextual_bonus, contextual_status, contextual_scope, contextual_context = self._context_adjustment(context_row)
 
         evidence = self.store.evidence(

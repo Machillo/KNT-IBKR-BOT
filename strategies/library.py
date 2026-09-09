@@ -4,6 +4,11 @@ from dataclasses import dataclass
 from math import sqrt
 
 from market.history import PriceBar
+from strategies.alex_ruiz import (
+    FibonacciTrendPullbackStrategy,
+    LiquidityFibReversalStrategy,
+    StructureSRConfluenceStrategy,
+)
 from strategies.momentum import SignalSide, StrategySignal
 
 
@@ -139,7 +144,6 @@ class SmartMoneyLiquidityStrategy:
         if len(bars)<self.warmup: return flat("insufficient_history")
         prev=bars[-21:-1]; cur=bars[-1]; price=cur.close; a=atr(bars)
         prior_hi=max(x.high for x in prev); prior_lo=min(x.low for x in prev)
-        # Quantified liquidity sweep: pierce an extreme, then close back inside the prior range.
         if cur.low < prior_lo and cur.close > prior_lo:
             reclaim=(cur.close-prior_lo)/max(a,.01)
             return directional(SignalSide.LONG, 60+min(40,reclaim*25), price, a, "sellside_liquidity_sweep_reclaim")
@@ -183,4 +187,7 @@ SINGLE_ASSET_STRATEGIES = (
     MeanReversionStrategy,
     RangeTradingStrategy,
     SmartMoneyLiquidityStrategy,
+    FibonacciTrendPullbackStrategy,
+    LiquidityFibReversalStrategy,
+    StructureSRConfluenceStrategy,
 )

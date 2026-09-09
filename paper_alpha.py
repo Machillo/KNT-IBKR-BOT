@@ -8,6 +8,7 @@ from core.connection import IBKRConnection
 from core.market_data import MarketDataService
 from engine.shadow import ShadowTradingEngine
 from engine.supervisor import PaperSupervisor
+from execution.paper import PaperExecutionEngine
 from market.intelligence import MarketIntelligenceService
 from portfolio.history import PortfolioHistoryStore
 from portfolio.state import PortfolioStateService
@@ -61,8 +62,6 @@ async def shadow_loop(
 
 async def main() -> None:
     config.validate()
-    if config.runtime.autonomous_trading_enabled:
-        raise RuntimeError("paper_alpha.py is shadow-only; set AUTONOMOUS_TRADING_ENABLED=false")
 
     connection = IBKRConnection(config.ibkr)
     stop = asyncio.Event()
@@ -84,22 +83,29 @@ async def main() -> None:
             raise RuntimeError(f"Risk supervisor locked: {context.risk.lock_reason}")
 
         intelligence = MarketIntelligenceService(ib, market_data)
+        paper_executor = PaperExecutionEngine(
+            ib,
+            account=account.account,
+            enabled=config.runtime.autonomous_trading_enabled,
+        )
         shadow = ShadowTradingEngine(
             ib,
             intelligence,
             max_candidates=config.runtime.shadow_max_candidates,
             quote_budget=config.runtime.universe_quote_budget,
             risk_manager=context.risk,
+            paper_executor=paper_executor,
         )
         portfolio_state = PortfolioStateService(ib)
         portfolio_history = PortfolioHistoryStore()
         logger.info(
-            "PAPER ALPHA SHADOW running | account=%s interval=%ss scanners=4 rows_per_scanner=%s quote_budget=%s deep_candidates=%s | HARD RISK + PORTFOLIO GATES ACTIVE | NO STRATEGY ORDERS",
+            "PAPER ALPHA running | account=%s interval=%ss scanners=4 rows_per_scanner=%s quote_budget=%s deep_candidates=%s | HARD RISK + PORTFOLIO GATES ACTIVE | autonomous_paper=%s",
             account.account,
             config.runtime.shadow_interval_seconds,
             config.runtime.discovery_rows,
             config.runtime.universe_quote_budget,
             config.runtime.shadow_max_candidates,
+            config.runtime.autonomous_trading_enabled,
         )
         supervisor_task = asyncio.create_task(supervisor.run(stop))
         if config.runtime.shadow_trading_enabled:

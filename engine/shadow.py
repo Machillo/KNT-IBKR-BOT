@@ -6,6 +6,7 @@ from math import sqrt
 
 from engine.strategy_selector import StrategySelection, StrategySelector
 from market.history import HistoricalDataService, PriceBar
+from market.session import USStockSessionPolicy
 from research.coordinator import ContinuousResearchCoordinator
 from research.performance import StrategyPerformanceStore
 from research.scheduler import ContinuousResearchScheduler
@@ -44,6 +45,7 @@ class ShadowTradingEngine:
         self.research_scheduler = ContinuousResearchScheduler(
             self.research, self.performance_store, max_attempts_per_cycle=research_budget
         )
+        self.session_policy = USStockSessionPolicy()
         self.pairs = PairsTradingStrategy()
         self.max_candidates = max_candidates
         self.quote_budget = quote_budget
@@ -59,7 +61,12 @@ class ShadowTradingEngine:
         decisions: list[ShadowDecision] = []
         history_by_symbol: dict[str, list[PriceBar]] = {}
 
-        await self.research_scheduler.run_cycle(candidates)
+        session = self.session_policy.state()
+        logger.info(
+            "MARKET SESSION | asset=US_STOCKS session=%s market_open=%s local=%s",
+            session.session, session.market_open, session.local_time.isoformat(),
+        )
+        await self.research_scheduler.run_cycle(candidates, market_open=session.market_open)
 
         for candidate in candidates:
             try:

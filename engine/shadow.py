@@ -4,14 +4,18 @@ from dataclasses import dataclass
 from itertools import combinations
 from math import sqrt
 
+from ib_async import Contract
+
 from engine.strategy_selector import StrategySelection, StrategySelector
 from market.history import HistoricalDataService, PriceBar
 from market.session import USStockSessionPolicy
+from portfolio.admission import PortfolioAdmissionCoordinator, RiskDecisionStore
 from portfolio.allocation import PortfolioAllocator
-from portfolio.brain import PortfolioBrain, PortfolioSnapshot
+from portfolio.state import PortfolioState
 from research.coordinator import ContinuousResearchCoordinator
 from research.performance import StrategyPerformanceStore
 from research.scheduler import ContinuousResearchScheduler
+from risk.risk_manager import RiskManager
 from strategies.library import PairSignal, PairsTradingStrategy
 from strategies.momentum import SignalSide
 from utils.logger import logger
@@ -37,9 +41,17 @@ class ShadowPairDecision:
 class ShadowTradingEngine:
     """Evaluates dynamic universe candidates with all strategy families; never sends an order."""
 
-    def __init__(self, ib, market_intelligence, minimum_signal_score: float = 55.0,
-                 max_candidates: int = 12, quote_budget: int = 40,
-                 research_budget: int = 2) -> None:
+    def __init__(
+        self,
+        ib,
+        market_intelligence,
+        minimum_signal_score: float = 55.0,
+        max_candidates: int = 12,
+        quote_budget: int = 40,
+        research_budget: int = 2,
+        risk_manager: RiskManager | None = None,
+    ) -> None:
+        self.ib = ib
         self.intelligence = market_intelligence
         self.history = HistoricalDataService(ib)
         self.performance_store = StrategyPerformanceStore()
@@ -49,18 +61,84 @@ class ShadowTradingEngine:
             self.research, self.performance_store, max_attempts_per_cycle=research_budget
         )
         self.session_policy = USStockSessionPolicy()
-        self.portfolio_brain = PortfolioBrain(max_single_position_pct=0.10)
-        self.allocator = PortfolioAllocator(risk_pct=0.01, max_position_pct=0.10)
+        self.risk_manager = risk_manager
+        risk_pct = 0.01 if risk_manager is None else min(0.01, risk_manager.settings.max_trade_risk_pct)
+        max_position_pct = 0.10 if risk_manager is None else risk_manager.settings.max_position_pct
+        self.allocator = PortfolioAllocator(risk_pct=risk_pct, max_position_pct=max_position_pct)
+        self.admission = None if risk_manager is None else PortfolioAdmissionCoordinator(risk_manager)
+        self.risk_decisions = RiskDecisionStore()
         self.pairs = PairsTradingStrategy()
         self.max_candidates = max_candidates
         self.quote_budget = quote_budget
         self.research_budget = max(0, min(research_budget, max_candidates))
 
+    @staticmethod
+    def _return_series(bars: list[PriceBar], lookback: int = 60) -> tuple[float, ...]:
+        closes = [float(b.close) for b in bars[-(lookback + 1):] if float(b.close) > 0]
+        if len(closes) < lookback + 1:
+            return ()
+        return tuple((closes[i] / closes[i - 1]) - 1.0 for i in range(1, len(closes)))
+
+    @staticmethod
+    def _series_correlation(a: tuple[float, ...], b: tuple[float, ...]) -> float | None:
+        n = min(len(a), len(b))
+        if n < 40:
+            return None
+        x, y = a[-n:], b[-n:]
+        mx, my = sum(x) / n, sum(y) / n
+        vx = sum((v - mx) ** 2 for v in x)
+        vy = sum((v - my) ** 2 for v in y)
+        if vx <= 0 or vy <= 0:
+            return None
+        cov = sum((i - mx) * (j - my) for i, j in zip(x, y))
+        return cov / sqrt(vx * vy)
+
+    async def _position_returns(self, state: PortfolioState) -> dict[str, tuple[float, ...]]:
+        returns: dict[str, tuple[float, ...]] = {}
+        for position in state.positions:
+            if position.con_id <= 0:
+                continue
+            try:
+                contract = Contract(
+                    conId=position.con_id,
+                    symbol=position.symbol,
+                    secType=position.asset_class,
+                    exchange=position.exchange or "SMART",
+                    currency=position.currency or "USD",
+                )
+                bars = await self.history.bars(contract)
+                series = self._return_series(bars)
+                if series:
+                    returns[position.symbol] = series
+            except Exception as exc:
+                logger.warning("POSITION HISTORY unavailable | symbol=%s error=%s", position.symbol, exc)
+        return returns
+
+    @classmethod
+    def _portfolio_correlation(
+        cls,
+        candidate_returns: tuple[float, ...],
+        state: PortfolioState,
+        position_returns: dict[str, tuple[float, ...]],
+    ) -> float | None:
+        if not state.positions:
+            return 0.0
+        correlations: list[float] = []
+        for position in state.positions:
+            series = position_returns.get(position.symbol)
+            if not series:
+                return None
+            corr = cls._series_correlation(candidate_returns, series)
+            if corr is None:
+                return None
+            correlations.append(abs(corr))
+        return max(correlations) if correlations else None
+
     async def run_once(
         self,
         rows_per_scanner: int = 25,
         *,
-        portfolio_snapshot: PortfolioSnapshot | None = None,
+        portfolio_state: PortfolioState | None = None,
     ) -> list[ShadowDecision]:
         ranked = await self.intelligence.ranked_us_opportunity_universe(
             rows_per_plan=rows_per_scanner, quote_budget=self.quote_budget,
@@ -70,6 +148,7 @@ class ShadowTradingEngine:
                     len(ranked), sum(1 for x in ranked if x.eligible), len(candidates))
         decisions: list[ShadowDecision] = []
         history_by_symbol: dict[str, list[PriceBar]] = {}
+        position_returns = {} if portfolio_state is None else await self._position_returns(portfolio_state)
 
         session = self.session_policy.state()
         logger.info(
@@ -82,6 +161,7 @@ class ShadowTradingEngine:
             try:
                 bars = await self.history.bars(candidate.contract)
                 history_by_symbol[candidate.symbol] = bars
+                candidate_returns = self._return_series(bars)
                 asset_class = candidate.contract.secType or "STK"
                 selection = self.selector.evaluate(
                     bars, symbol=candidate.symbol,
@@ -91,16 +171,19 @@ class ShadowTradingEngine:
                 action = "NO_TRADE" if selected is None else f"WOULD_{selected.signal.side.value}"
                 portfolio_reason = None
 
-                if selected is not None and portfolio_snapshot is not None:
+                if selected is not None and portfolio_state is not None:
                     signal = selected.signal
                     if signal.entry is None or signal.stop is None:
                         action = "NO_TRADE"
                         portfolio_reason = "invalid_signal_prices"
+                    elif self.admission is None:
+                        action = "PORTFOLIO_REJECTED"
+                        portfolio_reason = "hard_risk_manager_unavailable"
                     else:
                         stress = max(1.0, float(selection.regime.volatility_stress or 1.0))
                         volatility_multiplier = max(0.25, min(1.0, 1.0 / stress))
                         proposal = self.allocator.propose(
-                            portfolio_snapshot,
+                            portfolio_state.snapshot,
                             symbol=candidate.symbol,
                             asset_class=asset_class,
                             entry_price=float(signal.entry),
@@ -111,18 +194,44 @@ class ShadowTradingEngine:
                             action = "PORTFOLIO_REJECTED"
                             portfolio_reason = "allocation_unavailable"
                         else:
-                            portfolio_decision = self.portfolio_brain.evaluate(
-                                portfolio_snapshot, proposal.as_opportunity()
+                            corr = self._portfolio_correlation(candidate_returns, portfolio_state, position_returns)
+                            admission = self.admission.evaluate(
+                                state=portfolio_state,
+                                symbol=candidate.symbol,
+                                asset_class=asset_class,
+                                side=selected.signal.side.value,
+                                quantity=proposal.quantity,
+                                entry_price=proposal.entry_price,
+                                stop_price=proposal.stop_price,
+                                proposed_notional=proposal.proposed_notional,
+                                proposed_risk=proposal.proposed_risk,
+                                candidate_returns=candidate_returns,
+                                position_returns=position_returns,
+                                correlation_to_portfolio=corr,
                             )
-                            portfolio_reason = portfolio_decision.reason
-                            if not portfolio_decision.approved:
+                            portfolio_reason = admission.reason
+                            if not admission.approved:
                                 action = "PORTFOLIO_REJECTED"
+                            self.risk_decisions.record(
+                                symbol=candidate.symbol,
+                                side=selected.signal.side.value,
+                                strategy=selected.strategy,
+                                approved=admission.approved,
+                                reason=admission.reason,
+                                quantity=proposal.quantity,
+                                entry_price=proposal.entry_price,
+                                stop_price=proposal.stop_price,
+                                proposed_notional=proposal.proposed_notional,
+                                proposed_risk=proposal.proposed_risk,
+                                correlation=corr,
+                                regime=selection.regime.regime.value,
+                            )
                             logger.info(
-                                "PORTFOLIO ADMISSION | symbol=%s qty=%.4f notional=%.2f risk=%.2f vol_mult=%.2f approved=%s reason=%s projected_exposure=%.2f%%",
+                                "PORTFOLIO ADMISSION | symbol=%s qty=%.4f notional=%.2f risk=%.2f vol_mult=%.2f corr=%s approved=%s reason=%s",
                                 candidate.symbol, proposal.quantity, proposal.proposed_notional,
                                 proposal.proposed_risk, proposal.volatility_multiplier,
-                                portfolio_decision.approved, portfolio_decision.reason,
-                                portfolio_decision.projected_exposure_pct * 100,
+                                "NA" if corr is None else f"{corr:.2f}", admission.approved,
+                                admission.reason,
                             )
 
                 decisions.append(ShadowDecision(
@@ -143,44 +252,15 @@ class ShadowTradingEngine:
                     None if selected is None else selected.strategy, top, selection.reason,
                     portfolio_reason,
                 )
-                if selected is not None:
-                    s = selected.signal
-                    learning = selected.learning
-                    logger.info(
-                        "SHADOW SETUP | symbol=%s strategy=%s side=%s score=%.2f learning=%s confidence=%.2f evidence_bonus=%+.2f entry=%s stop=%s target=%s signal_reason=%s",
-                        candidate.symbol, selected.strategy, s.side.value, selected.adjusted_score,
-                        "UNKNOWN" if learning is None else learning.status.value,
-                        0.0 if learning is None else learning.confidence,
-                        selected.evidence_bonus, s.entry, s.stop, s.target, s.reason,
-                    )
             except Exception as exc:
                 logger.warning("SHADOW candidate skipped | symbol=%s error=%s", candidate.symbol, exc)
 
         self._evaluate_pairs(history_by_symbol)
         return decisions
 
-    @staticmethod
-    def _return_series(bars: list[PriceBar], lookback: int = 60) -> list[float]:
-        closes = [float(b.close) for b in bars[-(lookback + 1):] if float(b.close) > 0]
-        if len(closes) < lookback + 1:
-            return []
-        return [(closes[i] / closes[i - 1]) - 1.0 for i in range(1, len(closes))]
-
     @classmethod
     def _pair_correlation(cls, a: list[PriceBar], b: list[PriceBar]) -> float | None:
-        ra = cls._return_series(a)
-        rb = cls._return_series(b)
-        n = min(len(ra), len(rb))
-        if n < 40:
-            return None
-        ra, rb = ra[-n:], rb[-n:]
-        ma, mb = sum(ra) / n, sum(rb) / n
-        va = sum((x - ma) ** 2 for x in ra)
-        vb = sum((x - mb) ** 2 for x in rb)
-        if va <= 0 or vb <= 0:
-            return None
-        cov = sum((x - ma) * (y - mb) for x, y in zip(ra, rb))
-        return cov / sqrt(va * vb)
+        return cls._series_correlation(cls._return_series(a), cls._return_series(b))
 
     def _evaluate_pairs(self, histories: dict[str, list[PriceBar]]) -> list[ShadowPairDecision]:
         results: list[ShadowPairDecision] = []
@@ -196,11 +276,6 @@ class ShadowTradingEngine:
             if signal.side_a != SignalSide.FLAT and signal.score >= 70:
                 action = f"WOULD_PAIR_{signal.side_a.value}_{a}_{signal.side_b.value}_{b}"
             results.append(ShadowPairDecision(a, b, signal, action))
-            if action != "NO_TRADE":
-                logger.info(
-                    "SHADOW PAIR | pair=%s/%s corr=%.2f strategy=%s z=%.2f score=%.2f action=%s reason=%s",
-                    a, b, corr, self.pairs.name, signal.zscore, signal.score, action, signal.reason,
-                )
         logger.info("SHADOW PAIR FUNNEL | combinations=%s relationship_eligible=%s",
                     considered, relationship_eligible)
         return results

@@ -85,10 +85,16 @@ async def main() -> None:
                 "Smoke-test parent unexpectedly filled. Stop here and inspect the Paper account before rerunning."
             )
 
-        for trade in reversed(trades):
+        # Cancel the parent first. IBKR normally propagates cancellation to attached children.
+        # Only cancel residual child legs if they remain active after propagation completes.
+        if not parent.isDone():
+            orders.cancel(parent)
+        await asyncio.sleep(1.0)
+        for trade in (take_profit, stop_loss):
             if not trade.isDone():
                 orders.cancel(trade)
-        await asyncio.sleep(2.0)
+                await asyncio.sleep(0.25)
+        await asyncio.sleep(1.0)
 
         logger.info(
             "PAPER BRACKET CLEANUP | parent=%s:%s tp=%s:%s stop=%s:%s",

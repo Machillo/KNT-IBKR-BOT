@@ -7,6 +7,8 @@ from math import sqrt
 from engine.strategy_selector import StrategySelection, StrategySelector
 from market.history import HistoricalDataService, PriceBar
 from market.session import USStockSessionPolicy
+from portfolio.allocation import PortfolioAllocator
+from portfolio.brain import PortfolioBrain, PortfolioSnapshot
 from research.coordinator import ContinuousResearchCoordinator
 from research.performance import StrategyPerformanceStore
 from research.scheduler import ContinuousResearchScheduler
@@ -21,6 +23,7 @@ class ShadowDecision:
     liquidity_score: float
     selection: StrategySelection
     action: str
+    portfolio_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -46,12 +49,19 @@ class ShadowTradingEngine:
             self.research, self.performance_store, max_attempts_per_cycle=research_budget
         )
         self.session_policy = USStockSessionPolicy()
+        self.portfolio_brain = PortfolioBrain(max_single_position_pct=0.10)
+        self.allocator = PortfolioAllocator(risk_pct=0.01, max_position_pct=0.10)
         self.pairs = PairsTradingStrategy()
         self.max_candidates = max_candidates
         self.quote_budget = quote_budget
         self.research_budget = max(0, min(research_budget, max_candidates))
 
-    async def run_once(self, rows_per_scanner: int = 25) -> list[ShadowDecision]:
+    async def run_once(
+        self,
+        rows_per_scanner: int = 25,
+        *,
+        portfolio_snapshot: PortfolioSnapshot | None = None,
+    ) -> list[ShadowDecision]:
         ranked = await self.intelligence.ranked_us_opportunity_universe(
             rows_per_plan=rows_per_scanner, quote_budget=self.quote_budget,
         )
@@ -72,13 +82,49 @@ class ShadowTradingEngine:
             try:
                 bars = await self.history.bars(candidate.contract)
                 history_by_symbol[candidate.symbol] = bars
+                asset_class = candidate.contract.secType or "STK"
                 selection = self.selector.evaluate(
                     bars, symbol=candidate.symbol,
-                    asset_class=candidate.contract.secType or "STK", timeframe="1 hour",
+                    asset_class=asset_class, timeframe="1 hour",
                 )
                 selected = selection.selected
                 action = "NO_TRADE" if selected is None else f"WOULD_{selected.signal.side.value}"
-                decisions.append(ShadowDecision(candidate.symbol, candidate.score, selection, action))
+                portfolio_reason = None
+
+                if selected is not None and portfolio_snapshot is not None:
+                    signal = selected.signal
+                    if signal.entry is None or signal.stop is None:
+                        action = "NO_TRADE"
+                        portfolio_reason = "invalid_signal_prices"
+                    else:
+                        proposal = self.allocator.propose(
+                            portfolio_snapshot,
+                            symbol=candidate.symbol,
+                            asset_class=asset_class,
+                            entry_price=float(signal.entry),
+                            stop_price=float(signal.stop),
+                        )
+                        if proposal is None:
+                            action = "PORTFOLIO_REJECTED"
+                            portfolio_reason = "allocation_unavailable"
+                        else:
+                            portfolio_decision = self.portfolio_brain.evaluate(
+                                portfolio_snapshot, proposal.as_opportunity()
+                            )
+                            portfolio_reason = portfolio_decision.reason
+                            if not portfolio_decision.approved:
+                                action = "PORTFOLIO_REJECTED"
+                            logger.info(
+                                "PORTFOLIO ADMISSION | symbol=%s qty=%.4f notional=%.2f risk=%.2f approved=%s reason=%s projected_exposure=%.2f%%",
+                                candidate.symbol, proposal.quantity, proposal.proposed_notional,
+                                proposal.proposed_risk, portfolio_decision.approved,
+                                portfolio_decision.reason,
+                                portfolio_decision.projected_exposure_pct * 100,
+                            )
+
+                decisions.append(ShadowDecision(
+                    candidate.symbol, candidate.score, selection, action, portfolio_reason
+                ))
                 top = []
                 for item in selection.evaluations[:3]:
                     learning = item.learning
@@ -87,9 +133,10 @@ class ShadowTradingEngine:
                         f"{item.strategy}:{item.signal.side.value}:{item.adjusted_score:.1f}:learn={learned}:bonus={item.evidence_bonus:+.1f}"
                     )
                 logger.info(
-                    "SHADOW DECISION | symbol=%s liquidity=%.2f regime=%s action=%s selected=%s top=%s reason=%s",
+                    "SHADOW DECISION | symbol=%s liquidity=%.2f regime=%s action=%s selected=%s top=%s reason=%s portfolio_reason=%s",
                     candidate.symbol, candidate.score, selection.regime.regime.value, action,
                     None if selected is None else selected.strategy, top, selection.reason,
+                    portfolio_reason,
                 )
                 if selected is not None:
                     s = selected.signal

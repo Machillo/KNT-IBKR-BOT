@@ -1,12 +1,12 @@
 from __future__ import annotations
 
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-import csv
 import sqlite3
 
-from backtest.analysis import analyze_contextual_validation_csv
+from backtest.analysis import ContextRobustness, analyze_contexts
 
 
 @dataclass(frozen=True)
@@ -123,6 +123,13 @@ class ContextPromotionStore:
         return None
 
 
+def _group_contexts(rows: list[ContextRobustness]) -> dict[str, list[ContextRobustness]]:
+    grouped: dict[str, list[ContextRobustness]] = defaultdict(list)
+    for row in rows:
+        grouped[row.context_type].append(row)
+    return dict(grouped)
+
+
 def import_validation_promotions(
     report_path: str | Path = "reports/backtests/ALL_RESULTS.csv",
     *,
@@ -131,7 +138,7 @@ def import_validation_promotions(
     path = Path(report_path)
     if not path.exists():
         raise FileNotFoundError(path)
-    contexts = analyze_contextual_validation_csv(path)
+    contexts = _group_contexts(analyze_contexts(path))
     store = ContextPromotionStore(db_path)
     count = 0
     for scope, rows in contexts.items():

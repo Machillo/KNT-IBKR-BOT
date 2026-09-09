@@ -14,6 +14,7 @@ class AllocationProposal:
     stop_price: float
     proposed_notional: float
     proposed_risk: float
+    volatility_multiplier: float = 1.0
 
     def as_opportunity(self, correlation_to_portfolio: float = 0.0) -> PortfolioOpportunity:
         return PortfolioOpportunity(
@@ -26,11 +27,7 @@ class AllocationProposal:
 
 
 class PortfolioAllocator:
-    """Bounded sizing proposal for portfolio admission.
-
-    The allocator can only size within caller-provided risk/notional caps. It has no
-    broker access and cannot place orders or change hard risk settings.
-    """
+    """ATR/stop-distance sizing bounded by hard risk and notional caps."""
 
     def __init__(self, *, risk_pct: float = 0.01, max_position_pct: float = 0.10) -> None:
         if not 0 < risk_pct <= 1:
@@ -48,6 +45,7 @@ class PortfolioAllocator:
         asset_class: str,
         entry_price: float,
         stop_price: float,
+        volatility_multiplier: float = 1.0,
     ) -> AllocationProposal | None:
         if snapshot.trading_locked or snapshot.net_liquidation <= 0:
             return None
@@ -57,8 +55,10 @@ class PortfolioAllocator:
         if per_unit_risk <= 0:
             return None
 
+        # Higher volatility can only reduce size; it can never grant more risk.
+        vol_mult = max(0.10, min(float(volatility_multiplier), 1.0))
         risk_budget = min(
-            snapshot.net_liquidation * self.risk_pct,
+            snapshot.net_liquidation * self.risk_pct * vol_mult,
             snapshot.remaining_daily_loss_budget,
         )
         notional_budget = snapshot.net_liquidation * self.max_position_pct
@@ -81,4 +81,5 @@ class PortfolioAllocator:
             stop_price=stop_price,
             proposed_notional=entry_price * quantity,
             proposed_risk=per_unit_risk * quantity,
+            volatility_multiplier=vol_mult,
         )

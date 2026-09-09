@@ -9,12 +9,44 @@ from core.market_data import MarketDataService
 from engine.shadow import ShadowTradingEngine
 from engine.supervisor import PaperSupervisor
 from market.intelligence import MarketIntelligenceService
+from portfolio.history import PortfolioHistoryStore
+from portfolio.state import PortfolioStateService
 from utils.logger import logger
 
 
-async def shadow_loop(engine: ShadowTradingEngine, stop: asyncio.Event) -> None:
+async def shadow_loop(
+    engine: ShadowTradingEngine,
+    supervisor: PaperSupervisor,
+    portfolio_state: PortfolioStateService,
+    portfolio_history: PortfolioHistoryStore,
+    stop: asyncio.Event,
+) -> None:
     while not stop.is_set():
         try:
+            if supervisor.context is None:
+                raise RuntimeError("Supervisor context unavailable")
+            account = await supervisor.accounts.snapshot(supervisor.context.account, log=False)
+            state = portfolio_state.build(
+                account,
+                starting_equity=supervisor.context.starting_equity,
+                daily_loss_limit_pct=supervisor.context.risk.settings.max_daily_loss_pct,
+                trading_locked=supervisor.context.risk.trading_locked,
+            )
+            portfolio_history.record(account=account.account, state=state)
+            logger.info(
+                "PORTFOLIO SNAPSHOT | account=%s net_liq=%.2f cash=%.2f committed=%.2f pending=%.2f exposure=%.2f%% daily_loss_used=%.2f/%.2f locked=%s positions=%s orders=%s",
+                account.account,
+                state.snapshot.net_liquidation,
+                state.snapshot.cash,
+                state.snapshot.committed_notional,
+                state.snapshot.pending_order_notional,
+                state.snapshot.gross_exposure_pct * 100,
+                state.snapshot.daily_loss_used,
+                state.snapshot.daily_loss_limit,
+                state.snapshot.trading_locked,
+                len(state.positions),
+                len(state.pending_orders),
+            )
             await engine.run_once(config.runtime.discovery_rows)
         except Exception as exc:
             logger.exception("SHADOW CYCLE failed | error=%s", exc)
@@ -55,6 +87,8 @@ async def main() -> None:
             max_candidates=config.runtime.shadow_max_candidates,
             quote_budget=config.runtime.universe_quote_budget,
         )
+        portfolio_state = PortfolioStateService(ib)
+        portfolio_history = PortfolioHistoryStore()
         logger.info(
             "PAPER ALPHA SHADOW running | account=%s interval=%ss scanners=4 rows_per_scanner=%s quote_budget=%s deep_candidates=%s | NO STRATEGY ORDERS",
             account.account,
@@ -65,7 +99,9 @@ async def main() -> None:
         )
         supervisor_task = asyncio.create_task(supervisor.run(stop))
         if config.runtime.shadow_trading_enabled:
-            shadow_task = asyncio.create_task(shadow_loop(shadow, stop))
+            shadow_task = asyncio.create_task(
+                shadow_loop(shadow, supervisor, portfolio_state, portfolio_history, stop)
+            )
         await stop.wait()
     finally:
         stop.set()

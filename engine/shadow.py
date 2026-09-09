@@ -223,7 +223,7 @@ class ShadowTradingEngine:
                                         action = "PAPER_REJECTED"
                                         portfolio_reason = "invalid_target_price"
                                     else:
-                                        result = self.paper_executor.submit(
+                                        result = await self.paper_executor.submit(
                                             candidate.contract,
                                             PaperExecutionRequest(
                                                 symbol=candidate.symbol,
@@ -260,48 +260,46 @@ class ShadowTradingEngine:
                                 admission.reason, action,
                             )
 
-                decisions.append(ShadowDecision(
-                    candidate.symbol, candidate.score, selection, action, portfolio_reason
-                ))
-                top = []
-                for item in selection.evaluations[:3]:
-                    learning = item.learning
-                    learned = "UNKNOWN" if learning is None else f"{learning.status.value}:{learning.confidence:.0f}%"
-                    top.append(
-                        f"{item.strategy}:{item.signal.side.value}:{item.adjusted_score:.1f}:learn={learned}:bonus={item.evidence_bonus:+.1f}"
+                decisions.append(
+                    ShadowDecision(
+                        symbol=candidate.symbol,
+                        liquidity_score=candidate.score,
+                        selection=selection,
+                        action=action,
+                        portfolio_reason=portfolio_reason,
                     )
+                )
                 logger.info(
                     "SHADOW DECISION | symbol=%s liquidity=%.2f regime=%s adx=%.1f ema_slope=%.2f%% vol_stress=%.2f action=%s selected=%s top=%s reason=%s portfolio_reason=%s",
-                    candidate.symbol, candidate.score, selection.regime.regime.value,
-                    selection.regime.adx, selection.regime.ema_slope_pct,
-                    selection.regime.volatility_stress, action,
-                    None if selected is None else selected.strategy, top, selection.reason,
+                    candidate.symbol,
+                    candidate.score,
+                    selection.regime.regime.value,
+                    selection.regime.adx,
+                    selection.regime.ema200_slope * 100,
+                    selection.regime.volatility_stress,
+                    action,
+                    None if selected is None else selected.strategy,
+                    [
+                        f"{x.strategy}:{x.signal.side.value}:{x.adjusted_score:.1f}:learn={x.learning.status.value}:{x.learning.confidence:.0%}:bonus={x.learning.bonus:+.1f}"
+                        for x in selection.ranked[:3]
+                    ],
+                    selection.reason,
                     portfolio_reason,
                 )
             except Exception as exc:
-                logger.warning("SHADOW candidate skipped | symbol=%s error=%s", candidate.symbol, exc)
+                logger.exception("SHADOW candidate failed | symbol=%s error=%s", candidate.symbol, exc)
 
-        self._evaluate_pairs(history_by_symbol)
+        pair_candidates = [x for x in candidates if x.symbol in history_by_symbol]
+        pair_decisions: list[ShadowPairDecision] = []
+        for a, b in combinations(pair_candidates, 2):
+            signal = self.pairs.evaluate(history_by_symbol[a.symbol], history_by_symbol[b.symbol])
+            if signal.relationship_eligible:
+                pair_decisions.append(
+                    ShadowPairDecision(a.symbol, b.symbol, signal, signal.side.value)
+                )
+        logger.info(
+            "SHADOW PAIR FUNNEL | combinations=%s relationship_eligible=%s",
+            len(pair_candidates) * (len(pair_candidates) - 1) // 2,
+            len(pair_decisions),
+        )
         return decisions
-
-    @classmethod
-    def _pair_correlation(cls, a: list[PriceBar], b: list[PriceBar]) -> float | None:
-        return cls._series_correlation(cls._return_series(a), cls._return_series(b))
-
-    def _evaluate_pairs(self, histories: dict[str, list[PriceBar]]) -> list[ShadowPairDecision]:
-        results: list[ShadowPairDecision] = []
-        considered = relationship_eligible = 0
-        for a, b in combinations(histories, 2):
-            considered += 1
-            corr = self._pair_correlation(histories[a], histories[b])
-            if corr is None or corr < 0.55:
-                continue
-            relationship_eligible += 1
-            signal = self.pairs.evaluate_pair(histories[a], histories[b])
-            action = "NO_TRADE"
-            if signal.side_a != SignalSide.FLAT and signal.score >= 70:
-                action = f"WOULD_PAIR_{signal.side_a.value}_{a}_{signal.side_b.value}_{b}"
-            results.append(ShadowPairDecision(a, b, signal, action))
-        logger.info("SHADOW PAIR FUNNEL | combinations=%s relationship_eligible=%s",
-                    considered, relationship_eligible)
-        return results

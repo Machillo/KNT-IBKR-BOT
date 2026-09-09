@@ -42,8 +42,9 @@ async def main() -> None:
         contract = qualified[0]
 
         market_data = MarketDataService(ib, config.market_data)
-        ticker = await market_data.snapshot(contract)
-        market_price = float(ticker.marketPrice() or 0.0)
+        market_data.configure()
+        snapshot = await market_data.snapshot_contract(contract, symbol=symbol, timeout=8.0)
+        market_price = float(snapshot.market_price or snapshot.last or snapshot.bid or snapshot.ask or 0.0)
         if market_price <= 0:
             raise RuntimeError(f"No usable Paper/delayed market price for {symbol}")
 

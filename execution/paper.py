@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
@@ -56,7 +57,14 @@ class TradeJournalStore:
                 """
             )
 
-    def record(self, request: PaperExecutionRequest, *, status: str, reason: str, parent_order_id: int | None = None) -> int:
+    def record(
+        self,
+        request: PaperExecutionRequest,
+        *,
+        status: str,
+        reason: str,
+        parent_order_id: int | None = None,
+    ) -> int:
         with sqlite3.connect(self.path) as conn:
             cur = conn.execute(
                 """
@@ -87,6 +95,7 @@ class PaperExecutionEngine:
         paper_authorized: bool = False,
         risk_manager=None,
         journal: TradeJournalStore | None = None,
+        acceptance_delay_seconds: float = 0.35,
     ) -> None:
         self.ib = ib
         self.account = account
@@ -95,6 +104,7 @@ class PaperExecutionEngine:
         self.risk_manager = risk_manager
         self.orders = OrderManager(ib, account=account)
         self.journal = journal or TradeJournalStore()
+        self.acceptance_delay_seconds = max(0.0, float(acceptance_delay_seconds))
 
     @staticmethod
     def _normalize_stock_price(value: float) -> float:
@@ -138,7 +148,35 @@ class PaperExecutionEngine:
                 return True
         return False
 
-    def submit(self, contract, request: PaperExecutionRequest) -> PaperExecutionResult:
+    @staticmethod
+    def _trade_error(trade) -> tuple[bool, str | None]:
+        status = str(getattr(getattr(trade, "orderStatus", None), "status", "") or "")
+        if status in {"Cancelled", "ApiCancelled", "Inactive"}:
+            return True, f"order_status_{status.lower()}"
+        for entry in list(getattr(trade, "log", ()) or ()):
+            error_code = int(getattr(entry, "errorCode", 0) or 0)
+            if error_code:
+                return True, f"broker_error_{error_code}"
+        return False, None
+
+    def _cancel_remaining(self, trades) -> None:
+        for trade in reversed(tuple(trades)):
+            try:
+                if not trade.isDone():
+                    self.orders.cancel(trade)
+            except Exception:
+                pass
+
+    def _flatten_parent_fill(self, contract, parent_trade) -> float:
+        filled = float(getattr(parent_trade.orderStatus, "filled", 0.0) or 0.0)
+        if filled <= 0:
+            return 0.0
+        parent_action = str(getattr(parent_trade.order, "action", "") or "").upper()
+        flatten_action = "SELL" if parent_action == "BUY" else "BUY"
+        self.orders.market(contract, flatten_action, filled)
+        return filled
+
+    async def submit(self, contract, request: PaperExecutionRequest) -> PaperExecutionResult:
         if not self.enabled:
             self.journal.record(request, status="BLOCKED", reason="autonomous_paper_disabled")
             return PaperExecutionResult(False, "autonomous_paper_disabled")
@@ -177,5 +215,35 @@ class PaperExecutionEngine:
             adaptive_parent=True,
         )
         parent_id = int(trades[0].order.orderId)
-        self.journal.record(normalized, status="SUBMITTED", reason="bracket_submitted", parent_order_id=parent_id)
-        return PaperExecutionResult(True, "bracket_submitted", parent_id)
+        self.journal.record(normalized, status="PENDING", reason="bracket_sent", parent_order_id=parent_id)
+
+        if self.acceptance_delay_seconds:
+            await asyncio.sleep(self.acceptance_delay_seconds)
+
+        failures = [self._trade_error(trade) for trade in trades]
+        rejected = [reason for failed, reason in failures if failed]
+        if rejected:
+            self._cancel_remaining(trades)
+            flattened = self._flatten_parent_fill(contract, trades[0])
+            reason = rejected[0] or "bracket_leg_rejected"
+            if flattened > 0:
+                reason = f"{reason}_flatten_requested"
+            self.journal.record(normalized, status="FAILED", reason=reason, parent_order_id=parent_id)
+            return PaperExecutionResult(False, reason, parent_id)
+
+        accepted_statuses = {"PendingSubmit", "PreSubmitted", "Submitted", "Filled"}
+        statuses = {
+            str(getattr(getattr(trade, "orderStatus", None), "status", "") or "")
+            for trade in trades
+        }
+        if not statuses or any(status not in accepted_statuses for status in statuses):
+            self._cancel_remaining(trades)
+            flattened = self._flatten_parent_fill(contract, trades[0])
+            reason = "bracket_acceptance_unconfirmed"
+            if flattened > 0:
+                reason += "_flatten_requested"
+            self.journal.record(normalized, status="FAILED", reason=reason, parent_order_id=parent_id)
+            return PaperExecutionResult(False, reason, parent_id)
+
+        self.journal.record(normalized, status="SUBMITTED", reason="bracket_confirmed", parent_order_id=parent_id)
+        return PaperExecutionResult(True, "bracket_confirmed", parent_id)

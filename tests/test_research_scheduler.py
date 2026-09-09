@@ -74,6 +74,34 @@ def test_scheduler_prioritizes_stale_research_and_respects_budget(tmp_path: Path
     assert coordinator.calls == ["NEW"]
 
 
+def test_scheduler_prevents_starvation_of_very_stale_research(tmp_path: Path):
+    store = StrategyPerformanceStore(tmp_path / "perf.db")
+    coordinator = FakeCoordinator(store, freshness_hours=24)
+    now = datetime.now(timezone.utc)
+    set_research_time(store, "STARVED", now - timedelta(days=10))
+
+    scheduler = ContinuousResearchScheduler(
+        coordinator,
+        store,
+        max_attempts_per_cycle=1,
+        starvation_after_freshness_windows=4,
+        starvation_priority_boost=600,
+    )
+    ranked = scheduler.rank([
+        candidate("NEW", 100),
+        candidate("STARVED", 5),
+    ])
+
+    assert ranked[0].symbol == "STARVED"
+    assert ranked[0].reason == "starved_stale_research"
+    result = asyncio.run(scheduler.run_cycle([
+        candidate("NEW", 100),
+        candidate("STARVED", 5),
+    ]))
+    assert result.attempted == 1
+    assert coordinator.calls == ["STARVED"]
+
+
 def test_scheduler_persists_failure_backoff_and_skips_retry(tmp_path: Path):
     store = StrategyPerformanceStore(tmp_path / "perf.db")
     failed = ResearchCoordinatorResult("BAD", "SKIPPED", 12, "insufficient_history")

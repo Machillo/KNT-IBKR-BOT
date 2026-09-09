@@ -10,6 +10,7 @@ from engine.shadow import ShadowTradingEngine
 from engine.supervisor import PaperSupervisor
 from execution.paper import PaperExecutionEngine
 from market.intelligence import MarketIntelligenceService
+from market.session import USStockSessionPolicy
 from portfolio.history import PortfolioHistoryStore
 from portfolio.state import PortfolioStateService
 from utils.logger import logger
@@ -92,6 +93,7 @@ async def main() -> None:
                 and not config.ibkr.allow_live_trading
             ),
             risk_manager=context.risk,
+            session_policy=USStockSessionPolicy(),
         )
         shadow = ShadowTradingEngine(
             ib,

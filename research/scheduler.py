@@ -110,15 +110,6 @@ class ContinuousResearchScheduler:
                 result = await self.coordinator.research_contract(item.contract)
             except Exception as exc:
                 reason = f"exception:{type(exc).__name__}"
-                self.state.record_failure(
-                    symbol=item.symbol,
-                    asset_class=item.asset_class,
-                    timeframe=self.coordinator.timeframe,
-                    status="ERROR",
-                    reason=reason,
-                    base_backoff_minutes=self.base_backoff_minutes,
-                    max_backoff_hours=self.max_backoff_hours,
-                )
                 result = ResearchCoordinatorResult(item.symbol, "ERROR", 0, reason)
                 logger.warning("RESEARCH SCHEDULER ERROR | symbol=%s error=%s", item.symbol, exc)
 

@@ -24,6 +24,16 @@ class FakeTrade:
         return False
 
 
+class FakeBracketOrder:
+    def __init__(self, parent, take_profit, stop_loss):
+        self.parent = parent
+        self.takeProfit = take_profit
+        self.stopLoss = stop_loss
+
+    def __iter__(self):
+        return iter((self.parent, self.takeProfit, self.stopLoss))
+
+
 class FakeIB:
     def __init__(self, *, positions=(), trades=()):
         self._positions = positions
@@ -42,7 +52,7 @@ class FakeIB:
         parent = SimpleNamespace(orderId=101, account="", algoStrategy="", algoParams=[], transmit=False)
         tp = SimpleNamespace(orderId=102, account="", transmit=False)
         sl = SimpleNamespace(orderId=103, account="", transmit=True)
-        return [parent, tp, sl]
+        return FakeBracketOrder(parent, tp, sl)
 
     def placeOrder(self, contract, order):
         trade = FakeTrade(getattr(contract, "symbol", "AAPL"), getattr(order, "account", ""), order=order)

@@ -87,6 +87,11 @@ async def main() -> None:
             ib,
             account=account.account,
             enabled=config.runtime.autonomous_trading_enabled,
+            paper_authorized=(
+                config.ibkr.port in config.ibkr.paper_ports
+                and not config.ibkr.allow_live_trading
+            ),
+            risk_manager=context.risk,
         )
         shadow = ShadowTradingEngine(
             ib,

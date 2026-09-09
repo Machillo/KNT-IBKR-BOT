@@ -13,6 +13,9 @@ class PositionExposure:
     quantity: float
     market_price: float
     notional: float
+    con_id: int = 0
+    exchange: str = ""
+    currency: str = ""
 
 
 @dataclass(frozen=True)
@@ -58,12 +61,16 @@ class PortfolioStateService:
             market_price = float(getattr(item, "marketPrice", 0.0) or 0.0)
             market_value = float(getattr(item, "marketValue", 0.0) or 0.0)
             notional = abs(market_value) if market_value else abs(quantity * market_price)
+            contract = item.contract
             results.append(PositionExposure(
-                symbol=self._contract_symbol(item.contract),
-                asset_class=self._asset_class(item.contract),
+                symbol=self._contract_symbol(contract),
+                asset_class=self._asset_class(contract),
                 quantity=quantity,
                 market_price=market_price,
                 notional=max(0.0, notional),
+                con_id=int(getattr(contract, "conId", 0) or 0),
+                exchange=str(getattr(contract, "exchange", "") or getattr(contract, "primaryExchange", "") or ""),
+                currency=str(getattr(contract, "currency", "") or ""),
             ))
         return tuple(results)
 

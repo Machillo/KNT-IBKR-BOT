@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from research.coordinator import ContinuousResearchCoordinator, ResearchCoordinatorResult
+from research.cycle_metrics import ResearchCycleMetricsStore
 from research.performance import StrategyPerformanceStore
 from research.scheduler_state import ResearchSchedulerStateStore
 from utils.logger import logger
@@ -26,6 +27,7 @@ class ResearchCycleResult:
     refreshed: int
     skipped: int
     results: tuple[ResearchCoordinatorResult, ...]
+    mode: str = "OPEN"
 
 
 class ContinuousResearchScheduler:
@@ -43,15 +45,22 @@ class ContinuousResearchScheduler:
         store: StrategyPerformanceStore,
         *,
         max_attempts_per_cycle: int = 2,
+        closed_market_attempts_per_cycle: int | None = None,
         base_backoff_minutes: int = 30,
         max_backoff_hours: int = 24,
     ) -> None:
         self.coordinator = coordinator
         self.store = store
         self.max_attempts_per_cycle = max(0, int(max_attempts_per_cycle))
+        default_closed = max(self.max_attempts_per_cycle, 4)
+        self.closed_market_attempts_per_cycle = max(
+            self.max_attempts_per_cycle,
+            int(default_closed if closed_market_attempts_per_cycle is None else closed_market_attempts_per_cycle),
+        )
         self.base_backoff_minutes = max(1, int(base_backoff_minutes))
         self.max_backoff_hours = max(1, int(max_backoff_hours))
         self.state = ResearchSchedulerStateStore(store.path)
+        self.metrics = ResearchCycleMetricsStore(store.path)
 
     def _priority(self, candidate) -> ResearchCandidate:
         symbol = str(getattr(candidate, "symbol", "") or getattr(candidate.contract, "symbol", "") or "").upper()
@@ -94,13 +103,15 @@ class ContinuousResearchScheduler:
         ranked.sort(key=lambda item: item.priority, reverse=True)
         return ranked
 
-    async def run_cycle(self, candidates: list[object]) -> ResearchCycleResult:
+    async def run_cycle(self, candidates: list[object], *, market_open: bool = True) -> ResearchCycleResult:
+        mode = "OPEN" if market_open else "CLOSED"
+        budget = self.max_attempts_per_cycle if market_open else self.closed_market_attempts_per_cycle
         ranked = self.rank(candidates)
         attempted = refreshed = skipped = 0
         results: list[ResearchCoordinatorResult] = []
 
         for item in ranked:
-            if attempted >= self.max_attempts_per_cycle:
+            if attempted >= budget:
                 break
             if item.reason in {"research_fresh", "research_backoff"}:
                 continue
@@ -136,16 +147,24 @@ class ContinuousResearchScheduler:
                     )
 
             logger.info(
-                "RESEARCH SCHEDULER | symbol=%s priority=%.2f reason=%s status=%s bars=%s cycle=%s/%s",
-                item.symbol, item.priority, item.reason, result.status, result.bars,
-                attempted, self.max_attempts_per_cycle,
+                "RESEARCH SCHEDULER | mode=%s symbol=%s priority=%.2f reason=%s status=%s bars=%s cycle=%s/%s",
+                mode, item.symbol, item.priority, item.reason, result.status, result.bars,
+                attempted, budget,
             )
 
+        self.metrics.record(
+            mode=mode,
+            considered=len(ranked),
+            attempted=attempted,
+            refreshed=refreshed,
+            skipped=skipped,
+            budget=budget,
+        )
         logger.info(
-            "RESEARCH SCHEDULER CYCLE | considered=%s attempted=%s refreshed=%s skipped=%s budget=%s",
-            len(ranked), attempted, refreshed, skipped, self.max_attempts_per_cycle,
+            "RESEARCH SCHEDULER CYCLE | mode=%s considered=%s attempted=%s refreshed=%s skipped=%s budget=%s",
+            mode, len(ranked), attempted, refreshed, skipped, budget,
         )
         return ResearchCycleResult(
             considered=len(ranked), attempted=attempted, refreshed=refreshed,
-            skipped=skipped, results=tuple(results),
+            skipped=skipped, results=tuple(results), mode=mode,
         )

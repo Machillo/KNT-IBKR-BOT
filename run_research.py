@@ -24,18 +24,34 @@ async def run(symbol: str, duration: str, bar_size: str) -> None:
             raise RuntimeError(f"Could not qualify {symbol}")
         bars = await HistoricalDataService(ib).bars(qualified[0], duration=duration, bar_size=bar_size)
         store = StrategyPerformanceStore()
-        removed = store.clear_context(symbol=symbol.upper(), asset_class="STK", timeframe=bar_size)
+        dataset_start = None if not bars else str(bars[0].time)
+        dataset_end = None if not bars else str(bars[-1].time)
+        run_id = store.begin_research_run(
+            symbol=symbol.upper(), asset_class="STK", timeframe=bar_size,
+            bars=len(bars), dataset_start=dataset_start, dataset_end=dataset_end,
+            source="RESEARCH", strategy_version="v1",
+        )
         research = WalkForwardResearch(store, BacktestEngine())
         strategies = [MomentumStrategy(), *[factory() for factory in SINGLE_ASSET_STRATEGIES]]
-        summaries = research.evaluate(
-            symbol=symbol.upper(), asset_class="STK", timeframe=bar_size,
-            bars=bars, strategies=strategies,
-        )
-        if any(item.oos_windows > 0 for item in summaries):
-            store.mark_researched(
-                symbol=symbol.upper(), asset_class="STK", timeframe=bar_size, bars=len(bars)
+        try:
+            summaries = research.evaluate(
+                symbol=symbol.upper(), asset_class="STK", timeframe=bar_size,
+                bars=bars, strategies=strategies, run_id=run_id,
+                source="RESEARCH", strategy_version="v1",
             )
-        print(f"research symbol={symbol.upper()} bars={len(bars)} timeframe={bar_size} replaced_records={removed}")
+            if any(item.oos_windows > 0 for item in summaries):
+                store.finish_research_run(run_id, status="COMPLETED")
+                store.mark_researched(
+                    symbol=symbol.upper(), asset_class="STK", timeframe=bar_size,
+                    bars=len(bars), run_id=run_id,
+                )
+            else:
+                store.finish_research_run(run_id, status="FAILED", notes="no_oos_windows")
+        except Exception as exc:
+            store.finish_research_run(run_id, status="FAILED", notes=str(exc)[:500])
+            raise
+
+        print(f"research symbol={symbol.upper()} bars={len(bars)} timeframe={bar_size} run_id={run_id}")
         for item in summaries:
             print(f"{item.strategy:28} train={item.train_windows:3d} oos={item.oos_windows:3d}")
         print("\nleaderboard")
@@ -52,7 +68,7 @@ async def run(symbol: str, duration: str, bar_size: str) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Build KNT walk-forward strategy evidence")
+    parser = argparse.ArgumentParser(description="Build KNT append-only walk-forward evidence")
     parser.add_argument("symbol")
     parser.add_argument("--duration", default="365 D")
     parser.add_argument("--bar-size", default="1 hour")

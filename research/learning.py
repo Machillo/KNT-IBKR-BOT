@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 
+from research.context_promotions import ContextPromotionStore
 from research.performance import PerformanceEvidence, StrategyPerformanceStore
 
 
@@ -22,19 +23,23 @@ class LearningAssessment:
     evidence: PerformanceEvidence | None
     reason: str
     freshness_factor: float = 1.0
+    contextual_bonus: float = 0.0
+    contextual_status: str | None = None
+    contextual_scope: str | None = None
+    contextual_context: str | None = None
 
 
 class LearningEngine:
     """Turns accumulated research evidence into bounded strategy confidence.
 
-    The engine may change strategy confidence, but it has no authority over broker
-    permissions, kill switches, daily-loss limits, or absolute portfolio-risk limits.
-    Research evidence also loses influence as it ages so stale backtests cannot keep
-    a strategy permanently trusted or avoided without fresh validation.
+    Exact symbol/regime research remains the primary evidence source. Contextual
+    backtest promotions may only add a bounded secondary adjustment and can never
+    change broker permissions, kill switches, daily-loss limits, or hard risk caps.
     """
 
     def __init__(self, store: StrategyPerformanceStore) -> None:
         self.store = store
+        self.context_promotions = ContextPromotionStore(store.path)
 
     def _freshness_factor(self, *, symbol: str, asset_class: str, timeframe: str) -> float:
         status_reader = getattr(self.store, "research_status", None)
@@ -59,6 +64,23 @@ class LearningEngine:
         if age_hours <= 720.0:
             return 0.40
         return 0.20
+
+    @staticmethod
+    def _context_adjustment(row) -> tuple[float, str | None, str | None, str | None]:
+        if row is None:
+            return 0.0, None, None, None
+        status = str(row["status"]).upper()
+        score = float(row["score"])
+        datasets = max(1, int(row["datasets"]))
+        quality = min(1.0, datasets / 6.0)
+        if status == "PROMOTE":
+            raw = 2.0 + max(0.0, min(4.0, (score - 68.0) / 4.0))
+        elif status == "AVOID":
+            raw = -2.0 - max(0.0, min(4.0, (42.0 - score) / 4.0))
+        else:
+            raw = max(-1.5, min(1.5, (score - 50.0) / 12.0))
+        bonus = max(-6.0, min(6.0, raw * quality))
+        return bonus, status, str(row["scope"]), str(row["context"])
 
     def _record(
         self,
@@ -95,7 +117,18 @@ class LearningEngine:
         timeframe: str,
         regime: str,
         strategy: str,
+        universe: str | None = None,
+        horizon: str | None = None,
     ) -> LearningAssessment:
+        context_row = self.context_promotions.latest_best(
+            strategy=strategy,
+            symbol=symbol,
+            universe=universe,
+            timeframe=timeframe,
+            horizon=horizon,
+        )
+        contextual_bonus, contextual_status, contextual_scope, contextual_context = self._context_adjustment(context_row)
+
         evidence = self.store.evidence(
             symbol=symbol,
             asset_class=asset_class,
@@ -104,8 +137,18 @@ class LearningEngine:
             strategy=strategy,
         )
         if evidence is None:
+            status = LearningStatus.DEVELOPING if context_row is not None else LearningStatus.UNKNOWN
             assessment = LearningAssessment(
-                LearningStatus.UNKNOWN, 0.0, 0.0, None, "no_context_evidence", 1.0
+                status=status,
+                confidence=max(0.0, min(100.0, 50.0 + contextual_bonus * 3.0)) if context_row is not None else 0.0,
+                selector_bonus=round(contextual_bonus, 2),
+                evidence=None,
+                reason="contextual_backtest_only" if context_row is not None else "no_context_evidence",
+                freshness_factor=1.0,
+                contextual_bonus=round(contextual_bonus, 2),
+                contextual_status=contextual_status,
+                contextual_scope=contextual_scope,
+                contextual_context=contextual_context,
             )
             self._record(
                 symbol=symbol, asset_class=asset_class, timeframe=timeframe,
@@ -124,8 +167,9 @@ class LearningEngine:
         effective_quality = quality * freshness
 
         directional = max(-1.0, min(1.0, evidence.evidence_score / 20.0))
-        confidence = max(0.0, min(100.0, 50.0 + directional * 40.0 * effective_quality))
-        selector_bonus = max(-20.0, min(20.0, evidence.evidence_score * effective_quality))
+        confidence = max(0.0, min(100.0, 50.0 + directional * 40.0 * effective_quality + contextual_bonus * 2.0))
+        research_bonus = max(-20.0, min(20.0, evidence.evidence_score * effective_quality))
+        selector_bonus = max(-20.0, min(20.0, research_bonus + contextual_bonus))
 
         if evidence.oos_samples == 0 or evidence.trades < 20:
             status = LearningStatus.DEVELOPING
@@ -134,10 +178,10 @@ class LearningEngine:
         elif freshness < 0.65:
             status = LearningStatus.DEVELOPING
             reason = "stale_evidence_requires_refresh"
-        elif selector_bonus <= -6.0:
+        elif research_bonus <= -6.0:
             status = LearningStatus.AVOID
             reason = "negative_validated_evidence"
-        elif selector_bonus >= 6.0 and evidence.oos_samples >= 2 and evidence.trades >= 60:
+        elif research_bonus >= 6.0 and evidence.oos_samples >= 2 and evidence.trades >= 60:
             status = LearningStatus.TRUSTED
             reason = "positive_validated_evidence"
         else:
@@ -151,6 +195,10 @@ class LearningEngine:
             evidence=evidence,
             reason=reason,
             freshness_factor=round(freshness, 2),
+            contextual_bonus=round(contextual_bonus, 2),
+            contextual_status=contextual_status,
+            contextual_scope=contextual_scope,
+            contextual_context=contextual_context,
         )
         self._record(
             symbol=symbol, asset_class=asset_class, timeframe=timeframe,

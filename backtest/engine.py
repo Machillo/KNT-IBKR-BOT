@@ -18,6 +18,14 @@ class BacktestTrade:
 
 
 @dataclass(frozen=True)
+class BacktestEquityPoint:
+    time: object
+    equity: float
+    realized_equity: float
+    drawdown_pct: float
+
+
+@dataclass(frozen=True)
 class BacktestResult:
     initial_equity: float
     final_equity: float
@@ -30,14 +38,15 @@ class BacktestResult:
     profit_factor: float | None
     sharpe: float | None
     trade_log: tuple[BacktestTrade, ...]
+    equity_curve: tuple[BacktestEquityPoint, ...] = ()
 
 
 class BacktestEngine:
     """Long/short single-position simulator with stop/target and configurable costs.
 
-    Position size is bounded by both stop-risk and maximum notional exposure. This prevents
-    unrealistically tight stops from creating implicit leverage and contaminating research
-    evidence consumed by the Learning Engine.
+    Position size is bounded by both stop-risk and maximum notional exposure. Equity
+    drawdown is measured mark-to-market on every bar so open risk cannot disappear
+    from validation merely because a trade has not closed yet.
     """
 
     def __init__(
@@ -67,12 +76,22 @@ class BacktestEngine:
         qty_by_notional = (equity * self.max_position_pct) / entry
         return max(0.0, min(qty_by_risk, qty_by_notional))
 
+    def _marked_equity(self, realized_equity: float, position, close: float) -> float:
+        if position is None:
+            return realized_equity
+        side, entry, _stop, _target, qty = position
+        direction = 1 if side == SignalSide.LONG else -1
+        gross = (close - entry) * qty * direction
+        estimated_round_trip_cost = (entry + close) * qty * self.cost_bps / 10_000
+        return realized_equity + gross - estimated_round_trip_cost
+
     def run(self, bars: list[PriceBar], strategy) -> BacktestResult:
         equity = self.initial_equity
-        peak = equity
+        peak_marked = equity
         max_dd = 0.0
         trades: list[BacktestTrade] = []
         returns: list[float] = []
+        curve: list[BacktestEquityPoint] = []
         warmup = int(getattr(strategy, "warmup", 60))
 
         position = None
@@ -102,8 +121,6 @@ class BacktestEngine:
                     ret = pnl / before if before else 0.0
                     returns.append(ret)
                     trades.append(BacktestTrade(side.value, entry, exit_price, pnl, ret * 100, reason))
-                    peak = max(peak, equity)
-                    max_dd = max(max_dd, (peak - equity) / peak if peak else 0.0)
                     position = None
 
             if position is None:
@@ -112,6 +129,12 @@ class BacktestEngine:
                     qty = self._position_qty(equity=equity, entry=signal.entry, stop=signal.stop)
                     if qty > 0:
                         position = (signal.side, signal.entry, signal.stop, signal.target, qty)
+
+            marked = self._marked_equity(equity, position, float(bar.close))
+            peak_marked = max(peak_marked, marked)
+            drawdown = (peak_marked - marked) / peak_marked if peak_marked else 0.0
+            max_dd = max(max_dd, drawdown)
+            curve.append(BacktestEquityPoint(bar.time, marked, equity, drawdown * 100))
 
         if position is not None and bars:
             side, entry, _, _, qty = position
@@ -124,8 +147,10 @@ class BacktestEngine:
             ret = pnl / before if before else 0.0
             returns.append(ret)
             trades.append(BacktestTrade(side.value, entry, exit_price, pnl, ret * 100, "end_of_data"))
-            peak = max(peak, equity)
-            max_dd = max(max_dd, (peak - equity) / peak if peak else 0.0)
+            peak_marked = max(peak_marked, equity)
+            drawdown = (peak_marked - equity) / peak_marked if peak_marked else 0.0
+            max_dd = max(max_dd, drawdown)
+            curve.append(BacktestEquityPoint(bars[-1].time, equity, equity, drawdown * 100))
 
         wins = sum(t.pnl > 0 for t in trades)
         losses = sum(t.pnl <= 0 for t in trades)
@@ -140,9 +165,16 @@ class BacktestEngine:
                 sharpe = m / sqrt(variance) * sqrt(len(returns))
 
         return BacktestResult(
-            self.initial_equity, equity,
+            self.initial_equity,
+            equity,
             (equity / self.initial_equity - 1) * 100,
-            max_dd * 100, len(trades), wins, losses,
+            max_dd * 100,
+            len(trades),
+            wins,
+            losses,
             wins / len(trades) * 100 if trades else 0.0,
-            pf, sharpe, tuple(trades),
+            pf,
+            sharpe,
+            tuple(trades),
+            tuple(curve),
         )

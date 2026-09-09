@@ -70,6 +70,7 @@ def test_scheduler_prioritizes_stale_research_and_respects_budget(tmp_path: Path
 
     assert result.attempted == 1
     assert result.refreshed == 1
+    assert result.mode == "OPEN"
     assert coordinator.calls == ["NEW"]
 
 
@@ -132,3 +133,36 @@ def test_scheduler_success_resets_previous_failure_state(tmp_path: Path):
     assert state.consecutive_failures == 0
     assert state.next_retry_at is None
     assert state.last_status == "REFRESHED"
+
+
+def test_closed_market_cycle_uses_larger_research_budget(tmp_path: Path):
+    store = StrategyPerformanceStore(tmp_path / "perf.db")
+    coordinator = FakeCoordinator(store)
+    scheduler = ContinuousResearchScheduler(
+        coordinator, store, max_attempts_per_cycle=1, closed_market_attempts_per_cycle=3
+    )
+
+    result = asyncio.run(scheduler.run_cycle(
+        [candidate("A", 90), candidate("B", 80), candidate("C", 70)], market_open=False
+    ))
+
+    assert result.mode == "CLOSED"
+    assert result.attempted == 3
+    assert result.refreshed == 3
+    assert coordinator.calls == ["A", "B", "C"]
+
+
+def test_scheduler_persists_cycle_metrics(tmp_path: Path):
+    store = StrategyPerformanceStore(tmp_path / "perf.db")
+    coordinator = FakeCoordinator(store)
+    scheduler = ContinuousResearchScheduler(coordinator, store, max_attempts_per_cycle=2)
+
+    asyncio.run(scheduler.run_cycle([candidate("A", 90), candidate("B", 80)]))
+    metrics = scheduler.metrics.recent(1)
+
+    assert len(metrics) == 1
+    assert metrics[0].mode == "OPEN"
+    assert metrics[0].considered == 2
+    assert metrics[0].attempted == 2
+    assert metrics[0].refreshed == 2
+    assert metrics[0].budget == 2

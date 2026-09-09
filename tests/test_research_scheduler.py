@@ -9,14 +9,22 @@ from research.scheduler import ContinuousResearchScheduler
 
 
 class FakeCoordinator:
-    def __init__(self, store, freshness_hours=24):
+    def __init__(self, store, freshness_hours=24, result=None, error=None):
         self.store = store
         self.timeframe = "1 hour"
         self.freshness = timedelta(hours=freshness_hours)
         self.calls = []
+        self.result = result
+        self.error = error
 
     async def research_contract(self, contract):
         self.calls.append(contract.symbol)
+        if self.error is not None:
+            raise self.error
+        if self.result is not None:
+            return ResearchCoordinatorResult(
+                contract.symbol, self.result.status, self.result.bars, self.result.reason
+            )
         return ResearchCoordinatorResult(contract.symbol, "REFRESHED", 500, "research_completed")
 
 
@@ -63,3 +71,64 @@ def test_scheduler_prioritizes_stale_research_and_respects_budget(tmp_path: Path
     assert result.attempted == 1
     assert result.refreshed == 1
     assert coordinator.calls == ["NEW"]
+
+
+def test_scheduler_persists_failure_backoff_and_skips_retry(tmp_path: Path):
+    store = StrategyPerformanceStore(tmp_path / "perf.db")
+    failed = ResearchCoordinatorResult("BAD", "SKIPPED", 12, "insufficient_history")
+    coordinator = FakeCoordinator(store, result=failed)
+    scheduler = ContinuousResearchScheduler(
+        coordinator, store, max_attempts_per_cycle=2, base_backoff_minutes=30
+    )
+
+    first = asyncio.run(scheduler.run_cycle([candidate("BAD", 90)]))
+    assert first.attempted == 1
+    state = scheduler.state.get(symbol="BAD", asset_class="STK", timeframe="1 hour")
+    assert state is not None
+    assert state.consecutive_failures == 1
+    assert state.last_reason == "insufficient_history"
+    assert state.next_retry_at is not None
+
+    second = asyncio.run(scheduler.run_cycle([candidate("BAD", 90)]))
+    assert second.attempted == 0
+    assert scheduler.rank([candidate("BAD", 90)])[0].reason == "research_backoff"
+    assert coordinator.calls == ["BAD"]
+
+
+def test_scheduler_exception_counts_once_and_enters_backoff(tmp_path: Path):
+    store = StrategyPerformanceStore(tmp_path / "perf.db")
+    coordinator = FakeCoordinator(store, error=TimeoutError("IBKR timeout"))
+    scheduler = ContinuousResearchScheduler(coordinator, store, max_attempts_per_cycle=1)
+
+    result = asyncio.run(scheduler.run_cycle([candidate("TIMEOUT", 80)]))
+    assert result.attempted == 1
+    assert result.skipped == 1
+    assert result.results[0].status == "ERROR"
+
+    state = scheduler.state.get(symbol="TIMEOUT", asset_class="STK", timeframe="1 hour")
+    assert state is not None
+    assert state.consecutive_failures == 1
+    assert state.last_reason == "exception:TimeoutError"
+
+
+def test_scheduler_success_resets_previous_failure_state(tmp_path: Path):
+    store = StrategyPerformanceStore(tmp_path / "perf.db")
+    coordinator = FakeCoordinator(store)
+    scheduler = ContinuousResearchScheduler(coordinator, store, max_attempts_per_cycle=1)
+    scheduler.state.record_failure(
+        symbol="RECOVER", asset_class="STK", timeframe="1 hour",
+        status="ERROR", reason="exception:TimeoutError", base_backoff_minutes=1,
+    )
+    with scheduler.state._connect() as conn:
+        conn.execute(
+            "UPDATE research_scheduler_state SET next_retry_at=? WHERE symbol='RECOVER'",
+            ((datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat(),),
+        )
+
+    result = asyncio.run(scheduler.run_cycle([candidate("RECOVER", 75)]))
+    assert result.refreshed == 1
+    state = scheduler.state.get(symbol="RECOVER", asset_class="STK", timeframe="1 hour")
+    assert state is not None
+    assert state.consecutive_failures == 0
+    assert state.next_retry_at is None
+    assert state.last_status == "REFRESHED"

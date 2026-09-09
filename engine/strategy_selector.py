@@ -12,22 +12,33 @@ from strategies.momentum import SignalSide, StrategySignal
 
 REGIME_BONUS: dict[MarketRegime, dict[str, float]] = {
     MarketRegime.TRENDING: {
-        "trend_following_v1": 12.0,
-        "momentum_gap_v1": 8.0,
+        "trend_following_v1": 14.0,
+        "momentum_gap_v1": 10.0,
+        "breakout_v1": 8.0,
         "swing_structure_v1": 6.0,
-        "breakout_v1": 4.0,
     },
     MarketRegime.RANGE: {
-        "mean_reversion_v1": 12.0,
-        "range_v1": 12.0,
-        "pairs_market_neutral_v1": 8.0,
+        "mean_reversion_v1": 14.0,
+        "range_v1": 14.0,
+        "pairs_market_neutral_v1": 10.0,
         "smc_liquidity_v1": 4.0,
     },
-    MarketRegime.HIGH_VOLATILITY: {
-        "breakout_v1": 10.0,
-        "momentum_gap_v1": 8.0,
-        "smc_liquidity_v1": 6.0,
+    # Directional single-asset entries are paused in HIGH_VOLATILITY below.
+    MarketRegime.HIGH_VOLATILITY: {},
+    MarketRegime.MIXED: {},
+}
+
+REGIME_PENALTY: dict[MarketRegime, dict[str, float]] = {
+    MarketRegime.TRENDING: {
+        "mean_reversion_v1": -8.0,
+        "range_v1": -10.0,
     },
+    MarketRegime.RANGE: {
+        "trend_following_v1": -8.0,
+        "breakout_v1": -6.0,
+        "momentum_gap_v1": -5.0,
+    },
+    MarketRegime.HIGH_VOLATILITY: {},
     MarketRegime.MIXED: {},
 }
 
@@ -52,18 +63,20 @@ class StrategySelection:
 
 
 class StrategySelector:
-    """Evaluate all strategies and blend signal, regime and bounded learned evidence."""
+    """Evaluate strategies, route them by regime and blend bounded learned evidence."""
 
     def __init__(
         self,
         minimum_score: float = 55.0,
         performance_store: StrategyPerformanceStore | None = None,
+        pause_directional_high_volatility: bool = True,
     ) -> None:
         self.minimum_score = minimum_score
         self.regime_detector = RegimeDetector()
         self.strategies = [factory() for factory in SINGLE_ASSET_STRATEGIES]
         self.performance_store = performance_store
         self.learning_engine = LearningEngine(performance_store) if performance_store else None
+        self.pause_directional_high_volatility = bool(pause_directional_high_volatility)
 
     def evaluate(
         self,
@@ -77,7 +90,10 @@ class StrategySelector:
         evaluations: list[StrategyEvaluation] = []
         for strategy in self.strategies:
             signal = strategy.evaluate(bars)
-            regime_bonus = REGIME_BONUS.get(regime.regime, {}).get(strategy.name, 0.0)
+            regime_bonus = (
+                REGIME_BONUS.get(regime.regime, {}).get(strategy.name, 0.0)
+                + REGIME_PENALTY.get(regime.regime, {}).get(strategy.name, 0.0)
+            )
             learning = None
             evidence = None
             evidence_bonus = 0.0
@@ -98,12 +114,16 @@ class StrategySelector:
             ))
 
         evaluations.sort(key=lambda x: x.adjusted_score, reverse=True)
+
+        if regime.regime == MarketRegime.HIGH_VOLATILITY and self.pause_directional_high_volatility:
+            return StrategySelection(
+                regime, None, tuple(evaluations), "high_volatility_directional_pause"
+            )
+
         tradable = [x for x in evaluations if x.signal.side != SignalSide.FLAT]
         if not tradable:
             return StrategySelection(regime, None, tuple(evaluations), "all_strategies_flat")
 
-        # Strong negative validated evidence can veto a strategy even if today's raw
-        # signal is attractive. Unknown/developing evidence never blocks by itself.
         tradable = [
             x for x in tradable
             if x.learning is None or x.learning.status != LearningStatus.AVOID

@@ -3,9 +3,9 @@ from __future__ import annotations
 import asyncio
 from typing import Iterable
 
-from ib_async import Contract, IB, LimitOrder, MarketOrder, Trade
+from ib_async import Contract, IB, LimitOrder, MarketOrder, TagValue, Trade
 
-from core.order_templates import adaptive_entry_order, bracket_orders
+from core.order_templates import adaptive_entry_order
 from utils.logger import logger
 
 
@@ -90,24 +90,24 @@ class OrderManager:
         stop_price: float,
         adaptive_parent: bool = True,
     ) -> tuple[Trade, Trade, Trade]:
-        parent_id = int(self.ib.client.getReqId())
-        template = bracket_orders(
-            action=action,
-            quantity=quantity,
-            entry_price=entry_price,
-            take_profit_price=take_profit_price,
-            stop_price=stop_price,
-            parent_order_id=parent_id,
-            account=self.account,
-            adaptive_parent=adaptive_parent,
+        bracket = self.ib.bracketOrder(
+            action.upper(), quantity, entry_price, take_profit_price, stop_price,
+            tif="DAY", outsideRth=False,
         )
+        if adaptive_parent:
+            bracket.parent.algoStrategy = "Adaptive"
+            bracket.parent.algoParams = [TagValue("adaptivePriority", "Normal")]
+        for order in bracket:
+            if self.account:
+                order.account = self.account
         trades = tuple(
             self._attach_trade_callbacks(self.ib.placeOrder(contract, order))
-            for order in (template.parent, template.take_profit, template.stop_loss)
+            for order in bracket
         )
         logger.info(
             "BRACKET ORDER submitted | parent=%s action=%s qty=%s entry=%s target=%s stop=%s adaptive=%s",
-            parent_id, action.upper(), quantity, entry_price, take_profit_price, stop_price, adaptive_parent,
+            bracket.parent.orderId, action.upper(), quantity, entry_price,
+            take_profit_price, stop_price, adaptive_parent,
         )
         return trades
 

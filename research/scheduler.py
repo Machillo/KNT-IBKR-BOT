@@ -37,6 +37,8 @@ class ContinuousResearchScheduler:
     permissions, kill switches, daily-loss limits, or absolute risk limits.
     Repeated research failures are persisted and exponentially backed off so KNT
     does not hammer IBKR or waste cycle budget on the same bad candidate.
+    Very stale contexts receive an aging boost so repeated high-scoring new names
+    cannot starve old evidence forever.
     """
 
     def __init__(
@@ -48,6 +50,8 @@ class ContinuousResearchScheduler:
         closed_market_attempts_per_cycle: int | None = None,
         base_backoff_minutes: int = 30,
         max_backoff_hours: int = 24,
+        starvation_after_freshness_windows: float = 4.0,
+        starvation_priority_boost: float = 600.0,
     ) -> None:
         self.coordinator = coordinator
         self.store = store
@@ -59,6 +63,8 @@ class ContinuousResearchScheduler:
         )
         self.base_backoff_minutes = max(1, int(base_backoff_minutes))
         self.max_backoff_hours = max(1, int(max_backoff_hours))
+        self.starvation_after_freshness_windows = max(1.0, float(starvation_after_freshness_windows))
+        self.starvation_priority_boost = max(0.0, float(starvation_priority_boost))
         self.state = ResearchSchedulerStateStore(store.path)
         self.metrics = ResearchCycleMetricsStore(store.path)
 
@@ -90,7 +96,11 @@ class ContinuousResearchScheduler:
 
         freshness_hours = max(1.0, self.coordinator.freshness.total_seconds() / 3600.0)
         stale_ratio = age_hours / freshness_hours
-        if stale_ratio >= 1.0:
+        if stale_ratio >= self.starvation_after_freshness_windows:
+            reason = "starved_stale_research"
+            age_component = min(500.0, stale_ratio * 50.0)
+            priority = 500.0 + age_component + self.starvation_priority_boost + opportunity_score
+        elif stale_ratio >= 1.0:
             reason = "stale_research"
             priority = 500.0 + min(500.0, stale_ratio * 50.0) + opportunity_score
         else:

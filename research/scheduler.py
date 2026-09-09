@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 
 from research.coordinator import ContinuousResearchCoordinator, ResearchCoordinatorResult
 from research.performance import StrategyPerformanceStore
+from research.scheduler_state import ResearchSchedulerStateStore
 from utils.logger import logger
 
 
@@ -32,6 +33,8 @@ class ContinuousResearchScheduler:
 
     The scheduler owns research cadence/priority only. It cannot modify trading
     permissions, kill switches, daily-loss limits, or absolute risk limits.
+    Repeated research failures are persisted and exponentially backed off so KNT
+    does not hammer IBKR or waste cycle budget on the same bad candidate.
     """
 
     def __init__(
@@ -40,15 +43,25 @@ class ContinuousResearchScheduler:
         store: StrategyPerformanceStore,
         *,
         max_attempts_per_cycle: int = 2,
+        base_backoff_minutes: int = 30,
+        max_backoff_hours: int = 24,
     ) -> None:
         self.coordinator = coordinator
         self.store = store
         self.max_attempts_per_cycle = max(0, int(max_attempts_per_cycle))
+        self.base_backoff_minutes = max(1, int(base_backoff_minutes))
+        self.max_backoff_hours = max(1, int(max_backoff_hours))
+        self.state = ResearchSchedulerStateStore(store.path)
 
     def _priority(self, candidate) -> ResearchCandidate:
         symbol = str(getattr(candidate, "symbol", "") or getattr(candidate.contract, "symbol", "") or "").upper()
         asset_class = str(getattr(candidate.contract, "secType", "") or "STK").upper()
         opportunity_score = float(getattr(candidate, "score", 0.0) or 0.0)
+
+        if self.state.in_backoff(symbol=symbol, asset_class=asset_class, timeframe=self.coordinator.timeframe):
+            return ResearchCandidate(candidate.contract, symbol, asset_class, opportunity_score,
+                                     -2000.0 + opportunity_score, "research_backoff")
+
         status = self.store.research_status(
             symbol=symbol,
             asset_class=asset_class,
@@ -89,15 +102,48 @@ class ContinuousResearchScheduler:
         for item in ranked:
             if attempted >= self.max_attempts_per_cycle:
                 break
-            if item.reason == "research_fresh":
+            if item.reason in {"research_fresh", "research_backoff"}:
                 continue
+
             attempted += 1
-            result = await self.coordinator.research_contract(item.contract)
+            try:
+                result = await self.coordinator.research_contract(item.contract)
+            except Exception as exc:
+                reason = f"exception:{type(exc).__name__}"
+                self.state.record_failure(
+                    symbol=item.symbol,
+                    asset_class=item.asset_class,
+                    timeframe=self.coordinator.timeframe,
+                    status="ERROR",
+                    reason=reason,
+                    base_backoff_minutes=self.base_backoff_minutes,
+                    max_backoff_hours=self.max_backoff_hours,
+                )
+                result = ResearchCoordinatorResult(item.symbol, "ERROR", 0, reason)
+                logger.warning("RESEARCH SCHEDULER ERROR | symbol=%s error=%s", item.symbol, exc)
+
             results.append(result)
             if result.status == "REFRESHED":
                 refreshed += 1
+                self.state.record_success(
+                    symbol=item.symbol,
+                    asset_class=item.asset_class,
+                    timeframe=self.coordinator.timeframe,
+                    reason=result.reason,
+                )
             else:
                 skipped += 1
+                if result.reason not in {"research_fresh", "missing_symbol"}:
+                    self.state.record_failure(
+                        symbol=item.symbol,
+                        asset_class=item.asset_class,
+                        timeframe=self.coordinator.timeframe,
+                        status=result.status,
+                        reason=result.reason,
+                        base_backoff_minutes=self.base_backoff_minutes,
+                        max_backoff_hours=self.max_backoff_hours,
+                    )
+
             logger.info(
                 "RESEARCH SCHEDULER | symbol=%s priority=%.2f reason=%s status=%s bars=%s cycle=%s/%s",
                 item.symbol, item.priority, item.reason, result.status, result.bars,

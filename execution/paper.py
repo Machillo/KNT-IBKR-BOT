@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 import sqlite3
 
@@ -75,18 +76,49 @@ class TradeJournalStore:
 
 
 class PaperExecutionEngine:
-    """Execution gate for autonomous Paper Trading only.
+    """Fail-closed execution gate for autonomous Paper Trading only."""
 
-    Live ports remain blocked by configuration. This class submits only after the
-    upstream strategy, learning, hard-risk and portfolio gates have approved a setup.
-    """
-
-    def __init__(self, ib, *, account: str, enabled: bool = False, journal: TradeJournalStore | None = None) -> None:
+    def __init__(
+        self,
+        ib,
+        *,
+        account: str,
+        enabled: bool = False,
+        paper_authorized: bool = False,
+        risk_manager=None,
+        journal: TradeJournalStore | None = None,
+    ) -> None:
         self.ib = ib
         self.account = account
         self.enabled = bool(enabled)
+        self.paper_authorized = bool(paper_authorized)
+        self.risk_manager = risk_manager
         self.orders = OrderManager(ib, account=account)
         self.journal = journal or TradeJournalStore()
+
+    @staticmethod
+    def _normalize_stock_price(value: float) -> float:
+        return float(Decimal(str(value)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+
+    def _normalize_request(self, contract, request: PaperExecutionRequest) -> PaperExecutionRequest | None:
+        sec_type = str(getattr(contract, "secType", "") or "").upper()
+        if sec_type not in {"STK", ""}:
+            return None
+        return replace(
+            request,
+            entry_price=self._normalize_stock_price(request.entry_price),
+            stop_price=self._normalize_stock_price(request.stop_price),
+            target_price=self._normalize_stock_price(request.target_price),
+        )
+
+    @staticmethod
+    def _valid_geometry(request: PaperExecutionRequest) -> bool:
+        side = request.side.upper()
+        if side == "LONG":
+            return request.stop_price < request.entry_price < request.target_price
+        if side == "SHORT":
+            return request.target_price < request.entry_price < request.stop_price
+        return False
 
     def _has_duplicate(self, symbol: str) -> bool:
         target = symbol.upper()
@@ -110,26 +142,40 @@ class PaperExecutionEngine:
         if not self.enabled:
             self.journal.record(request, status="BLOCKED", reason="autonomous_paper_disabled")
             return PaperExecutionResult(False, "autonomous_paper_disabled")
+        if not self.paper_authorized:
+            self.journal.record(request, status="BLOCKED", reason="paper_execution_not_authorized")
+            return PaperExecutionResult(False, "paper_execution_not_authorized")
+        if self.risk_manager is not None and bool(getattr(self.risk_manager, "trading_locked", False)):
+            self.journal.record(request, status="BLOCKED", reason="risk_manager_locked")
+            return PaperExecutionResult(False, "risk_manager_locked")
         if request.quantity <= 0 or request.entry_price <= 0 or request.stop_price <= 0 or request.target_price <= 0:
             self.journal.record(request, status="REJECTED", reason="invalid_execution_request")
             return PaperExecutionResult(False, "invalid_execution_request")
         if request.side.upper() not in {"LONG", "SHORT"}:
             self.journal.record(request, status="REJECTED", reason="unsupported_side")
             return PaperExecutionResult(False, "unsupported_side")
-        if self._has_duplicate(request.symbol):
-            self.journal.record(request, status="REJECTED", reason="duplicate_symbol_exposure")
+
+        normalized = self._normalize_request(contract, request)
+        if normalized is None:
+            self.journal.record(request, status="REJECTED", reason="unsupported_tick_normalization")
+            return PaperExecutionResult(False, "unsupported_tick_normalization")
+        if not self._valid_geometry(normalized):
+            self.journal.record(normalized, status="REJECTED", reason="invalid_price_geometry")
+            return PaperExecutionResult(False, "invalid_price_geometry")
+        if self._has_duplicate(normalized.symbol):
+            self.journal.record(normalized, status="REJECTED", reason="duplicate_symbol_exposure")
             return PaperExecutionResult(False, "duplicate_symbol_exposure")
 
-        action = "BUY" if request.side.upper() == "LONG" else "SELL"
+        action = "BUY" if normalized.side.upper() == "LONG" else "SELL"
         trades = self.orders.bracket_limit(
             contract,
             action,
-            request.quantity,
-            entry_price=request.entry_price,
-            take_profit_price=request.target_price,
-            stop_price=request.stop_price,
+            normalized.quantity,
+            entry_price=normalized.entry_price,
+            take_profit_price=normalized.target_price,
+            stop_price=normalized.stop_price,
             adaptive_parent=True,
         )
         parent_id = int(trades[0].order.orderId)
-        self.journal.record(request, status="SUBMITTED", reason="bracket_submitted", parent_order_id=parent_id)
+        self.journal.record(normalized, status="SUBMITTED", reason="bracket_submitted", parent_order_id=parent_id)
         return PaperExecutionResult(True, "bracket_submitted", parent_id)

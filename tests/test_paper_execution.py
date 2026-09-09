@@ -69,6 +69,14 @@ class FakeIB:
         return None
 
 
+class FakeSessionPolicy:
+    def __init__(self, market_open):
+        self.market_open = market_open
+
+    def state(self):
+        return SimpleNamespace(market_open=self.market_open)
+
+
 def request(**overrides):
     values = dict(
         symbol="AAPL", strategy="momentum_v1", side="LONG", quantity=10,
@@ -111,6 +119,31 @@ def test_paper_execution_requires_explicit_paper_authorization(tmp_path):
     result = run(e.submit(stock(), request()))
     assert result.submitted is False
     assert result.reason == "paper_execution_not_authorized"
+
+
+def test_paper_execution_blocks_when_regular_stock_session_is_closed(tmp_path):
+    ib = FakeIB()
+    result = run(engine(
+        tmp_path,
+        ib,
+        enabled=True,
+        session_policy=FakeSessionPolicy(False),
+    ).submit(stock(), request()))
+    assert result.submitted is False
+    assert result.reason == "market_session_closed"
+    assert ib.submitted == []
+
+
+def test_paper_execution_allows_open_regular_stock_session(tmp_path):
+    ib = FakeIB()
+    result = run(engine(
+        tmp_path,
+        ib,
+        enabled=True,
+        session_policy=FakeSessionPolicy(True),
+    ).submit(stock(), request()))
+    assert result.submitted is True
+    assert len(ib.submitted) == 3
 
 
 def test_paper_execution_rejects_locked_risk_manager(tmp_path):

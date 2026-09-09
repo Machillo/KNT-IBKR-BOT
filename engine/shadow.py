@@ -7,6 +7,7 @@ from math import sqrt
 from ib_async import Contract
 
 from engine.strategy_selector import StrategySelection, StrategySelector
+from execution.paper import PaperExecutionEngine, PaperExecutionRequest
 from market.history import HistoricalDataService, PriceBar
 from market.session import USStockSessionPolicy
 from portfolio.admission import PortfolioAdmissionCoordinator, RiskDecisionStore
@@ -39,7 +40,7 @@ class ShadowPairDecision:
 
 
 class ShadowTradingEngine:
-    """Evaluates dynamic universe candidates with all strategy families; never sends an order."""
+    """Evaluates dynamic universe candidates and can hand approved setups to guarded Paper execution."""
 
     def __init__(
         self,
@@ -50,6 +51,7 @@ class ShadowTradingEngine:
         quote_budget: int = 40,
         research_budget: int = 2,
         risk_manager: RiskManager | None = None,
+        paper_executor: PaperExecutionEngine | None = None,
     ) -> None:
         self.ib = ib
         self.intelligence = market_intelligence
@@ -67,6 +69,7 @@ class ShadowTradingEngine:
         self.allocator = PortfolioAllocator(risk_pct=risk_pct, max_position_pct=max_position_pct)
         self.admission = None if risk_manager is None else PortfolioAdmissionCoordinator(risk_manager)
         self.risk_decisions = RiskDecisionStore()
+        self.paper_executor = paper_executor
         self.pairs = PairsTradingStrategy()
         self.max_candidates = max_candidates
         self.quote_budget = quote_budget
@@ -212,6 +215,29 @@ class ShadowTradingEngine:
                             portfolio_reason = admission.reason
                             if not admission.approved:
                                 action = "PORTFOLIO_REJECTED"
+                            else:
+                                action = f"APPROVED_{selected.signal.side.value}"
+                                if self.paper_executor is not None:
+                                    target = signal.target
+                                    if target is None or target <= 0:
+                                        action = "PAPER_REJECTED"
+                                        portfolio_reason = "invalid_target_price"
+                                    else:
+                                        result = self.paper_executor.submit(
+                                            candidate.contract,
+                                            PaperExecutionRequest(
+                                                symbol=candidate.symbol,
+                                                strategy=selected.strategy,
+                                                side=selected.signal.side.value,
+                                                quantity=proposal.quantity,
+                                                entry_price=proposal.entry_price,
+                                                stop_price=proposal.stop_price,
+                                                target_price=float(target),
+                                                regime=selection.regime.regime.value,
+                                            ),
+                                        )
+                                        action = "PAPER_SUBMITTED" if result.submitted else "PAPER_BLOCKED"
+                                        portfolio_reason = result.reason
                             self.risk_decisions.record(
                                 symbol=candidate.symbol,
                                 side=selected.signal.side.value,
@@ -227,11 +253,11 @@ class ShadowTradingEngine:
                                 regime=selection.regime.regime.value,
                             )
                             logger.info(
-                                "PORTFOLIO ADMISSION | symbol=%s qty=%.4f notional=%.2f risk=%.2f vol_mult=%.2f corr=%s approved=%s reason=%s",
+                                "PORTFOLIO ADMISSION | symbol=%s qty=%.4f notional=%.2f risk=%.2f vol_mult=%.2f corr=%s approved=%s reason=%s action=%s",
                                 candidate.symbol, proposal.quantity, proposal.proposed_notional,
                                 proposal.proposed_risk, proposal.volatility_multiplier,
                                 "NA" if corr is None else f"{corr:.2f}", admission.approved,
-                                admission.reason,
+                                admission.reason, action,
                             )
 
                 decisions.append(ShadowDecision(

@@ -5,6 +5,7 @@ from typing import Iterable
 
 from ib_async import Contract, IB, LimitOrder, MarketOrder, Trade
 
+from core.order_templates import adaptive_entry_order, bracket_orders
 from utils.logger import logger
 
 
@@ -47,62 +48,80 @@ class OrderManager:
         return trade
 
     def market(self, contract: Contract, action: str, quantity: float) -> Trade:
-        # Explicit DAY avoids inheriting an unexpected TWS order preset.
-        # outsideRth=False keeps this controlled test inside regular/liquid hours.
-        order = MarketOrder(
-            action.upper(),
-            quantity,
-            tif="DAY",
-            outsideRth=False,
-        )
+        order = MarketOrder(action.upper(), quantity, tif="DAY", outsideRth=False)
         if self.account:
             order.account = self.account
         trade = self.ib.placeOrder(contract, order)
-        logger.info(
-            "MARKET ORDER submitted | id=%s action=%s qty=%s tif=%s",
-            trade.order.orderId,
-            action.upper(),
-            quantity,
-            trade.order.tif,
-        )
+        logger.info("MARKET ORDER submitted | id=%s action=%s qty=%s tif=%s",
+                    trade.order.orderId, action.upper(), quantity, trade.order.tif)
         return self._attach_trade_callbacks(trade)
 
-    def limit(
+    def adaptive(
         self,
         contract: Contract,
         action: str,
         quantity: float,
-        limit_price: float,
+        *,
+        limit_price: float | None = None,
+        priority: str = "Normal",
     ) -> Trade:
-        # Explicit DAY avoids TWS silently replacing an omitted API TIF.
-        order = LimitOrder(
-            action.upper(),
-            quantity,
-            limit_price,
-            tif="DAY",
-            outsideRth=False,
+        order = adaptive_entry_order(
+            action=action,
+            quantity=quantity,
+            limit_price=limit_price,
+            priority=priority,
+            account=self.account,
         )
-        if self.account:
-            order.account = self.account
         trade = self.ib.placeOrder(contract, order)
         logger.info(
-            "LIMIT ORDER submitted | id=%s action=%s qty=%s limit=%s tif=%s",
-            trade.order.orderId,
-            action.upper(),
-            quantity,
-            limit_price,
-            trade.order.tif,
+            "ADAPTIVE ORDER submitted | id=%s action=%s qty=%s type=%s priority=%s",
+            trade.order.orderId, action.upper(), quantity, trade.order.orderType, priority,
         )
         return self._attach_trade_callbacks(trade)
 
-    def modify(
+    def bracket_limit(
         self,
         contract: Contract,
-        trade: Trade,
+        action: str,
+        quantity: float,
         *,
-        quantity: float | None = None,
-        limit_price: float | None = None,
-    ) -> Trade:
+        entry_price: float,
+        take_profit_price: float,
+        stop_price: float,
+        adaptive_parent: bool = True,
+    ) -> tuple[Trade, Trade, Trade]:
+        parent_id = int(self.ib.client.getReqId())
+        template = bracket_orders(
+            action=action,
+            quantity=quantity,
+            entry_price=entry_price,
+            take_profit_price=take_profit_price,
+            stop_price=stop_price,
+            parent_order_id=parent_id,
+            account=self.account,
+            adaptive_parent=adaptive_parent,
+        )
+        trades = tuple(
+            self._attach_trade_callbacks(self.ib.placeOrder(contract, order))
+            for order in (template.parent, template.take_profit, template.stop_loss)
+        )
+        logger.info(
+            "BRACKET ORDER submitted | parent=%s action=%s qty=%s entry=%s target=%s stop=%s adaptive=%s",
+            parent_id, action.upper(), quantity, entry_price, take_profit_price, stop_price, adaptive_parent,
+        )
+        return trades
+
+    def limit(self, contract: Contract, action: str, quantity: float, limit_price: float) -> Trade:
+        order = LimitOrder(action.upper(), quantity, limit_price, tif="DAY", outsideRth=False)
+        if self.account:
+            order.account = self.account
+        trade = self.ib.placeOrder(contract, order)
+        logger.info("LIMIT ORDER submitted | id=%s action=%s qty=%s limit=%s tif=%s",
+                    trade.order.orderId, action.upper(), quantity, limit_price, trade.order.tif)
+        return self._attach_trade_callbacks(trade)
+
+    def modify(self, contract: Contract, trade: Trade, *, quantity: float | None = None,
+               limit_price: float | None = None) -> Trade:
         order = trade.order
         if trade.isDone():
             raise RuntimeError(f"Cannot modify completed order {order.orderId}")
@@ -111,32 +130,19 @@ class OrderManager:
         if limit_price is not None:
             order.lmtPrice = limit_price
         updated_trade = self.ib.placeOrder(contract, order)
-        logger.info(
-            "ORDER MODIFICATION requested | id=%s qty=%s limit=%s tif=%s",
-            order.orderId,
-            order.totalQuantity,
-            getattr(order, "lmtPrice", None),
-            order.tif,
-        )
+        logger.info("ORDER MODIFICATION requested | id=%s qty=%s limit=%s tif=%s",
+                    order.orderId, order.totalQuantity, getattr(order, "lmtPrice", None), order.tif)
         return self._attach_trade_callbacks(updated_trade)
 
     def cancel(self, trade: Trade) -> Trade | None:
         if trade.isDone():
-            logger.info(
-                "Cancellation skipped; order already done | id=%s status=%s",
-                trade.order.orderId,
-                trade.orderStatus.status,
-            )
+            logger.info("Cancellation skipped; order already done | id=%s status=%s",
+                        trade.order.orderId, trade.orderStatus.status)
             return trade
         logger.info("ORDER CANCELLATION requested | id=%s", trade.order.orderId)
         return self.ib.cancelOrder(trade.order)
 
-    async def wait_for_status(
-        self,
-        trade: Trade,
-        statuses: Iterable[str],
-        timeout: float = 10.0,
-    ) -> str:
+    async def wait_for_status(self, trade: Trade, statuses: Iterable[str], timeout: float = 10.0) -> str:
         expected = set(statuses)
         deadline = asyncio.get_running_loop().time() + timeout
         while asyncio.get_running_loop().time() < deadline:
@@ -145,16 +151,13 @@ class OrderManager:
                 return status
             await asyncio.sleep(0.05)
         raise TimeoutError(
-            f"Order {trade.order.orderId} did not reach {sorted(expected)}; "
-            f"last status={trade.orderStatus.status!r}"
+            f"Order {trade.order.orderId} did not reach {sorted(expected)}; last status={trade.orderStatus.status!r}"
         )
 
     async def wait_until_filled(self, trade: Trade, timeout: float = 15.0) -> Trade:
         await self.wait_for_status(trade, {"Filled"}, timeout=timeout)
         if trade.orderStatus.filled <= 0:
-            raise RuntimeError(
-                f"Order {trade.order.orderId} reported Filled with no filled quantity"
-            )
+            raise RuntimeError(f"Order {trade.order.orderId} reported Filled with no filled quantity")
         return trade
 
     def cancel_all_open_orders(self) -> None:

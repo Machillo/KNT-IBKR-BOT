@@ -97,12 +97,15 @@ class ShadowTradingEngine:
                         action = "NO_TRADE"
                         portfolio_reason = "invalid_signal_prices"
                     else:
+                        stress = max(1.0, float(selection.regime.volatility_stress or 1.0))
+                        volatility_multiplier = max(0.25, min(1.0, 1.0 / stress))
                         proposal = self.allocator.propose(
                             portfolio_snapshot,
                             symbol=candidate.symbol,
                             asset_class=asset_class,
                             entry_price=float(signal.entry),
                             stop_price=float(signal.stop),
+                            volatility_multiplier=volatility_multiplier,
                         )
                         if proposal is None:
                             action = "PORTFOLIO_REJECTED"
@@ -115,10 +118,10 @@ class ShadowTradingEngine:
                             if not portfolio_decision.approved:
                                 action = "PORTFOLIO_REJECTED"
                             logger.info(
-                                "PORTFOLIO ADMISSION | symbol=%s qty=%.4f notional=%.2f risk=%.2f approved=%s reason=%s projected_exposure=%.2f%%",
+                                "PORTFOLIO ADMISSION | symbol=%s qty=%.4f notional=%.2f risk=%.2f vol_mult=%.2f approved=%s reason=%s projected_exposure=%.2f%%",
                                 candidate.symbol, proposal.quantity, proposal.proposed_notional,
-                                proposal.proposed_risk, portfolio_decision.approved,
-                                portfolio_decision.reason,
+                                proposal.proposed_risk, proposal.volatility_multiplier,
+                                portfolio_decision.approved, portfolio_decision.reason,
                                 portfolio_decision.projected_exposure_pct * 100,
                             )
 
@@ -133,8 +136,10 @@ class ShadowTradingEngine:
                         f"{item.strategy}:{item.signal.side.value}:{item.adjusted_score:.1f}:learn={learned}:bonus={item.evidence_bonus:+.1f}"
                     )
                 logger.info(
-                    "SHADOW DECISION | symbol=%s liquidity=%.2f regime=%s action=%s selected=%s top=%s reason=%s portfolio_reason=%s",
-                    candidate.symbol, candidate.score, selection.regime.regime.value, action,
+                    "SHADOW DECISION | symbol=%s liquidity=%.2f regime=%s adx=%.1f ema_slope=%.2f%% vol_stress=%.2f action=%s selected=%s top=%s reason=%s portfolio_reason=%s",
+                    candidate.symbol, candidate.score, selection.regime.regime.value,
+                    selection.regime.adx, selection.regime.ema_slope_pct,
+                    selection.regime.volatility_stress, action,
                     None if selected is None else selected.strategy, top, selection.reason,
                     portfolio_reason,
                 )

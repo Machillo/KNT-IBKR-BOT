@@ -17,12 +17,7 @@ class WalkForwardSummary:
 
 
 class WalkForwardResearch:
-    """Rolling train/OOS evaluator used to generate learning evidence.
-
-    Defaults deliberately leave enough bars in both TRAIN and OOS for strategies
-    with 50-60 bar warmups. This keeps the Learning Engine from treating tiny,
-    effectively untradeable test windows as meaningful evidence.
-    """
+    """Rolling train/OOS evaluator used to generate learning evidence."""
 
     def __init__(self, store: StrategyPerformanceStore, engine: BacktestEngine | None = None) -> None:
         self.store = store
@@ -40,6 +35,9 @@ class WalkForwardResearch:
         train_bars: int = 240,
         test_bars: int = 80,
         step_bars: int = 80,
+        run_id: int | None = None,
+        source: str = "RESEARCH",
+        strategy_version: str = "v1",
     ) -> list[WalkForwardSummary]:
         if train_bars < 120 or test_bars < 60 or step_bars < 1:
             raise ValueError("Invalid walk-forward window sizes")
@@ -48,6 +46,7 @@ class WalkForwardResearch:
             train_count = 0
             oos_count = 0
             start = 0
+            version = str(getattr(strategy, "version", strategy_version) or strategy_version)
             while start + train_bars + test_bars <= len(bars):
                 train = bars[start:start + train_bars]
                 oos = bars[start + train_bars:start + train_bars + test_bars]
@@ -58,12 +57,14 @@ class WalkForwardResearch:
                 self.store.record_result(
                     symbol=symbol, asset_class=asset_class, timeframe=timeframe,
                     regime=train_regime, strategy=strategy.name, split="TRAIN",
-                    bars=len(train), result=train_result,
+                    bars=len(train), result=train_result, run_id=run_id,
+                    source=source, strategy_version=version,
                 )
                 self.store.record_result(
                     symbol=symbol, asset_class=asset_class, timeframe=timeframe,
                     regime=oos_regime, strategy=strategy.name, split="OOS",
-                    bars=len(oos), result=oos_result,
+                    bars=len(oos), result=oos_result, run_id=run_id,
+                    source=source, strategy_version=version,
                 )
                 train_count += 1
                 oos_count += 1

@@ -47,7 +47,10 @@ async def shadow_loop(
                 len(state.positions),
                 len(state.pending_orders),
             )
-            await engine.run_once(config.runtime.discovery_rows)
+            await engine.run_once(
+                config.runtime.discovery_rows,
+                portfolio_snapshot=state.snapshot,
+            )
         except Exception as exc:
             logger.exception("SHADOW CYCLE failed | error=%s", exc)
         try:

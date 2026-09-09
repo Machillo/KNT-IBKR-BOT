@@ -8,6 +8,7 @@ from pathlib import Path
 from ib_async import Stock
 
 from backtest.engine import BacktestEngine
+from backtest.universes import VALIDATION_UNIVERSES, universe_symbols
 from backtest.validation import run_validation_matrix, robustness_score, write_validation_report
 from config.config import config
 from core.connection import IBKRConnection
@@ -49,11 +50,16 @@ async def run(symbols: list[str], output_dir: str) -> None:
             symbol = raw.strip().upper()
             if not symbol:
                 continue
-            qualified = await ib.qualifyContractsAsync(Stock(symbol, "SMART", "USD"))
-            if not qualified:
-                print(f"{symbol}: SKIPPED could_not_qualify")
+            try:
+                qualified = await ib.qualifyContractsAsync(Stock(symbol, "SMART", "USD"))
+                if not qualified:
+                    print(f"{symbol}: SKIPPED could_not_qualify")
+                    continue
+                contract = qualified[0]
+            except Exception as exc:
+                print(f"{symbol}: ERROR qualification {exc}")
                 continue
-            contract = qualified[0]
+
             for profile in PROFILES:
                 try:
                     bars = await history.bars(contract, duration=profile.duration, bar_size=profile.bar_size)
@@ -131,11 +137,22 @@ async def run(symbols: list[str], output_dir: str) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="KNT multi-horizon strategy/symbol robustness validation")
-    parser.add_argument("symbols", nargs="+", help="Arbitrary stocks/ETFs for this validation batch")
+    parser = argparse.ArgumentParser(description="KNT multi-horizon strategy/symbol/universe robustness validation")
+    parser.add_argument("symbols", nargs="*", help="Arbitrary stocks/ETFs for this validation batch")
+    parser.add_argument(
+        "--universe",
+        choices=[*VALIDATION_UNIVERSES.keys(), "all"],
+        help="Reproducible diagnostic cohort only; never changes KNT's dynamic trading universe",
+    )
     parser.add_argument("--output-dir", default="reports/backtests")
     args = parser.parse_args()
-    asyncio.run(run(args.symbols, args.output_dir))
+    selected = list(args.symbols)
+    if args.universe:
+        selected.extend(universe_symbols(args.universe))
+    selected = list(dict.fromkeys(symbol.upper() for symbol in selected if symbol.strip()))
+    if not selected:
+        parser.error("provide symbols and/or --universe")
+    asyncio.run(run(selected, args.output_dir))
 
 
 if __name__ == "__main__":

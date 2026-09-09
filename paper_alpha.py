@@ -49,7 +49,7 @@ async def shadow_loop(
             )
             await engine.run_once(
                 config.runtime.discovery_rows,
-                portfolio_snapshot=state.snapshot,
+                portfolio_state=state,
             )
         except Exception as exc:
             logger.exception("SHADOW CYCLE failed | error=%s", exc)
@@ -89,11 +89,12 @@ async def main() -> None:
             intelligence,
             max_candidates=config.runtime.shadow_max_candidates,
             quote_budget=config.runtime.universe_quote_budget,
+            risk_manager=context.risk,
         )
         portfolio_state = PortfolioStateService(ib)
         portfolio_history = PortfolioHistoryStore()
         logger.info(
-            "PAPER ALPHA SHADOW running | account=%s interval=%ss scanners=4 rows_per_scanner=%s quote_budget=%s deep_candidates=%s | NO STRATEGY ORDERS",
+            "PAPER ALPHA SHADOW running | account=%s interval=%ss scanners=4 rows_per_scanner=%s quote_budget=%s deep_candidates=%s | HARD RISK + PORTFOLIO GATES ACTIVE | NO STRATEGY ORDERS",
             account.account,
             config.runtime.shadow_interval_seconds,
             config.runtime.discovery_rows,

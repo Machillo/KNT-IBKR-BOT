@@ -96,6 +96,7 @@ class PaperExecutionEngine:
         risk_manager=None,
         journal: TradeJournalStore | None = None,
         acceptance_delay_seconds: float = 0.35,
+        session_policy=None,
     ) -> None:
         self.ib = ib
         self.account = account
@@ -105,6 +106,7 @@ class PaperExecutionEngine:
         self.orders = OrderManager(ib, account=account)
         self.journal = journal or TradeJournalStore()
         self.acceptance_delay_seconds = max(0.0, float(acceptance_delay_seconds))
+        self.session_policy = session_policy
 
     @staticmethod
     def _normalize_stock_price(value: float) -> float:
@@ -129,6 +131,17 @@ class PaperExecutionEngine:
         if side == "SHORT":
             return request.target_price < request.entry_price < request.stop_price
         return False
+
+    def _session_allows(self, contract) -> bool:
+        if self.session_policy is None:
+            return True
+        sec_type = str(getattr(contract, "secType", "") or "").upper()
+        if sec_type not in {"STK", ""}:
+            return False
+        try:
+            return bool(self.session_policy.state().market_open)
+        except Exception:
+            return False
 
     def _has_duplicate(self, symbol: str) -> bool:
         target = symbol.upper()
@@ -183,6 +196,9 @@ class PaperExecutionEngine:
         if not self.paper_authorized:
             self.journal.record(request, status="BLOCKED", reason="paper_execution_not_authorized")
             return PaperExecutionResult(False, "paper_execution_not_authorized")
+        if not self._session_allows(contract):
+            self.journal.record(request, status="BLOCKED", reason="market_session_closed")
+            return PaperExecutionResult(False, "market_session_closed")
         if self.risk_manager is not None and bool(getattr(self.risk_manager, "trading_locked", False)):
             self.journal.record(request, status="BLOCKED", reason="risk_manager_locked")
             return PaperExecutionResult(False, "risk_manager_locked")

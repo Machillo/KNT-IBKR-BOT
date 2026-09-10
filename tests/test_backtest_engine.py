@@ -1,7 +1,7 @@
 from backtest.engine import BacktestEngine
 from market.history import PriceBar
 from strategies.library import TrendFollowingStrategy
-from strategies.momentum import MomentumStrategy
+from strategies.momentum import MomentumStrategy, SignalSide, StrategySignal
 
 
 def make_bars(count=120):
@@ -48,3 +48,35 @@ def test_invalid_max_position_pct_is_rejected():
             pass
         else:
             raise AssertionError(f"max_position_pct={value} should be rejected")
+
+
+class OneShotLongStrategy:
+    warmup = 1
+
+    def evaluate(self, bars):
+        if len(bars) == 2:
+            return StrategySignal(SignalSide.LONG, 90, 100.0, 90.0, 120.0, "one_shot")
+        return StrategySignal(SignalSide.FLAT, 0, None, None, None, "flat")
+
+
+def test_signal_executes_at_next_bar_open_not_signal_bar_close():
+    bars = [
+        PriceBar("0", 100.0, 101.0, 99.0, 100.0, 1000),
+        PriceBar("1", 100.0, 101.0, 99.0, 100.0, 1000),
+        PriceBar("2", 110.0, 112.0, 109.0, 111.0, 1000),
+        PriceBar("3", 111.0, 121.0, 110.0, 120.0, 1000),
+    ]
+    result = BacktestEngine(commission_bps=0, slippage_bps=0).run(bars, OneShotLongStrategy())
+    assert result.trades == 1
+    assert result.trade_log[0].entry == 110.0
+    assert result.trade_log[0].exit == 120.0
+
+
+def test_gap_through_target_skips_stale_pending_signal():
+    bars = [
+        PriceBar("0", 100.0, 101.0, 99.0, 100.0, 1000),
+        PriceBar("1", 100.0, 101.0, 99.0, 100.0, 1000),
+        PriceBar("2", 125.0, 126.0, 124.0, 125.0, 1000),
+    ]
+    result = BacktestEngine(commission_bps=0, slippage_bps=0).run(bars, OneShotLongStrategy())
+    assert result.trades == 0

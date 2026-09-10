@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from math import sqrt
 
 
 @dataclass(frozen=True)
@@ -27,7 +26,7 @@ class Gen4PortfolioResult:
 
 
 def admit_candidates(rows: list[Gen4Candidate], *, min_trades: int = 12, min_positive_month_rate: float = 50.0, max_dd_pct: float = 10.0) -> list[Gen4Candidate]:
-    """Evidence gate. Test is used only to decide whether a Gen3 survivor is worth portfolio research."""
+    """Evidence gate for portfolio research candidates."""
     return [
         r for r in rows
         if r.trades >= min_trades
@@ -40,8 +39,7 @@ def admit_candidates(rows: list[Gen4Candidate], *, min_trades: int = 12, min_pos
 def _month_key(value: object) -> str:
     if isinstance(value, datetime):
         return f"{value.year:04d}-{value.month:02d}"
-    text = str(value)
-    return text[:7]
+    return str(value)[:7]
 
 
 def simulate_equal_risk_portfolio(
@@ -51,12 +49,7 @@ def simulate_equal_risk_portfolio(
     max_strategy_weight: float = 0.20,
     max_gross_weight: float = 1.0,
 ) -> Gen4PortfolioResult:
-    """Combine realized monthly strategy returns with one shared capital pool.
-
-    The simulator never sums independent account returns. Each active sleeve receives
-    equal capital, capped per strategy and by total gross exposure. This is deliberately
-    conservative until event-level concurrent-position simulation is introduced.
-    """
+    """Combine realized monthly strategy returns with one shared capital pool."""
     if initial_equity <= 0:
         raise ValueError("initial_equity must be positive")
     if not 0 < max_strategy_weight <= 1 or not 0 < max_gross_weight <= 1:

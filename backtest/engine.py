@@ -44,6 +44,10 @@ class BacktestResult:
 class BacktestEngine:
     """Long/short single-position simulator with stop/target and configurable costs.
 
+    Signals are evaluated only after a bar is complete and are eligible to execute at
+    the *next* bar's open. This prevents a strategy from using a bar's closing data and
+    simultaneously receiving that same closing price as an executable fill.
+
     Position size is bounded by both stop-risk and maximum notional exposure. Equity
     drawdown is measured mark-to-market on every bar so open risk cannot disappear
     from validation merely because a trade has not closed yet.
@@ -85,6 +89,16 @@ class BacktestEngine:
         estimated_round_trip_cost = (entry + close) * qty * self.cost_bps / 10_000
         return realized_equity + gross - estimated_round_trip_cost
 
+    @staticmethod
+    def _entry_is_valid(side: SignalSide, entry: float, stop: float, target: float) -> bool:
+        if min(entry, stop, target) <= 0:
+            return False
+        if side == SignalSide.LONG:
+            return stop < entry < target
+        if side == SignalSide.SHORT:
+            return target < entry < stop
+        return False
+
     def run(self, bars: list[PriceBar], strategy) -> BacktestResult:
         equity = self.initial_equity
         peak_marked = equity
@@ -95,8 +109,26 @@ class BacktestEngine:
         warmup = int(getattr(strategy, "warmup", 60))
 
         position = None
+        pending_signal = None
         for i in range(warmup, len(bars)):
             bar = bars[i]
+
+            # A signal generated from bar i-1 may only execute now, at bar i's open.
+            # Keep the original stop/target levels. If the market gaps through either
+            # protective boundary, the stale setup is skipped rather than receiving an
+            # impossible fill or silently changing its intended geometry.
+            if position is None and pending_signal is not None:
+                signal = pending_signal
+                pending_signal = None
+                entry = float(bar.open)
+                stop = float(signal.stop)
+                target = float(signal.target)
+                if self._entry_is_valid(signal.side, entry, stop, target):
+                    qty = self._position_qty(equity=equity, entry=entry, stop=stop)
+                    if qty > 0:
+                        position = (signal.side, entry, stop, target, qty)
+
+            # A newly opened position is exposed to the full high/low range of this bar.
             if position is not None:
                 side, entry, stop, target, qty = position
                 exit_price = None
@@ -123,12 +155,12 @@ class BacktestEngine:
                     trades.append(BacktestTrade(side.value, entry, exit_price, pnl, ret * 100, reason))
                     position = None
 
-            if position is None:
+            # Evaluate only after the current bar has been fully processed. Any signal is
+            # queued for the next bar; a final-bar signal therefore never receives a fill.
+            if position is None and i + 1 < len(bars):
                 signal = strategy.evaluate(bars[:i + 1])
                 if signal.side != SignalSide.FLAT and signal.entry and signal.stop and signal.target:
-                    qty = self._position_qty(equity=equity, entry=signal.entry, stop=signal.stop)
-                    if qty > 0:
-                        position = (signal.side, signal.entry, signal.stop, signal.target, qty)
+                    pending_signal = signal
 
             marked = self._marked_equity(equity, position, float(bar.close))
             peak_marked = max(peak_marked, marked)

@@ -65,14 +65,9 @@ def _swing_bounds(bars: list[PriceBar], lookback: int = 30) -> tuple[float, floa
 
 
 class FibonacciTrendPullbackStrategy:
-    """Trend + Fibonacci pullback + momentum confirmation.
+    """Trend + Fibonacci pullback + momentum confirmation."""
 
-    This is an independently quantified research hypothesis inspired by common
-    discretionary concepts discussed by Alex Ruiz: trend direction, retracement
-    zones and confluence. It is not a transcription of any proprietary setup.
-    """
-
-    name = "alex_fib_trend_pullback_v1"
+    name = "fib_trend_pullback_v1"
     warmup = 80
 
     def evaluate(self, bars: list[PriceBar]) -> StrategySignal:
@@ -141,7 +136,7 @@ class FibonacciTrendPullbackStrategy:
 class LiquidityFibReversalStrategy:
     """Liquidity sweep + reclaim/rejection + Fibonacci location + RSI filter."""
 
-    name = "alex_liquidity_fib_reversal_v1"
+    name = "liquidity_fib_reversal_v1"
     warmup = 70
 
     def evaluate(self, bars: list[PriceBar]) -> StrategySignal:
@@ -205,7 +200,7 @@ class LiquidityFibReversalStrategy:
 class StructureSRConfluenceStrategy:
     """Market structure + dynamic support/resistance + trend/volume confirmation."""
 
-    name = "alex_structure_sr_confluence_v1"
+    name = "structure_sr_confluence_v1"
     warmup = 80
 
     def evaluate(self, bars: list[PriceBar]) -> StrategySignal:

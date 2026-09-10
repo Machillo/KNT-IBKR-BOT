@@ -62,7 +62,7 @@ class FibTrendSweepStrategy:
     def __init__(self, params: FibTrendParams) -> None:
         self.params = params
         self.name = (
-            f"alex2_fib_lb{params.swing_lookback}_"
+            f"fibtrend_lb{params.swing_lookback}_"
             f"f{int(params.fib_near*1000)}_{int(params.fib_far*1000)}_"
             f"rr{int(params.rr*10)}_r{params.rsi_padding}"
         )
@@ -101,16 +101,16 @@ class FibTrendSweepStrategy:
             risk = price - stop
             if risk > 0:
                 score = 58 + min(24, (fast - slow) / slow * 3500)
-                return _directional(SignalSide.LONG, score, price, stop, price + p.rr * risk, "alex2_fib_trend_long")
+                return _directional(SignalSide.LONG, score, price, stop, price + p.rr * risk, "fib_trend_long")
 
         if trend_down and lower_down <= price <= upper_down and (38 - p.rsi_padding) <= rv <= (58 + p.rsi_padding):
             stop = max(hi, price + 1.25 * a)
             risk = stop - price
             if risk > 0:
                 score = 58 + min(24, (slow - fast) / slow * 3500)
-                return _directional(SignalSide.SHORT, score, price, stop, max(0.01, price - p.rr * risk), "alex2_fib_trend_short")
+                return _directional(SignalSide.SHORT, score, price, stop, max(0.01, price - p.rr * risk), "fib_trend_short")
 
-        return _flat("alex2_fib_trend_absent", 18)
+        return _flat("fib_trend_absent", 18)
 
 
 @dataclass(frozen=True)
@@ -128,7 +128,7 @@ class LiquidityFibSweepStrategy:
     def __init__(self, params: LiquidityFibParams) -> None:
         self.params = params
         self.name = (
-            f"alex2_liq_s{params.structure_lookback}_w{params.sweep_lookback}_"
+            f"liqfib_s{params.structure_lookback}_w{params.sweep_lookback}_"
             f"f{int(params.fib_threshold*1000)}_rr{int(params.rr*10)}_r{params.rsi_edge}"
         )
 
@@ -165,7 +165,7 @@ class LiquidityFibSweepStrategy:
             if risk > 0:
                 reclaim = (price - prior_lo) / a
                 score = 62 + min(26, max(0.0, reclaim) * 18)
-                return _directional(SignalSide.LONG, score, price, stop, price + p.rr * risk, "alex2_liquidity_discount_long")
+                return _directional(SignalSide.LONG, score, price, stop, price + p.rr * risk, "liquidity_discount_long")
 
         if buyside and price >= premium and rv > (50 + p.rsi_edge):
             stop = max(cur.high + 0.15 * a, price + a)
@@ -173,9 +173,9 @@ class LiquidityFibSweepStrategy:
             if risk > 0:
                 reject = (prior_hi - price) / a
                 score = 62 + min(26, max(0.0, reject) * 18)
-                return _directional(SignalSide.SHORT, score, price, stop, max(0.01, price - p.rr * risk), "alex2_liquidity_premium_short")
+                return _directional(SignalSide.SHORT, score, price, stop, max(0.01, price - p.rr * risk), "liquidity_premium_short")
 
-        return _flat("alex2_liquidity_fib_absent", 18)
+        return _flat("liquidity_fib_absent", 18)
 
 
 def candidate_strategies() -> list[object]:

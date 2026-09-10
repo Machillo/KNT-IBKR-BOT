@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from math import sqrt
 
 from market.history import PriceBar
-from strategies.alex_ruiz import (
+from strategies.confluence import (
     FibonacciTrendPullbackStrategy,
     LiquidityFibReversalStrategy,
     StructureSRConfluenceStrategy,

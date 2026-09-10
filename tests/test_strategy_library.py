@@ -27,11 +27,11 @@ def test_all_single_asset_strategies_evaluate_without_error():
         assert 0 <= signal.score <= 100
 
 
-def test_alex_ruiz_inspired_families_are_registered():
+def test_confluence_families_are_registered():
     names = {factory.name for factory in SINGLE_ASSET_STRATEGIES}
-    assert "alex_fib_trend_pullback_v1" in names
-    assert "alex_liquidity_fib_reversal_v1" in names
-    assert "alex_structure_sr_confluence_v1" in names
+    assert "fib_trend_pullback_v1" in names
+    assert "liquidity_fib_reversal_v1" in names
+    assert "structure_sr_confluence_v1" in names
 
 
 def test_selector_returns_ranked_evaluations():

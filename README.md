@@ -1,101 +1,80 @@
-# KNT IBKR Bot — Paper Autonomous Core
+# KNT IBKR Bot — Paper Alpha
 
-Safety-first autonomous trading infrastructure for Interactive Brokers using Python and `ib_async`.
+Safety-first autonomous trading research bot using Python, `ib_async`, TWS/IB Gateway and Interactive Brokers Paper Trading.
 
-## Current checkpoint
+## Current architecture
 
-This build is intentionally **Paper-first** and does not arm a production trading strategy yet. It is now structured as a long-running autonomous core rather than a collection of one-shot tests.
+`IBKR discovery -> market data/liquidity -> historical bars -> regime detection -> strategy library -> selector -> shadow decision -> risk -> execution`
 
-Implemented:
+The strategy layer never sends orders directly. Autonomous strategy execution remains disabled by default.
 
-- Async TWS / IB Gateway connection with reconnect attempts
-- Standard LIVE-port lock unless explicitly enabled
-- Account snapshot and account-scoped broker reconciliation
-- Persistent daily NetLiquidation baseline by account/date
-- Sticky daily-loss lock across restarts
-- Shared RiskManager gate for new exposure
-- Configurable max trade risk, max position value, and daily-loss limits
-- Kill Switch with DRY_RUN and ARMED modes
-- Account-scoped cancellation + liquidation + broker-side flat verification
-- Fail-closed supervisor loop that continuously rechecks daily equity
-- Startup lock when unexpected positions/open orders exist
-- Explicit Paper broker smoke test behind a flag
-- Broker-confirmed `position=0 / open_orders=0` after the smoke round-trip
-- IBKR scanner discovery adapter for US most-active stocks
-- Read-only market intelligence pipeline: scanner -> quotes -> spread/liquidity filter -> ranking
-- Strategy layer remains disabled until intelligence/risk behavior is Paper-validated
+## Strategy library
 
-## Setup
+The initial selector evaluates seven single-asset families plus one two-asset family:
 
-```bash
-python -m venv .venv
-source .venv/Scripts/activate
-python -m pip install --upgrade pip
-pip install -r requirements.txt
-cp .env.example .env
-pytest -q
-python main.py
-```
+1. Breakout (`breakout_v1`)
+2. Momentum + Gap (`momentum_gap_v1`)
+3. Swing / Market Structure (`swing_structure_v1`)
+4. Trend Following (`trend_following_v1`)
+5. Mean Reversion (`mean_reversion_v1`)
+6. Range Trading (`range_v1`)
+7. Quantified SMC / Liquidity Sweeps (`smc_liquidity_v1`)
+8. Pairs / Market Neutral (`pairs_market_neutral_v1`)
 
-PowerShell activation:
+`momentum_v1` remains in the repository as the original baseline used to validate the backtest engine; it is not part of the eight-family selector.
 
-```powershell
-.\.venv\Scripts\Activate.ps1
-```
+## Market universe
 
-## Safe default run
+KNT does **not** use a permanent ticker whitelist. Discovery is scanner-plan driven through IBKR. A scanner plan describes a broker market segment (`instrument`, `locationCode`, `scanCode`); strategies do not know or care which ticker list produced the candidate.
 
-With the default flags, `python main.py`:
+The currently validated runtime adapter is `STK / STK.US.MAJOR / MOST_ACTIVE`. Additional IBKR scanner segments can plug into the same discovery service via `ScannerPlan`/`scan_many` without changing strategy code. Asset-specific risk/execution models must be added before autonomous order execution is allowed for derivatives/FX.
 
-1. connects to Paper,
-2. reads account state,
-3. restores/creates the daily risk baseline,
-4. reconciles broker positions/orders,
-5. starts the continuous risk supervisor,
-6. places **no strategy orders**.
-
-The old SPY BUY/SELL smoke test no longer runs every startup. To run it intentionally:
+## Safe Paper configuration
 
 ```env
-RUN_BROKER_SMOKE_TESTS=true
-```
-
-Return it to `false` after the test.
-
-## Read-only discovery test
-
-To test the first market-intelligence adapter without placing orders:
-
-```env
-RUN_DISCOVERY_PROBE=true
-DISCOVERY_ROWS=10
-```
-
-This asks IBKR for a US-stock scanner result, requests quotes sequentially, rejects unusable/wide-spread names, and logs a ranking. It is market intelligence, **not** a trading strategy.
-
-## Kill Switch
-
-Development default:
-
-```env
+IBKR_HOST=127.0.0.1
+IBKR_PORT=7497
+IBKR_CLIENT_ID=901
+IBKR_READONLY=false
+ALLOW_LIVE_TRADING=false
+MAX_TRADE_RISK_PCT=0.10
+MAX_DAILY_LOSS_PCT=0.10
+MAX_POSITION_PCT=0.10
 KILL_SWITCH_ENABLED=true
 KILL_SWITCH_DRY_RUN=true
+MARKET_DATA_TYPE=3
+SUPERVISOR_POLL_SECONDS=15
+REQUIRE_FLAT_STARTUP=true
+RUN_BROKER_SMOKE_TESTS=false
+RUN_DISCOVERY_PROBE=false
+DISCOVERY_ROWS=10
+AUTONOMOUS_TRADING_ENABLED=false
+SHADOW_TRADING_ENABLED=true
+SHADOW_INTERVAL_SECONDS=900
 ```
 
-When the daily-loss condition is reached, the lock is persisted immediately. In DRY_RUN, the bot logs what it would cancel/flatten but does not send liquidation actions.
+## Local validation
 
-`KILL_SWITCH_DRY_RUN=false` arms broker actions and must only be enabled for a controlled Paper test. The armed path cancels working orders for the selected account, sends offsetting market orders for reported positions, and requires broker-side reconciliation to flat.
+```bash
+git fetch origin
+git checkout feature/paper-alpha
+git pull
+pytest -q
+python run_strategy_suite.py SPY --duration "180 D" --bar-size "1 hour"
+python paper_alpha.py
+```
 
-## Safety properties
+The suite runner prints return, max drawdown, trades, win rate, profit factor and Sharpe for every single-asset family plus the original momentum baseline.
 
-- A restart cannot reset the same day's risk baseline.
-- A sticky daily Kill Switch cannot be bypassed by creating a fresh RiskManager.
-- New exposure goes through RiskGatedOrderManager.
-- Risk-reducing exits use a separate path.
-- Monitoring errors lock new entries fail-closed.
-- Unexpected startup exposure can lock the session.
-- LIVE standard ports remain blocked while `ALLOW_LIVE_TRADING=false`.
+The shadow process discovers candidates dynamically, detects regime, evaluates all applicable strategies, selects the strongest setup or `NO_TRADE`, evaluates pair opportunities and sends no strategy orders.
 
-## What is intentionally not claimed yet
+Look for `SHADOW DECISION`, `SHADOW SETUP` and `SHADOW PAIR` in the log.
 
-This checkpoint is **not a profitable autonomous strategy** and is **not production/live ready**. The current discovery adapter covers US stocks first. Forex, futures, options, strategy selection, portfolio-level exposure/risk models, asset-specific sizing/multipliers, and robust strategy research are subsequent intelligence/strategy phases.
+## Risk / production status
+
+- Paper only during this phase.
+- `ALLOW_LIVE_TRADING=false` blocks standard live ports.
+- Persistent daily-loss state and sticky kill switch are retained.
+- Kill-switch liquidation remains dry-run by default until explicitly Paper-tested.
+- Cross-asset discovery is scanner-plan ready, but autonomous execution must use the correct contract multiplier/currency/options risk model for each asset class.
+- No strategy currently has a claim of durable edge. The next stages are broad backtesting, out-of-sample/walk-forward validation, persistent strategy performance evidence, portfolio risk and controlled Paper execution.

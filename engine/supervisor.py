@@ -170,9 +170,18 @@ class PaperSupervisor:
         today = (now or datetime.now(ZoneInfo("America/New_York"))).date().isoformat()
         if self.context is None or today == self.context.trading_date:
             return
-        persisted, created = self.store.load_or_create(
-            account=self.context.account, trading_date=today, starting_equity=equity)
         risk = self.context.risk
+        try:
+            persisted, created = self.store.load_or_create(
+                account=self.context.account, trading_date=today, starting_equity=equity)
+        except Exception as exc:
+            # A state-file failure (OneDrive lock, invalid equity at the nightly reset) must never
+            # stop the daily guard / kill switch: lock entries, keep the last baseline, retry next poll.
+            if not risk.trading_locked:
+                risk.lock_trading(f"daily baseline roll failed: {type(exc).__name__}")
+            logger.critical("SUPERVISOR DAY ROLL FAILED | entries locked; guard keeps the last baseline | %s",
+                            type(exc).__name__)
+            return
         if persisted.kill_switch_triggered and not risk.trading_locked:
             risk.lock_trading(persisted.trigger_reason or "sticky daily Kill Switch")
         self.context = replace(self.context, trading_date=today, starting_equity=persisted.starting_equity,

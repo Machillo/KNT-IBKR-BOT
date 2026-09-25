@@ -96,3 +96,17 @@ def test_evaluate_itself_rolls_the_baseline_when_the_date_changes(isolated_state
     sup.context = replace(sup.context, trading_date="2000-01-03", starting_equity=50_000)
     asyncio.run(sup.evaluate())
     assert sup.context.trading_date != "2000-01-03" and sup.context.starting_equity == 100_000
+
+
+def test_a_failed_day_roll_never_stops_the_daily_guard_or_kill_switch(isolated_state_dir, monkeypatch):
+    import asyncio
+    from dataclasses import replace
+
+    sup, ib = _supervisor(isolated_state_dir, net_liq=100_000)
+    calls = _record_kill(sup)
+    sup.context = replace(sup.context, trading_date="2000-01-03")
+    monkeypatch.setattr(sup.store, "load_or_create", lambda **k: (_ for _ in ()).throw(RuntimeError("locked")))
+    ib.net_liq = 85_000                                     # -15 % from the last good baseline
+    asyncio.run(sup.evaluate())
+    assert calls, "the kill switch must still run"
+    assert sup.context.risk.trading_locked

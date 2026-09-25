@@ -98,21 +98,46 @@ def f4_gap_down_reversal(symbol, bars, ctx) -> int:
     return 1 if gap <= -0.03 and bars[-1].close < bars[-2].close else 0
 
 
+def _beta(sym_bars, k, spy_bars, lookback: int = 60) -> float | None:
+    """OLS beta of daily-bar returns vs SPY over the ``lookback`` bars ending at k (causal)."""
+    if k < lookback + 1 or len(spy_bars) < lookback + 1:
+        return None
+    xs, ys = [], []
+    sym_window = sym_bars[k - lookback:k + 1]
+    spy_window = spy_bars[-(lookback + 1):]
+    for a, b, sa, sb in zip(sym_window, sym_window[1:], spy_window, spy_window[1:]):
+        if a.close <= 0 or sa.close <= 0:
+            return None
+        ys.append(b.close / a.close - 1)
+        xs.append(sb.close / sa.close - 1)
+    mx, my = sum(xs) / len(xs), sum(ys) / len(ys)
+    vx = sum((x - mx) ** 2 for x in xs)
+    if vx <= 0:
+        return None
+    return sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / vx
+
+
 def f5_residual_reversal(symbol, bars, ctx) -> int:
-    if symbol in INDEX_ETFS or len(bars) < 6 or "SPY" not in ctx.data:
+    """Bottom decile of the 5-bar return net of beta x SPY 5-bar return (beta from the previous
+    60 bars, both series ending at t). Ranking on the beta-adjusted residual is what makes this
+    different from F2 (a common SPY term alone would not change the ranking)."""
+    if symbol in INDEX_ETFS or len(bars) < 70 or "SPY" not in ctx.data:
         return 0
     t = _stamp(bars[-1])
     spy = ctx.bars_through("SPY", t)
-    if spy is None or len(spy) < 6 or spy[-6].close <= 0:
+    if spy is None or len(spy) < 66 or spy[-6].close <= 0:
         return 0
     spy_r5 = spy[-1].close / spy[-6].close - 1
 
     def resid(b, i):
-        if i < 5 or b[i - 5].close <= 0:
+        if i < 66 or b[i - 5].close <= 0:
             return None
-        return b[i].close / b[i - 5].close - 1 - spy_r5
+        beta = _beta(b, i, spy)
+        if beta is None:
+            return None
+        return b[i].close / b[i - 5].close - 1 - beta * spy_r5
 
-    values = {s: v for s, v in ctx.cross_section(t, f"resid5", resid).items() if s not in INDEX_ETFS}
+    values = {s: v for s, v in ctx.cross_section(t, "resid5_beta", resid).items() if s not in INDEX_ETFS}
     return 1 if _in_quantile(values, symbol, 0.10, top=False) else 0
 
 

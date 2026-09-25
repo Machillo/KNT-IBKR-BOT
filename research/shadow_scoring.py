@@ -301,26 +301,30 @@ class ShadowScorer:
 
 
 def _excess_vs_cycle(rows, evaluated: str) -> dict:
-    """FWD1/FWD2 measure: side-adjusted 5-bar forward return minus the mean 5-bar forward return
-    of every scored decision in the same discovery cycle (point-in-time cohort benchmark)."""
+    """FWD1/FWD2 measure: side-adjusted GROSS 5-bar forward return minus the mean 5-bar forward
+    return of every scored decision in the same discovery cycle (point-in-time cohort
+    benchmark). Costs (~9 bps round trip) are NOT subtracted here. The t-stat is computed over
+    per-cycle means (decisions in a cycle share market moves and overlap in time)."""
     from math import sqrt
 
     by_cycle: dict[str, list] = {}
     for r in rows:
         if r["fwd_5"] is not None:
             by_cycle.setdefault(r["cycle_id"], []).append(r)
-    excess = []
+    cycle_means = []
+    n_events = 0
     for cycle_rows in by_cycle.values():
         bench = sum(r["fwd_5"] for r in cycle_rows) / len(cycle_rows)
-        for r in cycle_rows:
-            if r["evaluated"] == evaluated:
-                sign = -1.0 if r["side"] == "SHORT" else 1.0
-                excess.append(sign * (r["fwd_5"] - bench))
-    n = len(excess)
+        picked = [(-1.0 if r["side"] == "SHORT" else 1.0) * (r["fwd_5"] - bench)
+                  for r in cycle_rows if r["evaluated"] == evaluated]
+        if picked:
+            n_events += len(picked)
+            cycle_means.append(sum(picked) / len(picked))
+    n = len(cycle_means)
     if n == 0:
-        return {"n": 0, "mean_excess_pct": None, "t": None}
-    m = sum(excess) / n
+        return {"n": 0, "cycles": 0, "mean_excess_pct": None, "t": None}
+    m = sum(cycle_means) / n
     if n < 2:
-        return {"n": n, "mean_excess_pct": m, "t": None}
-    var = sum((x - m) ** 2 for x in excess) / (n - 1)
-    return {"n": n, "mean_excess_pct": m, "t": (m / sqrt(var / n)) if var > 0 else None}
+        return {"n": n_events, "cycles": n, "mean_excess_pct": m, "t": None}
+    var = sum((x - m) ** 2 for x in cycle_means) / (n - 1)
+    return {"n": n_events, "cycles": n, "mean_excess_pct": m, "t": (m / sqrt(var / n)) if var > 0 else None}

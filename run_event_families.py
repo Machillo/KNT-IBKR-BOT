@@ -21,8 +21,9 @@ MIN_F1_DATES = 12
 
 def fmt(stats) -> str:
     t = "  n/a" if stats.nw_t is None else f"{stats.nw_t:5.2f}"
-    return (f"events={stats.events:5d} dates={stats.dates:4d} net_excess={stats.mean_net_excess_bps:7.1f}bps "
-            f"raw={stats.mean_raw_bps:7.1f}bps hit={stats.hit_rate_pct:4.1f}% t={t}")
+    return (f"events={stats.events:5d} dates={stats.dates:4d} net_excess(per-date)={stats.mean_net_excess_bps:7.1f}bps "
+            f"per-event={stats.per_event_net_bps:7.1f}bps raw={stats.mean_raw_bps:7.1f}bps hit={stats.hit_rate_pct:4.1f}% "
+            f"t={t} lag={stats.nw_lag}")
 
 
 def study(data, name, segment, horizon=None, **kw):
@@ -73,7 +74,10 @@ def main() -> None:
         print(f"\n{name}")
         print(f"  daily TRAIN  {fmt(tr)}")
         print(f"  daily VAL    {fmt(va)}")
-        print(f"  4h    VAL    {fmt(sw)}")
+        label = "4h    VAL    " if not name.startswith("F1") else "4h    VAL*   "
+        print(f"  {label}{fmt(sw)}")
+        if name.startswith("F1"):
+            print("    * on 4h bars 252/21 bars = ~6-month/2-week momentum: a different signal, not used for F1")
         min_events = MIN_EVENTS
         if name.startswith("F1"):
             ok3_train = sorted(tr_events, key=lambda e: e.entry_time)

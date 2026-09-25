@@ -4,8 +4,11 @@ The three hypotheses were registered in `docs/experiments/LOG.md` on 2026-09-24 
 changed here. This document fixes HOW they are evaluated, before any forward result exists.
 The evaluator is `research/fwd_protocol.py`, with tests in `tests/test_fwd_protocol.py`.
 Changing any constant below is a new pre-registration (new id, new evidence window), never an
-edit of this one. The version was revised twice (FWD-v1 r1 and r2), after the quant-methodology reviews of
-2026-09-24 and before any v2 forward row existed.
+edit of this one. The version was revised three times: r1 and r2 after the quant-methodology
+reviews of 2026-09-24, and r3 after the round-4 reviews of 2026-09-25. All three came before
+any window was registered and before any v2 forward row existed; no pre-registration shadow
+row was looked at. r3 adds registration integrity, blinding, per-arm missingness, honest FWD2
+labelling, the instrument-type universe and the deployment recipe.
 
 **A monthly return target (e.g. "5 %/month") is NOT a statistical criterion and plays no role
 in any decision below.** A return number without a sample size, a benchmark, costs and a
@@ -19,18 +22,38 @@ multiple-testing correction cannot tell skill from luck or from market drift.
 - FORWARD: from 2026-09-25. Only data recorded after registration.
 
 ## Evidence window and binding moment
-- **Start:** REGISTERED once with `python run_shadow_report.py --register-fwd-window`, after
-  this code is merged and shadow-only is restarted from a clean checkout.
-  - The registration file (`<journal>.fwd_window.json`) pins three things: the start time, the
-    **decision-code fingerprint** (a content hash of every file on the decision path) and the
-    decision-config hash. It cannot be moved or overwritten.
+- **Start:** REGISTERED once by the shadow-only process itself, at its first start from the
+  pinned checkout: `python run_shadow_only.py --register-fwd-window` (see §Pinned deployment).
+  The fingerprint and config hash are therefore the ones actually running.
+  - The registration file (`<journal>.fwd_window.json`) pins five things:
+    - the start time (it cannot be backdated);
+    - the registration time;
+    - the **decision-code fingerprint** (a content hash of every file on the decision path,
+      the cost model included);
+    - the decision-config hash;
+    - the **protocol fingerprint** (evaluator, scorer, quality gates, protocol calendar, cost
+      model).
+    It is never overwritten.
   - Commits that do not touch the decision path (docs, scorer, reports) do not change the
     fingerprint. Any change to the decision path does, and invalidates the window.
   - Rows before the registered start never count.
-  - **Tamper evidence:** the registration command prints one line. It must be COMMITTED to
-    `docs/experiments/LOG.md` immediately. The evaluator refuses a window whose registration
-    file is not recorded there. The file sits in gitignored `state/`, so on its own it could be
-    deleted and re-registered later; the commit cannot be.
+  - **Tamper evidence:** registration prints one line. It must be committed to
+    `docs/experiments/LOG.md` (on any branch of this repository) within **3 days**. The
+    evaluator reads the git history of every ref and refuses:
+    - a registration line that was never committed, or was committed outside that delay;
+    - a registration line that no longer matches the registration file;
+    - **more than one `FWD-v1` registration ever committed**, even one that was later deleted.
+      A new window needs a new protocol id and counts in the family.
+    - evaluator, scorer or gates code that differs from the protocol fingerprint;
+    - shadow-only cycles of the registered decision code more than 1 hour before the start
+      (a pre-registration look).
+  - **Ending a window:** `run_shadow_only.py --end-fwd-window` appends an end record (never
+    deletes it) and logs it at CRITICAL. An ended window is never binding. Its interim state at
+    the end, without outcome statistics, must be reported in LOG.md, and it counts in the family.
+  - **Blinding:** until the binding moment the evaluator returns NO outcome statistic (means,
+    t, missing shares, breakdowns print as `BLINDED`). `run_score_shadow.py` prints counts only
+    unless `--unblind`, and every unblinded run is an interim look that must be recorded in
+    LOG.md.
 - **Binding cutoff:** the FIRST trading day, never after **2027-03-31**, on which every sample
   minimum of the test holds, or the deadline.
   - The minimums are counted from the **decisions** themselves, after the per-cycle quality
@@ -54,7 +77,9 @@ multiple-testing correction cannot tell skill from luck or from market drift.
 ## Population (FWD1, FWD2)
 Every condition must hold:
 - the decision is canonical (not a duplicate), in `shadow_only` mode, with learning frozen,
-  and not a `CANDIDATE_ERROR`;
+  and neither a `CANDIDATE_ERROR` nor an `INSTRUMENT_EXCLUDED` row;
+- **universe:** US common stocks, ADRs and REITs as typed by IBKR (`stockType`). ETFs
+  (leveraged and inverse included), ETNs and unknown types are excluded BEFORE the decision;
 - the market was open at the cycle, and the cycle carries no BLOCKING gate;
 - it was decided within 80 minutes of its decision bar completing. This excludes stale-bar
   re-decisions after restarts or overnight;
@@ -108,7 +133,16 @@ sample.
     LONG evaluation ranks below it.
   - The per-strategy records in `shadow_opportunities` are never used to redefine the
     counterfactual.
+- **What it tests in practice (stated before registration):** the TRAIN census
+  (docs/ARCHITECTURE_TARGET.md §2) shows that most NO_TRADE decisions come from the
+  high-volatility pause, not from the score threshold. FWD2 therefore tests NO_TRADE as it
+  actually occurs, mostly the pause. The two arms come from different regimes, so the test is
+  **regime-confounded by construction**. A KEEP or REJECT is a statement about the NO_TRADE
+  rule as a whole, never about the score threshold alone.
+- **Pre-registered descriptive breakdown (never tested):** at the binding moment, the
+  counterfactual arm is reported by NO_TRADE reason (`no_trade_reasons`).
 - **Minimums:** ≥ 300 events in each arm and ≥ 40 paired days.
+- **Missing data:** the 10 % limit applies to EACH arm separately.
 - **Decisions:**
   - **KEEP:** mean difference > 0 and t ≥ critical.
   - **REJECT** (hypothesis supported): the 95 % t-interval of the difference lies within
@@ -157,27 +191,65 @@ size its window.
 ## Exploratory records (`shadow_opportunities`) — governance
 Shadow-only also journals EVERY strategy evaluation of every decision (engine/opportunity.py).
 These records are **exploratory, not FWD evidence**:
-1. The FWD evaluator, the scorer and the quality gates never read them (enforced by a test).
-2. **Embargo.** No per-strategy or per-context analysis of forward data until both FWD1 and
-   FWD2 reach their binding cutoff (or 2027-03-31). Until then they are only recorded.
+1. The FWD evaluator, the scorer and the quality gates never read them. A test enforces this
+   for those modules; it is a code convention, not a database permission.
+2. **Embargo.** This is a procedural commitment, not a technical lock: the records sit in the
+   same SQLite file. No per-strategy or per-context analysis of forward data happens until
+   both FWD1 and FWD2 reach their binding cutoff (or 2027-03-31); until then the records are
+   only recorded. The same applies to the unblinded scorer report (`--unblind`): its
+   per-regime and FWD-style statistics are interim looks.
 3. After the embargo, every exploratory query is written down in `docs/experiments/LOG.md`,
    so the number of looks K is counted. Any resulting hypothesis gets a NEW registration and is
    tested only on data recorded after that registration.
 4. Nothing derived from them — a selector bonus, a lifecycle promotion, an admission filter —
    may change the decision path while any FWD window is open.
-5. Strategy × context exploration should preferably use historical TRAIN/VALIDATION replays
-   (the same pipeline emits the same records offline), so forward data is not spent.
+5. Strategy × context exploration uses **TRAIN only**. VALIDATION is spent (15 tests;
+   LOG.md). The replay does not journal opportunities yet (roadmap PR-B), so this is a design
+   commitment, not a working tool.
 
-## Pinned deployment
-The window's evidence comes from ONE immutable checkout.
-- Shadow-only runs from a separate worktree at the registered commit, for example:
-  ```bash
-  git worktree add ../knt-fwd <commit>
-  ```
-- Development continues elsewhere; later commits do not touch the running process.
-- `run_shadow_only.py` refuses to (re)start when a registered window exists and the running
-  decision code or decision config differs from the registration.
-- `--end-fwd-window` overrides this only as an explicit acknowledgement that the window ends.
+## Pinned deployment (exact recipe)
+The window's evidence comes from ONE immutable checkout. State and `.env` are anchored to each
+checkout, so the recipe makes them explicit.
+1. **Create the pinned worktree** at the reviewed commit, and copy the reviewed `.env` into it
+   (`.env` is untracked):
+   ```bash
+   git worktree add ../knt-fwd <commit>
+   ```
+   In that `.env`: `MARKET_DATA_TYPE=1`, `MAX_TRADE_RISK_PCT=0.01`, no ACK variables.
+2. **Point every process at the same absolute state directories** (environment variables, set
+   the same way in every shell that touches the window):
+   - `KNT_STATE_DIR=<absolute path>`: the shared FWD state, holding the journal, the
+     registration file and the scores;
+   - `KNT_BOT_STATE_DIR=<absolute path of the trading bot's state/>`: read-only, used to mirror
+     the bot's sticky kill and drawdown lock.
+3. **Start and register, from the worktree:**
+   ```bash
+   python run_shadow_only.py --register-fwd-window
+   ```
+   Registration refuses unless `MAX_TRADE_RISK_PCT <= 0.01` and `MARKET_DATA_TYPE = 1`.
+4. **Commit the printed line** to `docs/experiments/LOG.md` on the development checkout (main
+   branch), within 3 days. Git history is shared by all worktrees.
+5. **Score and report from the worktree**, with the same `KNT_STATE_DIR`:
+   ```bash
+   python run_fetch_journal_bars.py
+   ```
+   ```bash
+   python run_score_shadow.py
+   ```
+   ```bash
+   python run_shadow_report.py --persist
+   ```
+   Output shows counts only.
+6. **Evaluate from the worktree too** (`python run_shadow_report.py --fwd`). The evaluator code
+   is pinned by the protocol fingerprint; it finds the committed line through the shared git
+   history.
+
+Development continues on other branches; later commits never touch the running process.
+`run_shadow_only.py` refuses to (re)start when a registered window exists and the running
+decision code or config differs from it; a corrupt registration file is refused too. Only
+`--end-fwd-window` overrides this, and that ENDS the window (recorded, reported, counted).
+Safety fixes to the decision path found during the window go to the development branch; the
+pinned process keeps running until the window binds or is explicitly ended.
 
 ## Forward replays
 `run_pipeline_backtest.py --segment forward` requires `--confirm-forward`. Comparing variants

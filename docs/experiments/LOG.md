@@ -216,3 +216,16 @@ shorthand rules in this table where they differ (e.g. "t ≥ 2" → the K = 3 St
 value; "t over per-cycle means" → per-trading-day means with Hansen–Hodrick lag-1 standard
 errors, which is more conservative). The window registration line is appended below when the
 human registers it.
+
+**FWD-v1 r3 (2026-09-25, before any registration or v2 forward row; no shadow row looked at):**
+- **Registration integrity:** protocol fingerprint; one committed registration per id, read from
+  git history; no backdating; pre-registration looks refused; ended windows recorded and
+  reported.
+- **Blinding:** interim statistics are blinded until the binding moment.
+- **Population:** missing data gated per arm; the universe is limited to IBKR `stockType`
+  COMMON/ADR/REIT.
+- **FWD2 labelling:** FWD2 is stated honestly as a test of the NO_TRADE rule as it occurs
+  (mostly the high-volatility pause, regime-confounded), with a descriptive breakdown by
+  NO_TRADE reason. The counterfactual definition (`top_*`) is unchanged from the registered
+  `counterfactual_vs_cycle_fwd5`.
+- **Exploration:** TRAIN only.

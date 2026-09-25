@@ -185,3 +185,28 @@ def test_virtual_entry_is_pending_exposure_in_the_next_cycle(tmp_path):
 def test_yesterdays_last_bar_is_not_traded_at_the_open(tmp_path):
     decisions = run(engine(tmp_path, bar_age=timedelta(hours=17)))
     assert (decisions[0].action, decisions[0].portfolio_reason) == ("SHADOW_BLOCKED", "stale_decision_bar")
+
+
+def test_virtual_book_survives_a_restart(tmp_path):
+    first = engine(tmp_path)
+    first.max_entries_per_day = 1
+    assert run(first)[0].action == "SHADOW_SUBMIT"
+    restarted = engine(tmp_path, n_candidates=2)          # same journal, fresh process
+    restarted.max_entries_per_day = 1
+    actions = {d.symbol: (d.action, d.portfolio_reason) for d in run(restarted)}
+    assert actions["A"][0] != "SHADOW_SUBMIT"             # A is already pending exposure
+    assert actions["B"] == ("SHADOW_BLOCKED", "daily_entry_limit_reached")
+
+
+def test_journal_universe_exposes_the_runtime_liquidity_order(tmp_path):
+    import sqlite3 as sq
+    from research.universe_provider import JournalUniverse
+    from research.shadow_journal import ShadowJournal
+    db = tmp_path / "u.db"
+    ShadowJournal(db)
+    with sq.connect(db) as conn:
+        conn.execute("INSERT INTO discovery_cycles (cycle_id, created_at) VALUES ('c', '2026-03-02T15:00:00+00:00')")
+        for sym, score in (("LOW", 10.0), ("HIGH", 90.0)):
+            conn.execute("INSERT INTO discovery_funnel (cycle_id, created_at, symbol, status, liquidity_score) "
+                         "VALUES ('c', '', ?, 'ranked_eligible', ?)", (sym, score))
+    assert JournalUniverse(db).rank_at(datetime(2026, 3, 2, 11)) == {"HIGH": 0, "LOW": 1}

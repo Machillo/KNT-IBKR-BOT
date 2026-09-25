@@ -221,6 +221,17 @@ class ShadowJournal:
                  cycle_id),
             )
 
+    def would_be_entries_on(self, utc_date: str, run_mode: str) -> list[dict]:
+        """Canonical SHADOW_SUBMIT rows of a UTC date (to rebuild the virtual book after a restart)."""
+        with sqlite3.connect(self.path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """SELECT symbol, con_id, quantity, notional, entry FROM shadow_decisions
+                   WHERE action='SHADOW_SUBMIT' AND duplicate_of IS NULL AND run_mode=?
+                     AND substr(created_at, 1, 10)=? ORDER BY id""",
+                (run_mode, utc_date)).fetchall()
+        return [dict(r) for r in rows]
+
     def record_funnel(self, cycle_id: str, funnel) -> int:
         now = datetime.now(timezone.utc).isoformat()
         rows = [

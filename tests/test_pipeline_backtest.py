@@ -76,7 +76,7 @@ def test_long_only_by_default_matches_live_executor():
 
 def test_gross_exposure_and_position_caps_hold():
     data = {f"S{i}": walk(10 + i) for i in range(15)}
-    bt = pipeline(data, max_correlation=1.0)
+    bt = pipeline(data, max_correlation=1.0, max_entries_per_day=20)  # let exposure, not the cap, bind
     result = bt.run()
     assert result.trades > 0
     # rebuild open notional over time from the trade log

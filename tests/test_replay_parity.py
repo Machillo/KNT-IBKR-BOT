@@ -203,32 +203,37 @@ class Scored:
         return StrategySignal(SignalSide.LONG, self.score, p, p * 0.97, p * 1.03, self.name)
 
 
-def test_capacity_goes_to_the_highest_score_not_alphabetical_order():
+def test_capacity_goes_in_the_runtime_liquidity_order_not_by_score():
+    """The runtime meets candidates in liquidity order and the first approved one takes the
+    daily cap; the replay must do the same (it used to favour the highest selector score)."""
     rng = Random(3)
     data = {name: walk(rng.randint(0, 999)) for name in ("AAA", "ZZZ")}
+    # ZZZ trades 10x the dollar volume of AAA -> more liquid -> met first.
+    data["ZZZ"] = [PriceBar(b.time, b.open, b.high, b.low, b.close, b.volume * 10) for b in data["ZZZ"]]
     bt = PipelineBacktest(data, PipelineConfig(cost_model=CostModel.zero(), pause_high_volatility=False,
                                                max_entries_per_day=1, max_correlation=1.0))
 
-    class BySymbol:
-        name, warmup = "by_symbol", 30
+    class AAAScoresHigher:
+        name, warmup = "aaa_scores_higher", 30
 
         def evaluate(self, bars):
             p = bars[-1].close
-            score = 90 if abs(p - data["ZZZ"][len(bars) - 1].close) < 1e-9 else 60
+            score = 90 if abs(p - data["AAA"][len(bars) - 1].close) < 1e-9 else 60
             return StrategySignal(SignalSide.LONG, score, p, p * 0.97, p * 1.03, "s")
 
-    bt.selector.strategies = [BySymbol()]
+    bt.selector.strategies = [AAAScoresHigher()]
     result = bt.run()
-    first = min(result.trade_log, key=lambda x: x.entry_time)
+    first = min(result.trade_log, key=lambda x: (x.entry_time, x.symbol))
     assert first.symbol == "ZZZ"
 
 
 def test_intraday_orders_decided_after_the_session_close_are_refused():
     bars = []
-    for d in range(10):
+    start = datetime(2024, 1, 2)
+    for d in range(30):                                   # > DECISION_CONTEXT_BARS of history
         for h in range(7):
             p = 100 + d + h * 0.1
-            bars.append(PriceBar(datetime(2024, 1, 2 + d, 10 + h), p, p + 0.5, p - 0.5, p, 1e6))
+            bars.append(PriceBar(start + timedelta(days=d, hours=10 + h), p, p + 0.5, p - 0.5, p, 1e6))
 
     class LastBarOnly:
         name, warmup = "last_bar_only", 30
@@ -478,3 +483,20 @@ def test_point_in_time_sectors_fail_closed_when_unknown_or_stale(tmp_path):
     assert s.sector_at("AAA", datetime(2020, 7, 1)) == "Energy"
     assert s.sector_at("AAA", datetime(2021, 7, 1)) is None              # stale
     assert s.sector_at("ZZZ", datetime(2020, 7, 1)) is None              # unknown
+
+
+
+def test_replay_skips_decisions_without_the_full_runtime_context_and_flags_bar_size():
+    short = replay({"A": walk(1, n=100)}).run()
+    assert short.submitted == 0 and short.warmup_skipped > 0
+    hourly = replay({"A": walk(1, n=300)}).run()
+    assert hourly.hourly_data is True and hourly.reference_unchecked == hourly.submitted
+    daily = [PriceBar(T0 + timedelta(days=i), b.open, b.high, b.low, b.close, b.volume)
+             for i, b in enumerate(walk(1, n=300))]
+    assert replay({"A": daily}).run().runtime_equivalent is False     # the runtime never decides on daily bars
+
+
+def test_every_decision_knob_breaks_runtime_equivalence():
+    for change in (dict(min_score=70.0), dict(strategies=("x",)), dict(max_entries_per_day=5),
+                   dict(max_correlation=0.9), dict(pause_high_volatility=False)):
+        assert PipelineConfig(**change).runtime_equivalent is False, change

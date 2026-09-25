@@ -105,6 +105,7 @@ class ShadowTradingEngine:
         self.config_hash = config_hash
         self.max_entries_per_day = max(0, int(max_entries_per_day))
         self._virtual_book: list[tuple[str, PendingOrderExposure]] = []
+        self._virtual_book_restored = False
 
     async def _fresh_reference(self, candidate) -> tuple[float | None, int | None]:
         """Read-only two-sided quote taken right before a paper submission.
@@ -259,6 +260,28 @@ class ShadowTradingEngine:
                            + sum(o.notional for o in extra))
         return PortfolioState(snapshot, state.positions, state.pending_orders + extra)
 
+    def _restore_virtual_book(self) -> None:
+        """After a restart, today's would-be entries come back from the journal: a restart must
+        not free capacity or reset the daily cap (REPLAY_PARITY N1)."""
+        self._virtual_book_restored = True
+        if self.journal is None:
+            return
+        today = datetime.now(timezone.utc).date().isoformat()
+        try:
+            rows = self.journal.would_be_entries_on(today, self.run_mode)
+        except Exception as exc:
+            logger.warning("VIRTUAL BOOK restore failed | error=%s", exc)
+            return
+        known = {o.symbol for _, o in self._virtual_book}
+        for r in rows:
+            if r["symbol"] in known or not r["quantity"] or not r["notional"]:
+                continue
+            self._virtual_book.append((today, PendingOrderExposure(
+                symbol=r["symbol"], asset_class="STK", quantity=float(r["quantity"]),
+                reference_price=float(r["entry"] or 0.0), notional=float(r["notional"]),
+                con_id=int(r["con_id"] or 0))))
+            known.add(r["symbol"])
+
     def _virtual_entries_today(self) -> int:
         today = datetime.now(timezone.utc).date().isoformat()
         return sum(1 for d, _ in self._virtual_book if d == today)
@@ -374,6 +397,8 @@ class ShadowTradingEngine:
         decisions: list[ShadowDecision] = []
         history_by_symbol: dict[str, list[PriceBar]] = {}
         if self.research_execution:
+            if not self._virtual_book_restored:
+                self._restore_virtual_book()
             portfolio_state = self._with_virtual_book(portfolio_state)
         position_returns = {} if portfolio_state is None else await self._position_returns(portfolio_state)
 

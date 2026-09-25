@@ -82,11 +82,13 @@ class JournalUniverse:
                 members[symbol] = min(members.get(symbol, key), key)
         self.times = sorted(cycles)
         self.members = []
+        self.orders: list[dict[str, int]] = []
         for t in self.times:
             ordered = sorted(cycles[t], key=lambda sym: (cycles[t][sym], sym))
             if top_n is not None:
                 ordered = ordered[:max(0, int(top_n))]
             self.members.append(frozenset(ordered))
+            self.orders.append({sym: k for k, sym in enumerate(ordered)})
 
     def members_at(self, t) -> frozenset[str]:
         dt = as_datetime(t)
@@ -100,6 +102,17 @@ class JournalUniverse:
         if i < 0 or when - self.times[i] > self.max_age:
             return frozenset()  # fail closed: no recent snapshot, nobody is tradable
         return self.members[i]
+
+    def rank_at(self, t) -> dict[str, int]:
+        """Liquidity order of the snapshot used at t (0 = most liquid), as the runtime ranks it."""
+        dt = as_datetime(t)
+        if dt is not None and dt.tzinfo is None:
+            dt = dt.replace(tzinfo=ZoneInfo("America/New_York"))
+        when = _naive_utc(dt)
+        i = -1 if when is None else bisect_right(self.times, when) - 1
+        if i < 0 or when - self.times[i] > self.max_age:
+            return {}
+        return dict(self.orders[i])
 
 
 _EXCHANGE_TZ = ZoneInfo("America/New_York")

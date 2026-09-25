@@ -31,7 +31,6 @@ from bisect import bisect_left, bisect_right
 from itertools import groupby
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime
-from decimal import ROUND_HALF_UP, Decimal
 from math import floor
 from zoneinfo import ZoneInfo
 
@@ -104,9 +103,12 @@ class PipelineConfig:
     def runtime_equivalent(self) -> bool:
         """False when a research-only knob changes the decision path (results then describe a
         variant, NOT what the runtime would do)."""
-        return (self.regime_filter is None and self.symbol_trend_sma is None and self.market_filter is None
-                and self.bracket_atr is None and self.use_volatility_multiplier and self.entry_mode == "limit_day"
-                and not self.allow_short and self.context_bars == DECISION_CONTEXT_BARS)
+        default = PipelineConfig()
+        knobs = ("min_score", "strategies", "allow_short", "use_volatility_multiplier", "max_gross_exposure_pct",
+                 "cash_reserve_pct", "max_correlation", "max_entries_per_day", "entry_mode",
+                 "pause_high_volatility", "regime_filter", "symbol_trend_sma", "market_filter", "bracket_atr",
+                 "context_bars")
+        return all(getattr(self, k) == getattr(default, k) for k in knobs)
 
 
 @dataclass(frozen=True)
@@ -157,6 +159,9 @@ class PipelineResult:
     pipeline_version: int = PIPELINE_VERSION
     blocked_by_pretrade: int = 0
     runtime_equivalent: bool = True
+    warmup_skipped: int = 0
+    reference_unchecked: int = 0
+    hourly_data: bool = False
 
 
 @dataclass
@@ -206,10 +211,6 @@ def _key(value) -> datetime:
     return dt.replace(tzinfo=None)
 
 
-def _tick(price: float) -> float:
-    return float(Decimal(str(price)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
-
-
 class _FixedSizeAllocator:
     """Research-only wrapper: ignore the volatility multiplier (H6)."""
 
@@ -230,6 +231,10 @@ class PipelineBacktest:
         # Intraday data = some consecutive bars share a date. Intraday orders decided after the
         # session's last bar are refused (the executor's session policy is closed then).
         self.intraday = {s: any(a.date() == b.date() for a, b in zip(ts, ts[1:])) for s, ts in self.times.items()}
+        # The runtime decides on 1-hour bars only; any other bar size is a research variant.
+        gaps = [(b - a).total_seconds() for ts in self.times.values() for a, b in zip(ts, ts[1:])
+                if a.date() == b.date()]
+        self.hourly = bool(gaps) and sorted(gaps)[len(gaps) // 2] == 3600
         self.universe = universe
         self.selector = StrategySelector(
             cfg.min_score, performance_store=None,
@@ -335,7 +340,7 @@ class PipelineBacktest:
         trades: list[PipelineTrade] = []
         curve: list[tuple[object, float]] = []
         stats = dict(decisions=0, no_trade=0, rejected=0, submitted=0, expired=0, blocked=0, outside=0,
-                     session_closed=0, censored=0, pretrade=0)
+                     session_closed=0, censored=0, pretrade=0, warmup=0, reference_unchecked=0)
         peak_equity = cfg.initial_equity
         drawdown_locked = False
         in_market = total = 0
@@ -484,8 +489,12 @@ class PipelineBacktest:
                     drawdown_locked = True
                     self.risk.lock_trading("multi-day drawdown lock (replay; human reset only)")
 
-            # 3) decisions on the completed bars, strongest selection first
+            # 3) decisions on the completed bars, in the RUNTIME's order: by liquidity (the
+            #    universe's own ranking when it has one, else trailing dollar volume), never by
+            #    selector score — capacity and the daily cap go to whoever the runtime meets first.
             pending_decisions = []
+            liquidity_rank = getattr(self.universe, "rank_at", None)
+            ranks = liquidity_rank(t) if liquidity_rank is not None else None
             for _, symbol, i in group:
                 bars = self.data[symbol]
                 times = self.times[symbol]
@@ -496,10 +505,17 @@ class PipelineBacktest:
                     stats["outside"] += 1
                     continue
                 history = bars[max(0, i + 1 - cfg.context_bars):i + 1]
+                if len(history) < cfg.context_bars:
+                    stats["warmup"] += 1  # the runtime always sees the full context (except new listings)
+                    continue
                 selection = self.pipeline.select(history, symbol=symbol, asset_class="STK", timeframe="")
-                score = selection.selected.adjusted_score if selection.selected is not None else -1.0
-                pending_decisions.append((score, symbol, i, history, selection))
-            pending_decisions.sort(key=lambda x: (-x[0], x[1]))
+                if ranks is not None:
+                    order = ranks.get(symbol, len(ranks))
+                else:
+                    recent = history[-20:]
+                    order = -sum(float(b.close) * float(b.volume) for b in recent) / max(1, len(recent))
+                pending_decisions.append((order, symbol, i, history, selection))
+            pending_decisions.sort(key=lambda x: (x[0], x[1]))
             for _, symbol, i, history, selection in pending_decisions:
                 placed = self._decide(symbol, history, selection, i, t, state, orders, stats, entries_today)
                 if placed:
@@ -576,6 +592,8 @@ class PipelineBacktest:
             stats["pretrade"] += 1
             return False
         req = check.request
+        if not check.reference_checked:
+            stats["reference_unchecked"] += 1  # no historical quote tape (REPLAY_PARITY #7)
         orders[symbol] = _Order(
             symbol, decision.selection.selected.strategy, selection.regime.regime.value, signal.side,
             req.entry_price, req.stop_price, req.target_price, float(req.quantity), times[i + 1].date(),
@@ -623,7 +641,10 @@ class PipelineBacktest:
             monthly_returns_pct=tuple(r * 100 for r in monthly),
             submitted=stats["submitted"],
             blocked_by_pretrade=stats["pretrade"],
-            runtime_equivalent=cfg.runtime_equivalent,
+            runtime_equivalent=cfg.runtime_equivalent and self.hourly,
+            warmup_skipped=stats["warmup"],
+            reference_unchecked=stats["reference_unchecked"],
+            hourly_data=self.hourly,
             unfilled_expired=stats["expired"],
             blocked_by_cap_or_lock=stats["blocked"],
             outside_universe=stats["outside"],

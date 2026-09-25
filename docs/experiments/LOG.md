@@ -136,27 +136,41 @@ Otherwise REJECT; INCONCLUSIVE if steps 1–2 pass on fewer events than required
 "worth a pipeline implementation and forward shadow evidence", not an edge claim: the cohort is
 still hindsight-selected and the HOLDOUT stays unused until a frozen implementation exists.
 
-## Round 3 results (`run_event_families.py`; net excess per event after ≈ 9.3 bps round trip)
+## Round 3 results — CORRECTED (after the quant-methodology review)
+
+The first version of this table (commit 5b6d511) had two methodological bugs found by the
+independent review: (1) the Newey–West lag was set in BARS (horizon − 1) but applied to a series of
+event DATES, which for monthly F1 (≈17 dates, lag 20) collapsed the variance — the reported
+"t = 4.64 / 8.96" were artefacts; (2) F5 subtracted the same SPY return from every symbol, which
+cannot change the ranking, so it silently re-ran F2. Fixed in fd395ff: lag = median overlap of
+event windows in date units, no t below 30 dates, per-date means reported, beta-adjusted F5,
+holdout bars removed from memory. Decisions did not change. The re-run F5 is the pre-registered
+hypothesis correctly implemented, not a new test (K stays 15).
+
+Net excess = per-date mean after ≈ 9.3 bps round trip (per-event mean in brackets).
 
 | family | daily TRAIN (events / net bps / NW t) | daily VAL | 4h VAL | decision |
 |---|---|---|---|---|
-| F1 XS momentum 12-1 | 553 / −9.0 / −0.27 | 136 / **+523.7** / **4.64** | 144 / +298.8 / 8.96 | REJECT (TRAIN fails; TRAIN halves not both positive) |
-| F2 short-term reversal | 13 634 / −9.0 / −1.04 | 2 960 / +2.9 / 0.16 | 7 240 / −0.4 / −0.05 | REJECT |
-| F3 vol-compression breakout | 201 / +22.6 / −0.20 | 55 / +173.4 / 2.24 | 174 / −43.9 / −0.67 | REJECT |
-| F4 gap-down reversal | 1 010 / +6.9 / 0.61 | 191 / +178.7 / 2.28 | 198 / +51.8 / 0.34 | REJECT |
-| F5 market-residual reversal | 6 979 / −2.1 / −0.17 | 1 480 / +23.7 / 0.77 | 3 620 / +7.3 / 0.66 | REJECT |
-| F6 live selector LONG | 29 546 / −10.3 / −1.24 | 6 841 / **−26.5** / **−3.64** | 17 632 / −13.5 / −3.42 | REJECT (negative) |
+| F1 XS momentum 12-1 | 553 / −12.0 [−9.0] / −0.21 | 136 / +523.7 / n/a (17 dates < 30) | 4h is a different (~6-month) signal | REJECT (TRAIN fails; VAL not testable) |
+| F2 short-term reversal | 13 634 / −8.4 / −1.04 | 2 960 / +2.9 / 0.16 | 7 240 / −0.4 / −0.05 | REJECT |
+| F3 vol-compression breakout | 201 / −10.7 [+22.6] / −0.21 | 55 / +220.8 / 1.57 | 174 / −31.0 / −0.71 | REJECT |
+| F4 gap-down reversal | 1 010 / +23.1 / 0.61 | 191 / +224.0 / 2.63 | 198 / +13.3 / 0.31 | REJECT (VAL t < 2.71, TRAIN fails) |
+| F5 beta-residual reversal | 6 720 / −8.2 / −0.63 | 1 480 / +9.7 / 0.33 | 3 620 / +7.0 / 0.63 | REJECT |
+| F6 selector-logic LONG | 29 546 / −8.0 / −1.24 | 6 841 / **−37.0** / **−3.64** | 17 632 / −14.8 / −3.42 | REJECT (negative) |
 
-Reading:
-- **F1** is the textbook survivorship artefact the pre-registration warned about: nothing in
-  seven TRAIN years, then very strong in 2023-09 → 2025-03, when the hindsight-picked winners
-  (AI/semis) led. Cross-sectional momentum inside a cohort chosen *because* it went up cannot be
-  evaluated honestly here. Worth re-testing only on a point-in-time universe.
-- **F6** is the most consistent statistical result of the night: the live selector's LONG picks
-  **underperform the rest of the cohort** after costs, significantly in VALIDATION on both
-  profiles and negative in TRAIN. The current selector should not be trusted with capital.
-  Inverting it would be a new hypothesis fitted on the same data — not done.
-- Every "near miss" (F3, F4 at t≈2.2–2.3 in VAL) fails TRAIN or the other profile.
+Reading (worded per the review):
+- **F1**: nothing in seven TRAIN years; the large VALIDATION mean comes from 17 monthly dates in
+  2023-09 → 2025-03, when the hindsight-picked winners led. Not testable here; re-test only on a
+  point-in-time universe (FWD3).
+- **F6**: the selector's logic, run on DAILY and 4h bars (the live system runs it on 1-hour bars),
+  picks LONG setups that underperform the rest of the cohort after costs in VALIDATION on both
+  profiles; two-sided Bonferroni (K = 15 → 30 tails) needs |t| ≥ 2.94 and both clear it. TRAIN is
+  ≈ −1 bps gross (t −1.24): no information there, not anti-predictive. Supported conclusion: the
+  current selector logic shows no positive cross-sectional information and should not be trusted
+  with capital. It says nothing definitive about the live 1-hour configuration (FWD1 will).
+- Near misses (F3, F4 in VALIDATION) fail TRAIN and/or the other profile.
+- "Net excess" is not a tradeable long/short return: the benchmark leg carries no cost, and the
+  flat 2 bps commission allowance understates IBKR minimums for small orders.
 
 ## Stop condition reached on this dataset
 Tests on the protocol-v1 VALIDATION set: **15** (H1–H9 pipeline variants + F1–F6), plus
@@ -169,6 +183,6 @@ Scored with `run_score_shadow.py` on journaled decisions (point-in-time universe
 executor-style LIMIT/DAY entries). No parameter may change between now and evaluation.
 | id | hypothesis | measurement | decision rule |
 |---|---|---|---|
-| FWD1 | Selected LONG setups are not better than the cohort (replication of F6) | SELECTED outcomes and 5-bar forward returns vs same-cycle eligible names | after ≥ 300 non-duplicate selected decisions: report mean net return and t; a positive, t ≥ 2 result would contradict F6 |
-| FWD2 | NO_TRADE passes on setups as good as the ones it takes | COUNTERFACTUAL vs SELECTED net return | difference of means with t; ≥ 300 each |
+| FWD1 | Selected LONG setups are not better than the cohort (replication of F6 on 1-hour bars) | GROSS 5-bar forward return of SELECTED decisions minus the same-cycle mean (`selected_vs_cycle_fwd5`), t over per-cycle means | after ≥ 300 non-duplicate selected decisions: a mean above the ≈ 9 bps round-trip cost with t ≥ 2 would contradict F6 |
+| FWD2 | NO_TRADE passes on setups as good as the ones it takes | `counterfactual_vs_cycle_fwd5` vs `selected_vs_cycle_fwd5` (same measure) | difference of per-cycle means with t; ≥ 300 each |
 | FWD3 | Cross-sectional 12-1 momentum works on the point-in-time scanner universe | F1 signal on `JournalUniverse` + `reports/pit_cache` bars | needs ≥ 12 monthly rebalances of journal data; same KEEP rule as round 3 |

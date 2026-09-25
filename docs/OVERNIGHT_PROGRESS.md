@@ -107,7 +107,7 @@ Second re-verification round (6 reviewers, 2 integrity blockers + ~15 should-fix
 - **Day roll:** a failure keeps the guard running.
 - **Registration:** after start, with a risk-limit acknowledgement, both state dirs set and a
   fresh journal.
-Mutation check: see `tools/mutation_check.py`. Tests: 485 → 518.
+Mutation check: **38/38 killed** (`python tools/mutation_check.py`). Tests: 485 → 519.
 Design only (roadmap PR-B … PR-G, docs/ARCHITECTURE_TARGET.md §11): evidence store with pooling,
 InstrumentSpec, capital feasibility + heat/gap budget, calibrated comparison, lifecycle tooling,
 other asset classes.

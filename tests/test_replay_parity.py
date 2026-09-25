@@ -151,7 +151,7 @@ def test_point_in_time_csv_honours_delisting(tmp_path):
     path = tmp_path / "pit.csv"
     path.write_text("date,symbol,identifier,in_universe,delisted_on\n"
                     "2020-01-01,AAA,1,1,\n2020-01-01,BBB,2,1,2020-06-01\n"
-                    "2020-07-01,AAA,1,1,\n2020-07-01,BBB,2,1,2020-06-01\n", encoding="utf-8")
+                    "2020-07-01,AAA,1,1,\n2020-07-01,BBB,2,0,2020-06-01\n", encoding="utf-8")
     u = PointInTimeCsvUniverse(path, max_age_days=365)
     assert u.members_at(datetime(2020, 1, 1, 12)) == frozenset()          # same-day snapshot not yet effective
     assert u.members_at(datetime(2020, 3, 1)) == {"AAA", "BBB"}
@@ -435,3 +435,46 @@ def test_journal_universe_top_n_matches_the_runtime_deep_analysis_cap(tmp_path):
     at = datetime(2026, 3, 2, 11, 0)
     assert JournalUniverse(db).members_at(at) == {"LOW", "HIGH", "MID", "TIE"}
     assert JournalUniverse(db, top_n=2).members_at(at) == {"HIGH", "TIE"}   # score desc, then scanner rank
+
+
+def _pit(tmp_path, body, header="date,symbol,identifier,in_universe,delisted_on"):
+    path = tmp_path / "pit.csv"
+    path.write_text(header + "\n" + body, encoding="utf-8")
+    return path
+
+
+def test_point_in_time_loader_fails_closed_on_bad_data(tmp_path):
+    import pytest
+    cases = [
+        ("2020-01-01,AAA,1\n", "date,symbol,identifier"),                      # missing column
+        ("2020-01-01,AAA,,1,\n", None),                                        # empty identifier
+        ("2020-07-01,BBB,2,1,2020-06-01\n", None),                             # member after its delisting
+        ("2020-01-01,ABC,1,1,\n2020-01-01,ABC,9,1,\n", None),                  # ambiguous ticker
+    ]
+    for body, header in cases:
+        path = _pit(tmp_path, body, header) if header else _pit(tmp_path, body)
+        with pytest.raises(ValueError):
+            PointInTimeCsvUniverse(path)
+
+
+def test_point_in_time_loader_follows_ticker_changes_and_exchange_time(tmp_path):
+    # Identifier 7 was OLDCO until 2020-03-31, NEWCO afterwards.
+    path = _pit(tmp_path, "2020-03-31,OLDCO,7,1,\n2020-04-30,NEWCO,7,1,\n")
+    u = PointInTimeCsvUniverse(path, max_age_days=60)
+    assert u.members_at(datetime(2020, 4, 15, 10)) == {"OLDCO"}
+    assert u.members_at(datetime(2020, 5, 5, 10)) == {"NEWCO"}
+    # Aware UTC query converted to exchange time: 2020-05-01 03:00Z = 2020-04-30 23:00 ET (before the lag).
+    assert u.members_at(datetime(2020, 5, 1, 3, tzinfo=timezone.utc)) == {"OLDCO"}
+
+
+def test_point_in_time_sectors_fail_closed_when_unknown_or_stale(tmp_path):
+    from research.universe_provider import PointInTimeSectors
+    path = tmp_path / "sectors.csv"
+    path.write_text("date,symbol,identifier,sector\n2020-01-01,AAA,1,Technology\n2020-06-01,AAA,1,Energy\n",
+                    encoding="utf-8")
+    s = PointInTimeSectors(path, max_age_days=100)
+    assert s.sector_at("AAA", datetime(2020, 1, 1, 12)) is None          # same-day row not yet effective
+    assert s.sector_at("AAA", datetime(2020, 3, 1)) == "Technology"
+    assert s.sector_at("AAA", datetime(2020, 7, 1)) == "Energy"
+    assert s.sector_at("AAA", datetime(2021, 7, 1)) is None              # stale
+    assert s.sector_at("ZZZ", datetime(2020, 7, 1)) is None              # unknown

@@ -96,13 +96,49 @@ class JournalUniverse:
         return self.members[i]
 
 
-class PointInTimeCsvUniverse:
-    """External survivorship-free membership file (see docs/POINT_IN_TIME_DATA.md).
+_EXCHANGE_TZ = ZoneInfo("America/New_York")
+REQUIRED_MEMBERSHIP_COLUMNS = ("date", "symbol", "identifier", "in_universe")
+REQUIRED_SECTOR_COLUMNS = ("date", "symbol", "identifier", "sector")
 
-    Convention: a snapshot dated D describes membership KNOWN AT THE CLOSE of D; it takes
-    effect ``effective_lag_days`` later (default 1: from the next day) so same-day bars
-    never see it. ``delisted_on`` is enforced against the query time t, and a snapshot
+
+def _exchange_naive(value) -> datetime | None:
+    """Exchange (America/New_York) wall-clock time without tzinfo — the replay's time base.
+    Aware values are converted; naive values are taken as exchange time already."""
+    dt = as_datetime(value)
+    if dt is None:
+        return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(_EXCHANGE_TZ).replace(tzinfo=None)
+    return dt
+
+
+def _read_rows(path: str | Path, required: tuple[str, ...]) -> list[dict]:
+    with Path(path).open(newline="", encoding="utf-8") as fh:
+        reader = csv.DictReader(fh)
+        missing = [c for c in required if c not in (reader.fieldnames or [])]
+        if missing:
+            raise ValueError(f"point-in-time file {path} lacks columns {missing}")
+        rows = list(reader)
+    for n, row in enumerate(rows, 2):
+        for column in required:
+            if not str(row.get(column) or "").strip():
+                raise ValueError(f"{path}:{n}: empty {column!r}")
+    return rows
+
+
+class PointInTimeCsvUniverse:
+    """External survivorship-free membership file (spec: docs/POINT_IN_TIME_DATA.md).
+
+    Convention: a snapshot dated D (exchange date) describes membership KNOWN AT THE CLOSE of
+    D; it takes effect ``effective_lag_days`` later (default 1: from the next day) so same-day
+    bars never see it. ``delisted_on`` is enforced against the query time t, and a snapshot
     older than ``max_age_days`` yields an empty universe (fail closed).
+
+    Fails closed at LOAD time (ValueError) on: missing columns or values, one symbol mapped to
+    two identifiers in the same snapshot (ambiguous ticker), and an identifier marked in the
+    universe on or after its own delisting date (look-ahead or a data error). Ticker changes
+    are fine: every snapshot carries the symbol valid on that date for each identifier.
+    Times are exchange wall-clock (aware inputs are converted), like the replay's keys.
     """
 
     survivorship_biased = False
@@ -111,20 +147,54 @@ class PointInTimeCsvUniverse:
         self.lag = timedelta(days=max(0, int(effective_lag_days)))
         self.max_age = timedelta(days=max(1, int(max_age_days)))
         snapshots: dict[datetime, dict[str, datetime | None]] = {}
-        with Path(path).open(newline="", encoding="utf-8") as fh:
-            for row in csv.DictReader(fh):
-                date = _naive_utc(row["date"])
-                if date is None:
-                    raise ValueError(f"bad date in point-in-time universe: {row['date']!r}")
-                members = snapshots.setdefault(date + self.lag, {})
-                if str(row.get("in_universe", "1")).strip() in {"1", "true", "True"}:
-                    members[row["symbol"].strip().upper()] = _naive_utc(row.get("delisted_on") or "")
+        owners: dict[tuple[datetime, str], str] = {}
+        for row in _read_rows(path, REQUIRED_MEMBERSHIP_COLUMNS):
+            date = _exchange_naive(row["date"])
+            if date is None:
+                raise ValueError(f"bad date in point-in-time universe: {row['date']!r}")
+            symbol, identifier = row["symbol"].strip().upper(), row["identifier"].strip()
+            delisted = _exchange_naive(row.get("delisted_on") or "")
+            in_universe = str(row["in_universe"]).strip() in {"1", "true", "True"}
+            if in_universe and delisted is not None and delisted <= date:
+                raise ValueError(f"{identifier} ({symbol}) in universe on {date.date()} after delisting {delisted.date()}")
+            owner = owners.setdefault((date, symbol), identifier)
+            if owner != identifier:
+                raise ValueError(f"ambiguous ticker {symbol} on {date.date()}: identifiers {owner} and {identifier}")
+            members = snapshots.setdefault(date + self.lag, {})
+            if in_universe:
+                members[symbol] = delisted
         self.times = sorted(snapshots)
         self.members = [snapshots[t] for t in self.times]
 
     def members_at(self, t) -> frozenset[str]:
-        when = _naive_utc(t)
+        when = _exchange_naive(t)
         i = -1 if when is None else bisect_right(self.times, when) - 1
         if i < 0 or when - self.times[i] > self.max_age:
             return frozenset()
         return frozenset(sym for sym, delisted in self.members[i].items() if delisted is None or delisted > when)
+
+
+class PointInTimeSectors:
+    """Point-in-time sector classification (``date,symbol,identifier,sector``), same lag and
+    staleness convention as the membership file. ``sector_at(symbol, t)`` returns None when
+    unknown or stale, so the admission coordinator's ``require_sector_metadata`` fails closed
+    exactly as it does at runtime without IBKR contract details."""
+
+    def __init__(self, path: str | Path, *, effective_lag_days: int = 1, max_age_days: int = 400) -> None:
+        lag = timedelta(days=max(0, int(effective_lag_days)))
+        self.max_age = timedelta(days=max(1, int(max_age_days)))
+        history: dict[str, list[tuple[datetime, str]]] = {}
+        for row in _read_rows(path, REQUIRED_SECTOR_COLUMNS):
+            date = _exchange_naive(row["date"])
+            if date is None:
+                raise ValueError(f"bad date in sector file: {row['date']!r}")
+            history.setdefault(row["symbol"].strip().upper(), []).append((date + lag, row["sector"].strip()))
+        self.history = {sym: sorted(items) for sym, items in history.items()}
+
+    def sector_at(self, symbol: str, t) -> str | None:
+        when = _exchange_naive(t)
+        items = self.history.get(str(symbol).upper(), [])
+        i = -1 if when is None else bisect_right([d for d, _ in items], when) - 1
+        if i < 0 or when - items[i][0] > self.max_age:
+            return None
+        return items[i][1]

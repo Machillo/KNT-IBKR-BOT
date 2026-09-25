@@ -38,7 +38,8 @@ from zoneinfo import ZoneInfo
 from backtest.costs import BASELINE, CostModel
 from backtest.metrics import as_datetime, cagr, daily_equity, period_returns, sharpe, sortino
 from config.config import RiskConfig
-from engine.decision import DecisionPipeline, exposure_symbols, return_series
+from engine.decision import DECISION_CONTEXT_BARS, DecisionPipeline, exposure_symbols, return_series
+from execution import pretrade
 from engine.strategy_selector import StrategySelector
 from market.history import PriceBar
 from portfolio.admission import PortfolioAdmissionCoordinator
@@ -50,8 +51,11 @@ from strategies.momentum import SignalSide
 
 _EXCHANGE_TZ = ZoneInfo("America/New_York")
 
-CONTEXT_BARS = 450
-PIPELINE_VERSION = 3  # v3: quant-review fixes (aligned correlations, strict limit fills, score priority)
+CONTEXT_BARS = DECISION_CONTEXT_BARS  # shared with the runtime (engine/decision.py)
+# v3: quant-review fixes (aligned correlations, strict limit fills, score priority)
+# v4: runtime parity — shared context cap, executor pre-trade + hard-risk re-check on rounded
+#     prices, multi-day drawdown lock, config from .env, UTC->exchange time keys
+PIPELINE_VERSION = 4
 
 
 @dataclass(frozen=True)
@@ -77,9 +81,32 @@ class PipelineConfig:
     bracket_atr: tuple[float, float] | None = None
     cost_model: CostModel = BASELINE
     initial_equity: float = 100_000.0
+    max_drawdown_pct: float = 0.15                  # MAX_DRAWDOWN_PCT default (sticky lock)
+    context_bars: int = DECISION_CONTEXT_BARS
 
     def variant(self, **changes) -> "PipelineConfig":
         return replace(self, **changes)
+
+    @classmethod
+    def from_bot_config(cls, bot, **overrides) -> "PipelineConfig":
+        """The runtime's risk settings (from .env via BotConfig), so replay and runtime cannot
+        silently drift apart. Research-only knobs stay at their neutral defaults."""
+        risk = bot.risk
+        values = dict(
+            risk_pct=min(0.01, risk.max_trade_risk_pct), max_trade_risk_pct=risk.max_trade_risk_pct,
+            max_position_pct=risk.max_position_pct, daily_loss_pct=risk.max_daily_loss_pct,
+            max_drawdown_pct=risk.max_drawdown_pct,
+        )
+        values.update(overrides)
+        return cls(**values)
+
+    @property
+    def runtime_equivalent(self) -> bool:
+        """False when a research-only knob changes the decision path (results then describe a
+        variant, NOT what the runtime would do)."""
+        return (self.regime_filter is None and self.symbol_trend_sma is None and self.market_filter is None
+                and self.bracket_atr is None and self.use_volatility_multiplier and self.entry_mode == "limit_day"
+                and not self.allow_short and self.context_bars == DECISION_CONTEXT_BARS)
 
 
 @dataclass(frozen=True)
@@ -128,6 +155,8 @@ class PipelineResult:
     blocked_session_closed: int = 0
     censored_at_end: int = 0
     pipeline_version: int = PIPELINE_VERSION
+    blocked_by_pretrade: int = 0
+    runtime_equivalent: bool = True
 
 
 @dataclass
@@ -306,7 +335,9 @@ class PipelineBacktest:
         trades: list[PipelineTrade] = []
         curve: list[tuple[object, float]] = []
         stats = dict(decisions=0, no_trade=0, rejected=0, submitted=0, expired=0, blocked=0, outside=0,
-                     session_closed=0, censored=0)
+                     session_closed=0, censored=0, pretrade=0)
+        peak_equity = cfg.initial_equity
+        drawdown_locked = False
         in_market = total = 0
         day_key = None
         day_start_equity = self._realized
@@ -387,6 +418,8 @@ class PipelineBacktest:
                 entries_today = 0
                 self.risk.trading_locked = False  # daily lock is per trading date (sticky within it)
                 self.risk.lock_reason = ""
+                if drawdown_locked:
+                    self.risk.lock_trading("multi-day drawdown lock (replay; human reset only)")
 
             for _, symbol, i in group:
                 bar = self.data[symbol][i]
@@ -443,6 +476,13 @@ class PipelineBacktest:
 
             if active and day_start_equity > 0 and (day_start_equity - marked()) / day_start_equity >= cfg.daily_loss_pct:
                 self.risk.lock_trading("daily loss limit (replay)")
+            if active:
+                # Supervisor DrawdownGuard: sticky lock from the high-water mark (never auto-resets).
+                equity_now = marked()
+                peak_equity = max(peak_equity, equity_now)
+                if not drawdown_locked and peak_equity > 0 and (peak_equity - equity_now) / peak_equity >= cfg.max_drawdown_pct:
+                    drawdown_locked = True
+                    self.risk.lock_trading("multi-day drawdown lock (replay; human reset only)")
 
             # 3) decisions on the completed bars, strongest selection first
             pending_decisions = []
@@ -455,7 +495,7 @@ class PipelineBacktest:
                 if self.universe is not None and symbol not in self.universe.members_at(t):
                     stats["outside"] += 1
                     continue
-                history = bars[max(0, i + 1 - CONTEXT_BARS):i + 1]
+                history = bars[max(0, i + 1 - cfg.context_bars):i + 1]
                 selection = self.pipeline.select(history, symbol=symbol, asset_class="STK", timeframe="")
                 score = selection.selected.adjusted_score if selection.selected is not None else -1.0
                 pending_decisions.append((score, symbol, i, history, selection))
@@ -504,17 +544,41 @@ class PipelineBacktest:
             stats["rejected"] += 1
             return False
         times = self.times[symbol]
-        if self.intraday[symbol] and times[i + 1].date() != t.date():
-            stats["session_closed"] += 1  # decided on the session's last bar: executor refuses
+        signal = decision.selection.selected.signal
+        proposal = decision.proposal
+        # The executor's pure pre-transmission checks, in the executor's order. The session is
+        # closed when the decision was taken on the session's last bar (available after the close).
+        # There is no historical quote tape: the fresh-reference check is reported as unchecked.
+        check = pretrade.evaluate(
+            pretrade.PreTradeRequest(
+                side=signal.side.value, quantity=float(proposal.quantity),
+                entry_price=float(proposal.entry_price), stop_price=float(proposal.stop_price),
+                target_price=float(signal.target) if signal.target else 0.0, sec_type="STK"),
+            pretrade.PreTradeContext(
+                session_open=not (self.intraday[symbol] and times[i + 1].date() != t.date()),
+                trading_locked=self.risk.trading_locked, entries_today=entries_today,
+                max_entries_per_day=cfg.max_entries_per_day, allow_short=cfg.allow_short,
+                reference_available=False),
+        )
+        if check.reason == "market_session_closed":
+            stats["session_closed"] += 1
             return False
-        if self.risk.trading_locked or entries_today >= cfg.max_entries_per_day:
+        if check.reason in ("risk_manager_locked", "daily_entry_limit_reached"):
             stats["blocked"] += 1  # executor would refuse to transmit
             return False
-        signal = decision.selection.selected.signal
+        if not check.passed:
+            stats["pretrade"] += 1
+            return False
+        # Hard risk re-checked on the tick-rounded prices, exactly like the executor.
+        if pretrade.hard_risk_refusal(self.risk, equity=current.snapshot.net_liquidation,
+                                      entry_price=check.request.entry_price, stop_price=check.request.stop_price,
+                                      quantity=check.request.quantity):
+            stats["pretrade"] += 1
+            return False
+        req = check.request
         orders[symbol] = _Order(
             symbol, decision.selection.selected.strategy, selection.regime.regime.value, signal.side,
-            _tick(decision.proposal.entry_price), _tick(float(signal.stop)), _tick(float(signal.target)),
-            float(decision.proposal.quantity), times[i + 1].date(),
+            req.entry_price, req.stop_price, req.target_price, float(req.quantity), times[i + 1].date(),
         )
         stats["submitted"] += 1
         return True
@@ -558,6 +622,8 @@ class PipelineBacktest:
             equity_curve=tuple(curve),
             monthly_returns_pct=tuple(r * 100 for r in monthly),
             submitted=stats["submitted"],
+            blocked_by_pretrade=stats["pretrade"],
+            runtime_equivalent=cfg.runtime_equivalent,
             unfilled_expired=stats["expired"],
             blocked_by_cap_or_lock=stats["blocked"],
             outside_universe=stats["outside"],

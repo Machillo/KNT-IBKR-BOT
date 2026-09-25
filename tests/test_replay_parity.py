@@ -341,3 +341,83 @@ def test_ibkr_score_provider_requests_each_contract_once():
     for at in ("2026-01-05T15:00:00", "2026-01-05T16:00:00", "2026-01-05T17:00:00"):
         asyncio.run(provider.bars_from("A", 1, at, "1 hour"))
     assert calls == [1]
+
+
+# ---- v4 parity: shared context, executor pre-trade, drawdown lock, config from .env ----
+
+class _Recording(AlwaysLong):
+    def __init__(self):
+        self.lengths = []
+
+    def evaluate(self, bars):
+        self.lengths.append(len(bars))
+        return super().evaluate(bars)
+
+
+def test_replay_and_runtime_see_the_same_number_of_context_bars(tmp_path):
+    from engine.decision import DECISION_CONTEXT_BARS
+    from test_shadow_research_path import engine as shadow_engine
+    from test_shadow_research_path import run as shadow_run
+
+    bt = replay({"A": walk(1, n=400)})
+    rec = _Recording()
+    bt.selector.strategies = [rec]
+    bt.run()
+    assert max(rec.lengths) == DECISION_CONTEXT_BARS
+
+    shadow = shadow_engine(tmp_path)
+    live = _Recording()
+    shadow.selector.strategies = [live]
+
+    async def long_history(contract, **kw):
+        assert kw.get("duration") == "45 D"
+        return walk(2, n=300)
+    shadow.history.bars = long_history
+    shadow_run(shadow)
+    assert live.lengths == [DECISION_CONTEXT_BARS]
+
+
+def test_replay_applies_the_executor_pretrade_checks_on_rounded_prices():
+    class SubTick(AlwaysLong):
+        def evaluate(self, bars):
+            p = round(bars[-1].close, 2)
+            # stop 0.004 below entry: rounds to the entry -> invalid geometry after normalization
+            return StrategySignal(SignalSide.LONG, 99, p, p - 0.004, p * 1.03, "subtick")
+    bt = replay({"A": walk(3)})
+    bt.selector.strategies = [SubTick()]
+    result = bt.run()
+    assert result.submitted == 0 and result.blocked_by_pretrade > 0
+
+
+def test_replay_drawdown_lock_is_sticky_across_days():
+    # Steady decline: the multi-day drawdown lock must stop new entries and never reset.
+    down = []
+    price = 100.0
+    for i in range(600):
+        price *= 0.9985
+        down.append(PriceBar(T0 + timedelta(hours=i), price * 1.001, price * 1.004, price * 0.996, price, 1e6))
+    locked = replay({"A": down}, max_drawdown_pct=0.02, daily_loss_pct=0.5).run()
+    free = replay({"A": down}, max_drawdown_pct=0.5, daily_loss_pct=0.5).run()
+    assert locked.submitted < free.submitted
+    # The lock reaches admission first (snapshot.trading_locked), as at runtime.
+    assert locked.rejected_by_portfolio > free.rejected_by_portfolio
+
+
+def test_replay_config_follows_the_runtime_env():
+    from config.config import BotConfig, IBKRConfig, RiskConfig, RuntimeConfig
+
+    bot = BotConfig(ibkr=IBKRConfig(), runtime=RuntimeConfig(),
+                    risk=RiskConfig(max_trade_risk_pct=0.005, max_daily_loss_pct=0.02, max_position_pct=0.05,
+                                    max_drawdown_pct=0.08))
+    cfg = PipelineConfig.from_bot_config(bot)
+    assert (cfg.max_trade_risk_pct, cfg.daily_loss_pct, cfg.max_position_pct, cfg.max_drawdown_pct) == \
+        (0.005, 0.02, 0.05, 0.08)
+    assert cfg.risk_pct == 0.005 and cfg.runtime_equivalent
+
+
+def test_research_variants_are_flagged_as_not_runtime_equivalent():
+    assert PipelineConfig().runtime_equivalent is True
+    for change in (dict(regime_filter=("TRENDING",)), dict(symbol_trend_sma=50), dict(bracket_atr=(1.0, 2.0)),
+                   dict(use_volatility_multiplier=False), dict(entry_mode="next_open"), dict(context_bars=450)):
+        assert PipelineConfig(**change).runtime_equivalent is False
+    assert replay({"A": walk(1)}, regime_filter=("TRENDING",)).run().runtime_equivalent is False

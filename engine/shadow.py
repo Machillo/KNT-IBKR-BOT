@@ -9,7 +9,8 @@ from math import sqrt
 
 from ib_async import Contract
 
-from engine.decision import DecisionPipeline, portfolio_correlation, return_series, series_correlation
+from engine.decision import (DECISION_HISTORY_DURATION, DecisionPipeline, decision_context,
+                             portfolio_correlation, return_series, series_correlation)
 from engine.strategy_selector import StrategySelection, StrategySelector
 from execution import pretrade
 from execution.paper import PaperExecutionEngine, PaperExecutionRequest
@@ -323,7 +324,8 @@ class ShadowTradingEngine:
                 contract = Contract(conId=position.con_id, symbol=position.symbol,
                                     secType=position.asset_class, exchange=position.exchange or "SMART",
                                     currency=position.currency or "USD")
-                bars = await self.history.bars(contract, complete_only=True)
+                bars = decision_context(await self.history.bars(
+                    contract, duration=DECISION_HISTORY_DURATION, complete_only=True))
                 series = self._return_series(bars)
                 if series:
                     returns[position.symbol] = series
@@ -364,7 +366,8 @@ class ShadowTradingEngine:
         for candidate in candidates:
             attempted += 1
             try:
-                bars = await self.history.bars(candidate.contract, complete_only=True)
+                bars = decision_context(await self.history.bars(
+                    candidate.contract, duration=DECISION_HISTORY_DURATION, complete_only=True))
                 history_by_symbol[candidate.symbol] = bars
                 asset_class = candidate.contract.secType or "STK"
                 sector, sectors = None, {}

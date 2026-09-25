@@ -27,6 +27,19 @@ from portfolio.allocation import AllocationProposal
 from portfolio.state import PortfolioState
 from strategies.momentum import SignalSide
 
+# Shared decision context (runtime AND replay): the selector/regime detector see exactly the
+# last DECISION_CONTEXT_BARS completed bars. The runtime requests DECISION_HISTORY_DURATION
+# (enough for the cap even around holidays) and truncates; the replay truncates the same way.
+# Before this, replay used 450 bars and the runtime ~147 (30 D of RTH hours), so the regime
+# detector ran EMA200 in replay and EMA50 live (it switches at 205 bars).
+DECISION_CONTEXT_BARS = 140
+DECISION_HISTORY_DURATION = "45 D"
+
+
+def decision_context(bars):
+    return list(bars)[-DECISION_CONTEXT_BARS:]
+
+
 # (side, bars) -> refusal reason or None. Research-only hook.
 SignalFilter = Callable[[SignalSide, list[PriceBar]], "str | None"]
 

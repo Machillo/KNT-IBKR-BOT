@@ -14,7 +14,7 @@ ORDER_CAPABLE_NAMES = re.compile(
 )
 READ_ONLY_RUNNERS = [
     "run_backtest.py", "run_backtest_analysis.py", "run_bulk_research.py", "run_confluence_gen3.py",
-    "run_confluence_gen4.py", "run_confluence_lab.py", "run_experiments.py", "run_growth_projection.py",
+    "run_confluence_gen4.py", "run_confluence_lab.py", "run_event_families.py", "run_experiments.py", "run_growth_projection.py",
     "run_import_context_promotions.py", "run_monthly_target_suite.py", "run_null_benchmark.py", "run_pipeline_backtest.py",
     "run_research.py", "run_reset_drawdown_lock.py", "run_score_shadow.py", "run_strategy_suite.py", "run_universe_probe.py", "run_validation_suite.py",
 ]

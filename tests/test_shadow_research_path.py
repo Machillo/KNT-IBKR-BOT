@@ -162,3 +162,13 @@ def test_duplicates_are_per_run_mode_and_conflicts_flagged(tmp_path):
            for i in (a, b, c)}
     assert got[a] == (None, None) and got[b] == (None, None)            # other run mode: not a duplicate
     assert got[c] == (a, a)                                              # same bar, different output
+
+
+def test_virtual_entry_is_pending_exposure_in_the_next_cycle(tmp_path):
+    shadow = engine(tmp_path)
+    shadow.max_entries_per_day = 10  # the cap must not be what blocks here
+    assert run(shadow)[0].action == "SHADOW_SUBMIT"
+    again = run(shadow)[0]
+    # Seen as exposure (like a real working order): admission refuses it against itself.
+    assert again.action != "SHADOW_SUBMIT"
+    assert again.portfolio_reason in {"correlation_limit", "duplicate_symbol_exposure"}

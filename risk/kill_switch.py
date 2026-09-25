@@ -43,6 +43,7 @@ class KillSwitch:
         self.reason = ""
         self.state = BrokerStateService(ib)
         self._last_result: KillSwitchResult | None = None
+        self._liquidation_order_ids: set[int] = set()
 
     def _own_client_id(self) -> int | None:
         client = getattr(self.ib, "client", None)
@@ -147,51 +148,69 @@ class KillSwitch:
 
         logger.critical("KILL SWITCH ARMED | account=%s reason=%s", mask_account(self.account), reason)
 
-        # Positions KNT may flatten automatically: whole-share stocks within the drill limit. Every
-        # other position is left to a human WITH its protective orders (cancelling a stop on a
-        # position we will not flatten would leave it naked).
         def con_id(obj) -> int:
             return int(getattr(getattr(obj, "contract", None), "conId", 0) or 0)
 
+        own_client = self._own_client_id()
+        # 1) Decide FIRST, from the every-client view, which positions may be flattened, so that
+        #    no protective order is ever cancelled on a position that will then NOT be flattened.
+        all_orders = await self._all_open_trades()
+        if all_orders is None:
+            logger.critical("KILL SWITCH | every-client order view unavailable: no flatten and no protective "
+                            "order cancelled | manual intervention required")
+        foreign_con_ids = set() if all_orders is None else {
+            con_id(t) for t in all_orders
+            if own_client is not None and isinstance(getattr(t.order, "clientId", None), int)
+            and t.order.clientId != own_client}
+
+        position_ids = {con_id(p) for p in positions}
         flattenable, manual_con_ids = [], set()
         for position in positions:
             qty = float(position.position)
             sec_type = str(getattr(position.contract, "secType", "") or "").upper()
-            if sec_type != "STK" or qty != int(qty):
-                logger.critical("KILL SWITCH FLATTEN skipped | non-stock or fractional position | "
-                                "manual intervention required")
-                manual_con_ids.add(con_id(position))
+            reason_skip = None
+            if all_orders is None:
+                reason_skip = "every-client view unavailable"
+            elif sec_type != "STK" or qty != int(qty):
+                reason_skip = "non-stock or fractional position"
             elif self.liquidation_qty_limit is not None and abs(qty) > self.liquidation_qty_limit:
-                logger.critical("KILL SWITCH FLATTEN skipped | position exceeds liquidation limit | "
-                                "manual intervention required")
+                reason_skip = "position exceeds liquidation limit"
+            elif con_id(position) == 0 or 0 in foreign_con_ids or con_id(position) in foreign_con_ids:
+                reason_skip = "another client has a working order on it (or its contract is unknown)"
+            if reason_skip:
+                logger.critical("KILL SWITCH FLATTEN skipped | %s | manual intervention required", reason_skip)
                 manual_con_ids.add(con_id(position))
             else:
                 flattenable.append(position)
 
+        # 2) Cancel our own working orders: entries (no position yet) and the protection of the
+        #    positions we WILL flatten. Never the protection of positions left to a human, never
+        #    this switch's own pending liquidation orders (a re-run must not churn them).
         cancelled = 0
         for trade in working:
-            if con_id(trade) and con_id(trade) in manual_con_ids:
+            cid = con_id(trade)
+            if int(getattr(trade.order, "orderId", 0) or 0) in self._liquidation_order_ids:
+                continue
+            if cid in manual_con_ids or (all_orders is None and (cid == 0 or cid in position_ids)):
                 continue
             self.ib.cancelOrder(trade.order)
             cancelled += 1
 
+        flattenable_ids = {con_id(p) for p in flattenable}
         cancel_deadline = asyncio.get_running_loop().time() + 10
-        while self._account_open_trades() and asyncio.get_running_loop().time() < cancel_deadline:
-            # Only orders KNOWN to belong to positions left to a human may remain (conId 0 = unknown).
-            if all(con_id(t) and con_id(t) in manual_con_ids for t in self._account_open_trades()):
+        while asyncio.get_running_loop().time() < cancel_deadline:
+            pending = [t for t in self._account_open_trades()
+                       if con_id(t) in flattenable_ids
+                       and int(getattr(t.order, "orderId", 0) or 0) not in self._liquidation_order_ids]
+            if not pending:
                 break
             await asyncio.sleep(0.25)
 
-        # Every client's working orders (this clientId cannot see or cancel another client's
-        # GTC stop). A live order on a position means a market flatten could later be followed
-        # by that order firing and REVERSING the position: leave it to a human.
-        all_orders = await self._all_open_trades()
-        if all_orders is None:
-            logger.critical("KILL SWITCH | every-client order view unavailable: no flatten (a foreign GTC "
-                            "order could reverse it) | manual intervention required")
-        still_working = None if all_orders is None else {con_id(t) for t in all_orders}
+        # 3) Re-check every client's orders after the cancels: a live order on a position (an
+        #    unconfirmed cancel, or our own earlier liquidation order) vetoes a new market order.
+        after = await self._all_open_trades() if flattenable else []
+        still_working = None if after is None else {con_id(t) for t in after}
 
-        flattenable_ids = {con_id(p) for p in flattenable}
         liquidation_trades = []
         for position in self._account_positions():
             if con_id(position) not in flattenable_ids or con_id(position) in manual_con_ids:
@@ -201,11 +220,9 @@ class KillSwitch:
                 logger.critical("KILL SWITCH FLATTEN skipped | position exceeds liquidation limit | "
                                 "manual intervention required")
                 continue
-            # Unknown view, an order with an unknown contract (conId 0), or a live order on this
-            # position: never flatten (fail closed).
             if still_working is None or 0 in still_working or con_id(position) in still_working:
                 logger.critical("KILL SWITCH FLATTEN skipped | a working order on this position is still live "
-                                "(other client or unconfirmed cancel) | manual intervention required")
+                                "(unconfirmed cancel or pending liquidation) | manual intervention required")
                 continue
             action = "SELL" if qty > 0 else "BUY"
             order = MarketOrder(action, abs(qty), tif="DAY")
@@ -216,6 +233,8 @@ class KillSwitch:
                 logger.critical("KILL SWITCH FLATTEN refused by paper guard | %s", exc)
                 continue
             trade = self.ib.placeOrder(position.contract, order)
+            placed = getattr(trade, "order", None) or order
+            self._liquidation_order_ids.add(int(getattr(placed, "orderId", 0) or 0))
             liquidation_trades.append(trade)
             logger.critical(
                 "KILL SWITCH FLATTEN requested | symbol=%s qty=%s action=%s",

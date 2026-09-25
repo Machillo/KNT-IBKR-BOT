@@ -14,7 +14,8 @@ class FakeIB:
         self.client = SimpleNamespace(port=7497)
         self.placed, self.cancelled = [], []
         self._positions = [SimpleNamespace(account=ACCOUNT, position=qty,
-                                           contract=SimpleNamespace(symbol="ABC", localSymbol="ABC", secType=sec_type))]
+                                           contract=SimpleNamespace(symbol="ABC", localSymbol="ABC", secType=sec_type,
+                                                                   conId=1))]
         self._trades = []
 
     def isConnected(self):
@@ -235,3 +236,61 @@ def test_kill_switch_may_retry_while_the_account_is_not_flat():
     assert aio.run(ks.execute("daily loss")).flat_confirmed is False
     ib.other_clients = []                                   # the human cancelled the foreign stop
     assert aio.run(ks.execute("daily loss")).flat_confirmed is True and len(ib.placed) == 1
+
+
+def _switch(ib):
+    from config.config import RiskConfig
+    from core.paper_guard import build_paper_guard
+    from risk.kill_switch import KillSwitch
+
+    return KillSwitch(ib, RiskConfig(kill_switch_enabled=True, kill_switch_dry_run=False), ACCOUNT,
+                      guard=build_paper_guard(ib, SETTINGS))
+
+
+def test_kill_switch_keeps_own_stop_when_the_every_client_view_is_unavailable():
+    # Without the every-client view it cannot flatten; cancelling the stop first would leave the
+    # position unprotected. Entries without a position may still be cancelled.
+    import asyncio as aio
+
+    ib = GtcIB([("AAA", 11, 1, "STK")], own=(11, 12))
+
+    async def blind():
+        raise TimeoutError("no answer")
+    ib.reqAllOpenOrdersAsync = blind
+    result = aio.run(_switch(ib).execute("daily loss"))
+    assert [o.orderId for o in ib.cancelled] == [12]
+    assert ib.placed == [] and result.flat_confirmed is False
+
+
+def test_kill_switch_keeps_own_stop_when_another_client_works_the_same_contract():
+    import asyncio as aio
+
+    ib = GtcIB([("AAA", 11, 1, "STK")], own=(11,))
+    ib.client = SimpleNamespace(port=7497, clientId=7)
+    ib._trades[0].order.clientId = 7
+    foreign = GtcIB._order(11)
+    foreign.order.clientId = 99
+    ib.other_clients = [foreign]
+    result = aio.run(_switch(ib).execute("daily loss"))
+    assert ib.cancelled == [] and ib.placed == [] and result.flat_confirmed is False
+
+
+def test_kill_switch_rerun_never_cancels_or_duplicates_its_own_pending_liquidation():
+    import asyncio as aio
+
+    class SlowFill(GtcIB):
+        def placeOrder(self, contract, order):
+            self.placed.append((contract, order))
+            order.orderId = 500
+            trade = SimpleNamespace(order=order, contract=contract, done=False)
+            trade.isDone = lambda: False
+            self._trades.append(trade)                      # working, position not yet gone
+            return trade
+
+    ib = SlowFill([("AAA", 11, 1, "STK")], own=(11,))
+    switch = _switch(ib)
+    first = aio.run(switch.execute("daily loss"))
+    assert len(ib.placed) == 1 and first.flat_confirmed is False
+    second = aio.run(switch.execute("daily loss"))
+    assert [o.orderId for o in ib.cancelled] == [11]        # the liquidation order is never cancelled
+    assert len(ib.placed) == 1 and second.flat_confirmed is False   # and never duplicated

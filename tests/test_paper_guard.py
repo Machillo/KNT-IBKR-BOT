@@ -160,10 +160,11 @@ def test_forged_verification_is_still_reverified():
 
 
 def _armed_kill_switch(ib, guard):
-    trade = SimpleNamespace(order=SimpleNamespace(account=ACCOUNT), isDone=lambda: False)
+    trade = SimpleNamespace(order=SimpleNamespace(account=ACCOUNT), contract=SimpleNamespace(conId=5),
+                            isDone=lambda: False)
     ib._trades = [trade]
     ib._positions = [SimpleNamespace(account=ACCOUNT, position=3,
-                                     contract=SimpleNamespace(localSymbol="ABC", symbol="ABC", secType="STK"))]
+                                     contract=SimpleNamespace(localSymbol="ABC", symbol="ABC", secType="STK", conId=5))]
     cfg = RiskConfig(kill_switch_enabled=True, kill_switch_dry_run=False)
     return KillSwitch(ib, cfg, ACCOUNT, guard=guard)
 

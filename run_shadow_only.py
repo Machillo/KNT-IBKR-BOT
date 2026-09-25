@@ -60,6 +60,18 @@ def _real_bot_lock(state_dir: Path, account: str, trading_date: str) -> str | No
     return persisted_lock_reason(state_dir, account, trading_date)
 
 
+def decision_config_hash(cfg: BotConfig) -> str:
+    """Fingerprint of every setting that can change a decision (risk, runtime, market data).
+    The IBKR section (host, account, clientId) is excluded on purpose: private, and not a
+    decision parameter. A change inside the FWD window invalidates it (quality gates)."""
+    import hashlib
+    import json
+    from dataclasses import asdict
+
+    payload = {"risk": asdict(cfg.risk), "runtime": asdict(cfg.runtime), "market_data": asdict(cfg.market_data)}
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
+
+
 def shadow_only_config(base: BotConfig) -> BotConfig:
     """Same runtime settings, but a read-only session, own clientId, dry-run kill switch,
     autonomous trading disabled and live trading refused — nothing in this process can send an
@@ -108,6 +120,7 @@ async def main_async(args) -> None:
             # Forward evidence: frozen selector (no learning drift inside the window) and the
             # order-free execution model (pretrade + hard risk + daily cap + virtual book).
             learning_enabled=False, research_execution=True, run_mode="shadow_only",
+            config_hash=decision_config_hash(cfg),
         )
         states = PortfolioStateService(ib)
         logger.info("SHADOW-ONLY running | account=%s readonly=True executor=None", mask_account(account.account))

@@ -44,7 +44,8 @@ def build(path, *, days=45, cycles_per_day=2, selected_effect=0.0, cf_effect=0.0
                 fwd5 = base + (selected_effect if selected else cf_effect) + rng.gauss(0, noise)
                 outcomes.append((did, SCORER_VERSION, "SELECTED" if selected else "COUNTERFACTUAL", fwd5))
             j.record_cycle_end(cycle, eligible=8, attempted=8, errors=0, max_candidates=12,
-                               run_mode="shadow_only", learning_mode="frozen", scanner_rows={}, scanner_errors={})
+                               run_mode="shadow_only", learning_mode="frozen", scanner_rows={}, scanner_errors={},
+                               config_hash="cfg-test")
     with sqlite3.connect(path) as conn:
         conn.executemany(
             "INSERT INTO shadow_outcomes (decision_id, scorer_version, scored_at, status, evaluated, side, "

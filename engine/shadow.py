@@ -55,7 +55,8 @@ class ShadowTradingEngine:
                  paper_executor: PaperExecutionEngine | None = None,
                  session_policy=None, state_dir: Path | None = None, *,
                  learning_enabled: bool = True, research_execution: bool = False,
-                 run_mode: str = "runtime", max_entries_per_day: int = 3) -> None:
+                 run_mode: str = "runtime", max_entries_per_day: int = 3,
+                 config_hash: str | None = None) -> None:
         db = None if state_dir is None else Path(state_dir) / "strategy_performance.db"
         if db is not None:
             db.parent.mkdir(parents=True, exist_ok=True)
@@ -101,6 +102,7 @@ class ShadowTradingEngine:
         # entries so later candidates/cycles see them as pending exposure (runtime parity).
         self.research_execution = bool(research_execution) and paper_executor is None
         self.run_mode = str(run_mode)
+        self.config_hash = config_hash
         self.max_entries_per_day = max(0, int(max_entries_per_day))
         self._virtual_book: list[tuple[str, PendingOrderExposure]] = []
 
@@ -142,7 +144,7 @@ class ShadowTradingEngine:
                 cycle_id, universe=getattr(universe, "name", None), scanners=scanners,
                 rows_per_scanner=rows_per_scanner, quote_budget=self.quote_budget,
                 market_data_type=data_type, session=getattr(session, "session", None),
-                market_open=getattr(session, "market_open", None),
+                market_open=getattr(session, "market_open", None), run_mode=self.run_mode,
             )
             funnel = list(getattr(self.intelligence, "last_funnel", []) or [])
             if funnel:
@@ -175,6 +177,7 @@ class ShadowTradingEngine:
                 "selector_bonus": None if top_eval is None else float(top_eval.evidence_bonus),
                 "bar_count": len(bars),
                 "first_bar_time": str(bars[0].time) if bars else None,
+                "input_hash": self._input_hash(bars),
                 **(extra or {}),
             }
             self.journal.record_decision(
@@ -215,7 +218,8 @@ class ShadowTradingEngine:
                                           max_candidates=self.max_candidates, run_mode=self.run_mode,
                                           learning_mode="live" if self.learning_enabled else "frozen",
                                           scanner_rows=getattr(discovery, "last_scan_rows", None),
-                                          scanner_errors=getattr(discovery, "last_scan_errors", None))
+                                          scanner_errors=getattr(discovery, "last_scan_errors", None),
+                                          config_hash=self.config_hash)
         except Exception as exc:
             logger.warning("SHADOW JOURNAL cycle end write failed | error=%s", exc)
 
@@ -258,6 +262,16 @@ class ShadowTradingEngine:
     def _virtual_entries_today(self) -> int:
         today = datetime.now(timezone.utc).date().isoformat()
         return sum(1 for d, _ in self._virtual_book if d == today)
+
+    @staticmethod
+    def _input_hash(bars) -> str | None:
+        """Fingerprint of the exact bars the selector saw (for determinism checks)."""
+        if not bars:
+            return None
+        import hashlib
+
+        text = "|".join(f"{b.time}:{b.open}:{b.high}:{b.low}:{b.close}:{b.volume}" for b in bars)
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()[:24]
 
     @staticmethod
     def _bar_completed_at(bars) -> datetime | None:

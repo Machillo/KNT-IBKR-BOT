@@ -53,3 +53,10 @@ def isolated_state_dir(tmp_path, monkeypatch):
     yield state
     after = _snapshot()
     assert after == before, f"test modified the REAL state directory: {sorted(set(after) ^ set(before))}"
+
+
+@pytest.fixture(autouse=True)
+def fixed_code_version(monkeypatch):
+    """Journals written by tests carry a fixed, clean code version (the real one depends on the
+    developer's working tree and would make quality verdicts non-reproducible in tests)."""
+    monkeypatch.setattr("research.shadow_journal.code_version", lambda: "test-sha")

@@ -45,7 +45,7 @@ def engine(tmp_path, *, market_open=True, data_type=1, n_candidates=1, bid=None,
     shadow = ShadowTradingEngine(SimpleNamespace(reqContractDetailsAsync=details), intel, research_budget=0,
                                  risk_manager=risk, paper_executor=None, state_dir=tmp_path / "state",
                                  learning_enabled=learning_enabled, research_execution=True,
-                                 run_mode="shadow_only")
+                                 run_mode="shadow_only", config_hash="cfg-test")
     shadow.selector.strategies = [Fixed(SignalSide.LONG)]
     shadow.selector.pause_directional_high_volatility = False
     series = bars()
@@ -156,16 +156,19 @@ def test_duplicates_are_per_run_mode_and_conflicts_flagged(tmp_path):
     base = dict(con_id=7, bar_time="2026-01-05T15:00:00+00:00", timeframe="1 hour", regime="TREND",
                 score=90.0, entry=1.0, stop=0.9, target=1.2, reason="x")
     a = j.record_decision("c1", symbol="X", action="SHADOW_SUBMIT", strategy="s1", side="LONG",
-                          context={"run_mode": "shadow_only"}, **base)
+                          context={"run_mode": "shadow_only", "input_hash": "h1"}, **base)
     b = j.record_decision("c2", symbol="X", action="PAPER_SUBMITTED", strategy="s1", side="LONG",
-                          context={"run_mode": "runtime"}, **base)
+                          context={"run_mode": "runtime", "input_hash": "h1"}, **base)
     c = j.record_decision("c3", symbol="X", action="NO_TRADE", strategy=None, side=None,
-                          context={"run_mode": "shadow_only"}, **base)
+                          context={"run_mode": "shadow_only", "input_hash": "h1"}, **base)
+    d = j.record_decision("c4", symbol="X", action="NO_TRADE", strategy=None, side=None,
+                          context={"run_mode": "shadow_only", "input_hash": "revised"}, **base)
     conn = sqlite3.connect(j.path)
     got = {i: conn.execute("SELECT duplicate_of, conflict_with FROM shadow_decisions WHERE id=?", (i,)).fetchone()
-           for i in (a, b, c)}
+           for i in (a, b, c, d)}
     assert got[a] == (None, None) and got[b] == (None, None)            # other run mode: not a duplicate
-    assert got[c] == (a, a)                                              # same bar, different output
+    assert got[c] == (a, a)                                              # same bar AND inputs, different output
+    assert got[d] == (a, None)                                           # IBKR revised the bar: not non-determinism
 
 
 def test_virtual_entry_is_pending_exposure_in_the_next_cycle(tmp_path):

@@ -9,10 +9,13 @@ Severities:
 * WARNING  — usable, but the limitation must be reported with any result;
 * INFO     — context.
 
-A session (a time window of one run mode) is ``INVALID_FOR_RESEARCH`` when any ZERO-TOLERANCE
-gate fires anywhere (future leakage, non-determinism, learning drift, a transmit-marked
-decision in a closed session) or when more than ``MAX_BLOCKING_CYCLE_SHARE`` of its cycles
-carry a BLOCKING gate. The thresholds are pre-registered in docs/FWD_PROTOCOL.md.
+A session (an explicit time window of ONE run mode) is ``INVALID_FOR_RESEARCH`` when a
+ZERO-TOLERANCE gate fires in a market-open cycle (future leakage, non-determinism on identical
+inputs, learning drift, a transmit-marked decision in a closed session or on a stale bar), when
+the code or decision configuration changed inside the window (several code versions, a dirty
+tree, several config hashes), or when more than ``MAX_BLOCKING_CYCLE_SHARE`` of its MARKET-OPEN
+cycles carry a BLOCKING gate. Closed-market cycles are gated and recorded but never decide the
+verdict: FWD evidence only uses open-market cycles. Thresholds: docs/FWD_PROTOCOL.md.
 """
 from __future__ import annotations
 
@@ -29,10 +32,13 @@ from research.shadow_journal import DECISION_VERSION, ShadowJournal
 GATES_VERSION = "g1"
 MAX_BLOCKING_CYCLE_SHARE = 0.05
 BAR_SECONDS = 3600
-MAX_DECISION_LAG = timedelta(minutes=75)     # bar completion -> canonical decision
+# pretrade refuses bars older than 75 min at ITS clock; created_at is written a moment later,
+# so the gate allows a small margin before calling a transmit "stale".
+MAX_DECISION_LAG = timedelta(minutes=80)
 INCOMPLETE_GRACE = timedelta(hours=1)        # a cycle younger than this may still be running
 ZERO_TOLERANCE = frozenset({"future_leakage", "nondeterministic_decision", "learning_drift",
                             "transmit_in_closed_session", "transmit_on_stale_bar"})
+SESSION_INVALIDATORS = frozenset({"code_version_changed", "dirty_code", "config_changed", "config_unknown"})
 TRANSMIT_ACTIONS = ("SHADOW_SUBMIT", "PAPER_SUBMITTED")
 
 
@@ -67,11 +73,12 @@ def _load(path: Path, since: datetime | None, until: datetime | None, run_mode: 
         t = _utc(created)
         return t is not None and (since is None or t >= since) and (until is None or t < until)
 
+    # Strict run mode: rows without one (legacy, dev smoke runs) never belong to a mode's window.
     keep = {c["cycle_id"] for c in cycles if in_window(c["created_at"])
-            and (run_mode is None or (c["run_mode"] if "run_mode" in c.keys() else None) in (run_mode, None))}
+            and (run_mode is None or c["run_mode"] == run_mode)}
     cycles = [c for c in cycles if c["cycle_id"] in keep]
     decisions = [d for d in decisions if d["cycle_id"] in keep
-                 and (run_mode is None or d["run_mode"] in (run_mode, None))]
+                 and (run_mode is None or d["run_mode"] == run_mode)]
     funnel = [f for f in funnel if f["cycle_id"] in keep]
     return cycles, decisions, funnel
 
@@ -190,25 +197,48 @@ def evaluate(path: str | Path, *, since: datetime | None = None, until: datetime
         if d["decision_version"] != DECISION_VERSION:
             add(GateResult("decision", did, "legacy_decision_version", "BLOCKING", str(d["decision_version"])))
 
+    # Invalidation: the code and the decision configuration must be constant inside the window.
+    versions = sorted({str(c["code_version"]) for c in cycles if c["code_version"]})
+    if len(versions) > 1:
+        add(GateResult("session", "window", "code_version_changed", "BLOCKING", ",".join(versions)))
+    if any(v.endswith("+dirty") for v in versions):
+        add(GateResult("session", "window", "dirty_code", "BLOCKING", "modified tracked files"))
+    configs = sorted({str(c["config_hash"]) for c in cycles if c["cycle_end"] and c["config_hash"]})
+    if len(configs) > 1:
+        add(GateResult("session", "window", "config_changed", "BLOCKING", ",".join(configs)))
+    if run_mode == "shadow_only" and any(c["cycle_end"] and not c["config_hash"] for c in cycles):
+        add(GateResult("session", "window", "config_unknown", "BLOCKING", "cycles without config_hash"))
+
+    open_cycles = {c["cycle_id"] for c in cycles if c["market_open"] == 1}
     blocking_cycles = {r.ref for r in results if r.scope == "cycle" and r.severity == "BLOCKING"}
     decision_cycle = {str(d["id"]): d["cycle_id"] for d in decisions}
     blocking_cycles |= {decision_cycle[r.ref] for r in results
                         if r.scope == "decision" and r.severity == "BLOCKING" and r.ref in decision_cycle}
-    share = len(blocking_cycles) / len(cycles) if cycles else None
-    zero_tolerance = sorted({r.gate for r in results if r.gate in ZERO_TOLERANCE})
+    blocking_open = blocking_cycles & open_cycles
+    share = len(blocking_open) / len(open_cycles) if open_cycles else None
+
+    def cycle_of(r: GateResult) -> str | None:
+        return r.ref if r.scope == "cycle" else decision_cycle.get(r.ref)
+
+    zero_tolerance = sorted({r.gate for r in results if r.gate in ZERO_TOLERANCE and cycle_of(r) in open_cycles})
+    invalidators = sorted({r.gate for r in results if r.gate in SESSION_INVALIDATORS})
     reasons = []
-    if not cycles:
-        reasons.append("no_cycles_in_window")
+    if not open_cycles:
+        reasons.append("no_market_open_cycles_in_window")
     if zero_tolerance:
         reasons.append("zero_tolerance:" + ",".join(zero_tolerance))
+    if invalidators:
+        reasons.append("invalidated:" + ",".join(invalidators))
     if share is not None and share > MAX_BLOCKING_CYCLE_SHARE:
-        reasons.append(f"blocking_cycle_share={share:.1%}>{MAX_BLOCKING_CYCLE_SHARE:.0%}")
+        reasons.append(f"blocking_open_cycle_share={share:.1%}>{MAX_BLOCKING_CYCLE_SHARE:.0%}")
     verdict = "INVALID_FOR_RESEARCH" if reasons else "VALID_FOR_RESEARCH"
     session = {
         "gates_version": GATES_VERSION, "decision_version": DECISION_VERSION, "run_mode": run_mode,
         "since": since.isoformat() if since else None, "until": until.isoformat() if until else None,
-        "cycles": len(cycles), "decisions": len(decisions), "cycles_with_blocking_gate": len(blocking_cycles),
-        "blocking_cycle_share": share, "verdict": verdict, "reasons": reasons,
+        "cycles": len(cycles), "market_open_cycles": len(open_cycles), "decisions": len(decisions),
+        "cycles_with_blocking_gate": len(blocking_cycles), "open_cycles_with_blocking_gate": len(blocking_open),
+        "blocking_open_cycle_share": share, "verdict": verdict, "reasons": reasons,
+        "code_versions": versions, "config_hashes": configs,
         "excluded_cycles": sorted(blocking_cycles),
     }
     return results, session

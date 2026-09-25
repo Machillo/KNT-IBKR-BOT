@@ -41,13 +41,13 @@ _DECISION_EXTRA_COLUMNS = (
     ("bar_count", "INTEGER"), ("first_bar_time", "TEXT"), ("session_open", "INTEGER"),
     ("sector", "TEXT"), ("correlation", "REAL"), ("quantity", "REAL"), ("notional", "REAL"),
     ("risk_amount", "REAL"), ("volatility_multiplier", "REAL"), ("reference_price", "REAL"),
-    ("reference_data_type", "INTEGER"), ("conflict_with", "INTEGER"),
+    ("reference_data_type", "INTEGER"), ("conflict_with", "INTEGER"), ("input_hash", "TEXT"),
 )
 _CYCLE_EXTRA_COLUMNS = (
     ("cycle_end", "TEXT"), ("eligible_count", "INTEGER"), ("candidates_attempted", "INTEGER"),
     ("candidate_errors", "INTEGER"), ("max_candidates", "INTEGER"), ("run_mode", "TEXT"),
     ("learning_mode", "TEXT"), ("code_version", "TEXT"), ("decision_version", "TEXT"),
-    ("scanner_rows", "TEXT"), ("scanner_errors", "TEXT"),
+    ("scanner_rows", "TEXT"), ("scanner_errors", "TEXT"), ("config_hash", "TEXT"),
 )
 # v2: frozen-learning shadow-only, pretrade execution model (SHADOW_SUBMIT/SHADOW_BLOCKED),
 # duplicates keyed by conId + run mode, conflicting re-decisions flagged.
@@ -65,7 +65,15 @@ def code_version() -> str | None:
     except Exception:
         return None
     sha = (out.stdout or "").strip()
-    return sha or None
+    if not sha:
+        return None
+    try:
+        dirty = subprocess.run(["git", "diff", "--quiet", "HEAD", "--", "."], cwd=Path(__file__).resolve().parents[1],
+                               capture_output=True, timeout=5, check=False).returncode != 0
+    except Exception:
+        dirty = True
+    # A modified tracked tree is NOT the commit: the invalidation gate treats "+dirty" as a change.
+    return sha + ("+dirty" if dirty else "")
 
 
 class ShadowJournal:
@@ -182,30 +190,35 @@ class ShadowJournal:
 
     def record_cycle(self, cycle_id: str, *, universe: str | None, scanners: list[str],
                      rows_per_scanner: int | None, quote_budget: int | None,
-                     market_data_type: int | None, session: str | None, market_open: bool | None) -> None:
+                     market_data_type: int | None, session: str | None, market_open: bool | None,
+                     run_mode: str | None = None) -> None:
+        # run_mode is written at START so an interrupted (incomplete) cycle still belongs to
+        # its process and is seen by the quality gates.
         with sqlite3.connect(self.path) as conn:
             conn.execute(
                 """INSERT OR IGNORE INTO discovery_cycles (cycle_id, created_at, universe, scanners,
-                   rows_per_scanner, quote_budget, market_data_type, session, market_open)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   rows_per_scanner, quote_budget, market_data_type, session, market_open, run_mode)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (cycle_id, datetime.now(timezone.utc).isoformat(), universe, json.dumps(list(scanners)),
                  rows_per_scanner, quote_budget, market_data_type, session,
-                 None if market_open is None else int(bool(market_open))),
+                 None if market_open is None else int(bool(market_open)), run_mode),
             )
 
     def record_cycle_end(self, cycle_id: str, *, eligible: int, attempted: int, errors: int,
                          max_candidates: int, run_mode: str, learning_mode: str,
-                         scanner_rows: dict | None = None, scanner_errors: dict | None = None) -> None:
+                         scanner_rows: dict | None = None, scanner_errors: dict | None = None,
+                         config_hash: str | None = None) -> None:
         """Completion marker: a cycle without ``cycle_end`` is INCOMPLETE for research."""
         with sqlite3.connect(self.path) as conn:
             conn.execute(
                 """UPDATE discovery_cycles SET cycle_end=?, eligible_count=?, candidates_attempted=?,
                    candidate_errors=?, max_candidates=?, run_mode=?, learning_mode=?, code_version=?,
-                   decision_version=?, scanner_rows=?, scanner_errors=? WHERE cycle_id=?""",
+                   decision_version=?, scanner_rows=?, scanner_errors=?, config_hash=? WHERE cycle_id=?""",
                 (datetime.now(timezone.utc).isoformat(), int(eligible), int(attempted), int(errors),
                  int(max_candidates), run_mode, learning_mode, code_version(), DECISION_VERSION,
                  None if scanner_rows is None else json.dumps(scanner_rows, sort_keys=True),
-                 None if scanner_errors is None else json.dumps(scanner_errors, sort_keys=True), cycle_id),
+                 None if scanner_errors is None else json.dumps(scanner_errors, sort_keys=True), config_hash,
+                 cycle_id),
             )
 
     def record_funnel(self, cycle_id: str, funnel) -> int:
@@ -246,14 +259,17 @@ class ShadowJournal:
             # completed bar is canonical, later ones are kept for audit but flagged. Keyed by
             # conId (symbol only when unknown) and run mode: two processes never dedupe each other.
             first = None if bar_text is None else conn.execute(
-                """SELECT id, strategy, side FROM shadow_decisions
+                """SELECT id, strategy, side, input_hash FROM shadow_decisions
                    WHERE (CASE WHEN ? > 0 THEN con_id=? ELSE symbol=? END) AND bar_time=? AND timeframe=?
                    AND decision_version=? AND COALESCE(run_mode,'')=COALESCE(?,'') AND duplicate_of IS NULL
                    ORDER BY id LIMIT 1""",
                 (con_id, con_id, symbol, bar_text, timeframe, DECISION_VERSION, run_mode),
             ).fetchone()
-            # Same bar, same code, different selector output = non-determinism: flag it.
-            conflict = None if first is None or (first[1], first[2]) == (strategy, side) else int(first[0])
+            # Same bar, same code, SAME input bars, different selector output = non-determinism.
+            # Different output on revised input (IBKR corrects the last bar after the close) is
+            # not a conflict; it stays a duplicate of the canonical row.
+            same_input = first is not None and first[3] is not None and first[3] == context.get("input_hash")
+            conflict = int(first[0]) if same_input and (first[1], first[2]) != (strategy, side) else None
             session_open = context.get("session_open")
             columns = {
                 "cycle_id": cycle_id, "created_at": (created_at or datetime.now(timezone.utc)).isoformat(),
@@ -269,7 +285,7 @@ class ShadowJournal:
             for key in ("atr", "adx", "volatility_stress", "liquidity_score", "selector_threshold",
                         "reference_close", "run_mode", "learning_mode", "selector_bonus", "bar_count",
                         "first_bar_time", "sector", "correlation", "quantity", "notional", "risk_amount",
-                        "volatility_multiplier", "reference_price", "reference_data_type"):
+                        "volatility_multiplier", "reference_price", "reference_data_type", "input_hash"):
                 columns[key] = context.get(key)
             names = ", ".join(columns)
             marks = ", ".join("?" for _ in columns)

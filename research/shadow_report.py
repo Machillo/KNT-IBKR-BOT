@@ -129,7 +129,7 @@ def render(summary: dict) -> str:
     lines = [
         f"SHADOW SESSION | mode={summary['window']['run_mode']} "
         f"{summary['window']['first_cycle']} .. {summary['window']['last_cycle']}",
-        f"QUALITY | {q['verdict']} reasons={q['reasons']} cycles_with_blocking={q['cycles_with_blocking_gate']}",
+        f"QUALITY | {q['verdict']} reasons={q['reasons']} open_cycles_with_blocking={q['open_cycles_with_blocking_gate']}/{q['market_open_cycles']}",
         f"CYCLES | total={c['total']} complete={c['complete']} open={c['market_open']} closed={c['market_closed']} "
         f"errors={c['candidate_errors']} versions={c['decision_versions']} learning={c['learning_modes']}",
         f"DISCOVERY | {json.dumps(summary['discovery']['funnel_status'])} analysed={summary['discovery']['symbols_analysed']}",

@@ -61,7 +61,7 @@ def state(net_liq=100_000.0, locked=False, positions=()):
 CORRELATED = (PositionExposure("B", "STK", 10, 100.0, 1_000.0, con_id=2),)
 
 
-def run_shadow(tmp_path, monkeypatch, side, portfolio_state, risk=True):
+def run_shadow(tmp_path, monkeypatch, side, portfolio_state, risk=True, industry="Technology"):
     monkeypatch.chdir(tmp_path)
     from engine.shadow import ShadowTradingEngine
 
@@ -77,7 +77,10 @@ def run_shadow(tmp_path, monkeypatch, side, portfolio_state, risk=True):
     intel = SimpleNamespace(ranked_us_opportunity_universe=ranked, last_funnel=[], universe=None,
                             market_data=SimpleNamespace(snapshot_contract=snap, settings=SimpleNamespace(market_data_type=1)))
     executor = RecordingExecutor()
-    shadow = ShadowTradingEngine(SimpleNamespace(), intel, research_budget=0,
+    async def details(contract):
+        return [SimpleNamespace(industry=industry, category="Semiconductors")]
+
+    shadow = ShadowTradingEngine(SimpleNamespace(reqContractDetailsAsync=details), intel, research_budget=0,
                                  risk_manager=RiskManager(RiskConfig()) if risk else None,
                                  paper_executor=executor)
     shadow.selector.strategies = [Fixed(side)]
@@ -119,3 +122,27 @@ def test_read_only_settings_force_readonly_and_separate_client_id():
     base = IBKRConfig(port=7497, client_id=901, readonly=False)
     ro = read_only_ibkr_settings(base, 50)
     assert ro.readonly is True and ro.client_id == 951 and ro.port == 7497
+
+
+def test_missing_sector_metadata_blocks_submission(tmp_path, monkeypatch):
+    decisions, executor = run_shadow(tmp_path, monkeypatch, SignalSide.LONG, state(), True, industry="")
+    assert executor.calls == []
+    assert decisions[0].action == "PORTFOLIO_REJECTED" and decisions[0].portfolio_reason == "sector_metadata_missing"
+
+
+def test_sector_concentration_limit_applies_with_metadata():
+    from portfolio.admission import PortfolioAdmissionCoordinator
+    from portfolio.state import PositionExposure
+
+    coordinator = PortfolioAdmissionCoordinator(RiskManager(RiskConfig()), require_sector_metadata=True)
+    held = tuple(PositionExposure(f"T{i}", "STK", 100, 100.0, 10_000.0, con_id=i + 1) for i in range(3))
+    st = state(positions=held)
+    kwargs = dict(state=st, symbol="NEW", asset_class="STK", side="LONG", quantity=10, entry_price=100.0,
+                  stop_price=95.0, proposed_notional=1_000.0, proposed_risk=50.0, candidate_returns=(),
+                  position_returns={p.symbol: (0.01, -0.01) * 30 for p in held}, correlation_to_portfolio=0.1)
+    same = coordinator.evaluate(sector="Technology", sectors={p.symbol: "Technology" for p in held}, **kwargs)
+    other = coordinator.evaluate(sector="Energy", sectors={p.symbol: "Technology" for p in held}, **kwargs)
+    missing = coordinator.evaluate(sector="Energy", sectors={"T0": "Technology"}, **kwargs)
+    assert same.reason == "same_sector_exposure_limit"
+    assert other.approved
+    assert missing.reason == "sector_metadata_missing"

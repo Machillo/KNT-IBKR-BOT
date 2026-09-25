@@ -110,7 +110,8 @@ class DecisionPipeline:
     def decide(self, bars: list[PriceBar], *, symbol: str, asset_class: str = "STK", timeframe: str = "1 hour",
                portfolio_state: PortfolioState | None = None,
                position_returns: dict[str, tuple[float, ...]] | None = None,
-               selection: StrategySelection | None = None) -> TradeDecision:
+               selection: StrategySelection | None = None,
+               sector: str | None = None, sectors: dict[str, str] | None = None) -> TradeDecision:
         selection = selection or self.select(bars, symbol=symbol, asset_class=asset_class, timeframe=timeframe)
         chosen = selection.selected
         if chosen is None:
@@ -145,7 +146,7 @@ class DecisionPipeline:
             quantity=proposal.quantity, entry_price=proposal.entry_price, stop_price=proposal.stop_price,
             proposed_notional=proposal.proposed_notional, proposed_risk=proposal.proposed_risk,
             candidate_returns=candidate_returns, position_returns=position_returns,
-            correlation_to_portfolio=corr,
+            correlation_to_portfolio=corr, sector=sector or "UNKNOWN", sectors=sectors or {},
         )
         action = f"APPROVED_{signal.side.value}" if admission.approved else "PORTFOLIO_REJECTED"
         return TradeDecision(symbol, action, admission.reason, selection, proposal, admission, corr)

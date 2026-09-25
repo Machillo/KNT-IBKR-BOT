@@ -29,6 +29,11 @@ class FakeIB:
     def openTrades(self):
         return list(self._trades)
 
+    other_clients: list = []
+
+    async def reqAllOpenOrdersAsync(self):
+        return list(self._trades) + list(self.other_clients)
+
     def cancelOrder(self, order):
         self.cancelled.append(order)
 
@@ -93,3 +98,16 @@ def test_kill_switch_liquidation_limit_skips_oversized_positions():
                     guard=build_paper_guard(ib, SETTINGS), liquidation_qty_limit=1)
     result = aio.run(ks.execute("late fill"))
     assert ib.placed == [] and result.flat_confirmed is False
+
+
+def test_drill_sees_other_clients_working_orders_and_fails_closed():
+    ib = FakeIB()
+    ib.other_clients = [SimpleNamespace(isDone=lambda: False, order=SimpleNamespace(account=ACCOUNT))]
+    assert drill(ib, armed=True, ack=DRILL_ACK).reason == "open_orders_present_other_clients"
+    blind = FakeIB()
+
+    async def boom():
+        raise TimeoutError("no answer")
+    blind.reqAllOpenOrdersAsync = boom
+    assert drill(blind, armed=True, ack=DRILL_ACK).reason == "open_orders_unverifiable"
+    assert ib.placed == [] and blind.placed == [] and ib.cancelled == []

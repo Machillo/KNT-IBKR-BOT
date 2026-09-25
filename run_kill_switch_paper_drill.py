@@ -51,6 +51,16 @@ async def run_drill(ib, settings: IBKRConfig, *, armed: bool, ack: str, max_qty:
         # A working order could fill during the drill; and the kill switch cancels every
         # working order of the account. The drill only runs on a quiet account.
         return DrillOutcome(False, armed, "open_orders_present")
+    # openTrades() only shows THIS clientId's orders. The trading bot (another clientId) or a
+    # human in TWS may have working orders this session can neither see nor cancel, so ask the
+    # broker for every client's open orders (read-only request); unverifiable = not quiet.
+    try:
+        all_open = await ib.reqAllOpenOrdersAsync()
+    except Exception:
+        return DrillOutcome(False, armed, "open_orders_unverifiable")
+    if any(getattr(getattr(t, "order", None), "account", account) in ("", account)
+           and not t.isDone() for t in (all_open or [])):
+        return DrillOutcome(False, armed, "open_orders_present_other_clients")
     if armed and ack != DRILL_ACK:
         return DrillOutcome(False, armed, "missing_drill_ack")
     risk = RiskConfig(kill_switch_enabled=True, kill_switch_dry_run=not armed)

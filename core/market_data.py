@@ -18,6 +18,8 @@ class MarketSnapshot:
     last: float | None
     market_price: float | None
     volume: float | None = None
+    # IBKR market-data type reported by the ticker itself (1 live, 2 frozen, 3/4 delayed).
+    market_data_type: int | None = None
 
     @property
     def has_price(self) -> bool:
@@ -104,6 +106,7 @@ class MarketDataService:
                 last=self._clean(ticker.last),
                 market_price=self._clean(ticker.marketPrice()),
                 volume=self._clean(getattr(ticker, "volume", None)),
+                market_data_type=getattr(ticker, "marketDataType", None),
             )
             if snapshot.has_price:
                 return snapshot
@@ -116,6 +119,7 @@ class MarketDataService:
             last=self._clean(ticker.last),
             market_price=self._clean(ticker.marketPrice()),
             volume=self._clean(getattr(ticker, "volume", None)),
+            market_data_type=getattr(ticker, "marketDataType", None),
         )
 
     async def snapshot_contract(

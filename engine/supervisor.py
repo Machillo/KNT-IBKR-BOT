@@ -56,8 +56,12 @@ class PaperSupervisor:
             risk.lock_trading(persisted.trigger_reason or "sticky daily Kill Switch")
 
         # Fail closed: without a verified PAPER session no entry may ever be admitted.
-        self.paper_guard = build_paper_guard(self.ib, self.config.ibkr, account.account)
+        # Pass only the CONFIGURED account so multiple paper accounts without
+        # IBKR_ACCOUNT are refused as ambiguous instead of defaulting to the first.
+        self.paper_guard = build_paper_guard(self.ib, self.config.ibkr, self.config.ibkr.account)
         verification = self.paper_guard.verification
+        if verification.verified and verification.account != account.account:
+            risk.lock_trading("paper_guard_account_differs_from_supervised_account")
         logger.info(
             "PAPER VERIFICATION | verified=%s reason=%s account=%s port=%s connected_port=%s",
             verification.verified, verification.reason, verification.masked_account,

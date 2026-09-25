@@ -179,3 +179,82 @@ def test_armed_kill_switch_on_live_session_touches_nothing():
     ib.accounts = ["U0000001"]
     asyncio.run(ks.execute("test"))
     assert ib.cancelled == [] and ib.placed == []
+
+
+def test_armed_kill_switch_on_verified_paper_cancels_and_flattens():
+    ib = FakeIB()
+    ks = _armed_kill_switch(ib, build_paper_guard(ib, settings()))
+
+    def place(contract, order):
+        ib.placed.append((contract, order))
+        ib._positions = []
+        ib._trades = []
+        return SimpleNamespace(isDone=lambda: True)
+
+    def cancel(order):
+        ib.cancelled.append(order)
+        ib._trades = []
+
+    ib.placeOrder, ib.cancelOrder = place, cancel
+    result = asyncio.run(ks.execute("test"))
+    assert len(ib.cancelled) == 1
+    assert len(ib.placed) == 1 and ib.placed[0][1].action == "SELL" and ib.placed[0][1].totalQuantity == 3
+    assert ib.placed[0][1].account == ACCOUNT
+    assert result.flat_confirmed is True
+
+
+def test_kill_switch_flatten_rechecks_guard_per_order(monkeypatch):
+    ib = FakeIB()
+    ks = _armed_kill_switch(ib, build_paper_guard(ib, settings()))
+    ib.cancelOrder = lambda order: (ib.cancelled.append(order), setattr(ib, "_trades", []))
+    # Session turns non-paper after cancels but before liquidation orders.
+    original_positions = ib.positions
+
+    def positions_then_flip():
+        ib.accounts = ["U0000001"]
+        return original_positions()
+
+    ib.positions = positions_then_flip
+    monkeypatch.setattr("risk.kill_switch.BrokerStateService.wait_until_flat",
+                        lambda self, account, timeout=10: _async(SimpleNamespace(is_flat=False)))
+    asyncio.run(ks.execute("test"))
+    assert ib.placed == []
+
+
+async def _async(value):
+    return value
+
+
+def test_cancel_requires_guard_and_is_scoped_to_account():
+    ib = FakeIB()
+    other = SimpleNamespace(order=SimpleNamespace(account="DU0000002", orderId=7), isDone=lambda: False,
+                            orderStatus=SimpleNamespace(status="Submitted"))
+    mine = SimpleNamespace(order=SimpleNamespace(account=ACCOUNT, orderId=8), isDone=lambda: False,
+                           orderStatus=SimpleNamespace(status="Submitted"))
+    with pytest.raises(PaperGuardError):
+        OrderManager(ib, ACCOUNT).cancel(mine)
+    orders = OrderManager(ib, guard=build_paper_guard(ib, settings()))
+    with pytest.raises(PaperGuardError):
+        orders.cancel(other)
+    ib._trades = [other, mine]
+    orders.cancel_all_open_orders()
+    assert ib.cancelled == [mine.order]
+
+
+def test_broker_smoke_refuses_without_verified_guard():
+    import main
+
+    ib = FakeIB()
+    asyncio.run(main.run_broker_smoke_tests(ib, market_data=None, equity=1.0, risk=None,
+                                            account=ACCOUNT, guard=None))
+    unverified = build_paper_guard(FakeIB(accounts=("U0000001",)), settings())
+    asyncio.run(main.run_broker_smoke_tests(ib, market_data=None, equity=1.0, risk=None,
+                                            account=ACCOUNT, guard=unverified))
+    assert ib.placed == []
+
+
+def test_redact_accounts_masks_ids_in_free_text():
+    from core.paper_guard import redact_accounts
+
+    text = redact_accounts("Order rejected for account DU0000123 and U0000456")
+    assert "DU0000123" not in text and "U0000456" not in text

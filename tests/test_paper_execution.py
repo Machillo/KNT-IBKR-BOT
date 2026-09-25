@@ -59,8 +59,16 @@ class FakeIB:
         self.bracket_args = None
         self.reject_index = reject_index
 
+    net_liquidation = 100_000.0
+
     def isConnected(self):
         return self.connected
+
+    def accountValues(self, account=""):
+        if self.net_liquidation is None:
+            return []
+        return [SimpleNamespace(account=ACCOUNT, tag="NetLiquidation", currency="BASE",
+                                value=str(self.net_liquidation))]
 
     def managedAccounts(self):
         return list(self.accounts)
@@ -347,3 +355,60 @@ def test_paper_execution_fails_when_child_leg_is_rejected(tmp_path):
     result = run(engine(tmp_path, ib, enabled=True).submit(stock(), request()))
     assert result.submitted is False
     assert result.reason in {"order_status_cancelled", "broker_error_110"}
+
+
+def test_paper_execution_refuses_without_broker_equity(tmp_path):
+    ib = FakeIB()
+    ib.net_liquidation = None
+    result = run(engine(tmp_path, ib, enabled=True).submit(stock(), request()))
+    assert (result.submitted, result.reason) == (False, "broker_equity_unavailable")
+    assert ib.submitted == []
+
+
+def test_paper_execution_uses_lower_of_caller_and_broker_equity(tmp_path):
+    ib = FakeIB()
+    ib.net_liquidation = 400.0  # caller claims 100k; broker says 400 -> 50 at risk > 40 cap
+    result = run(engine(tmp_path, ib, enabled=True).submit(stock(), request()))
+    assert result.reason.startswith("hard_risk:")
+    assert ib.submitted == []
+
+
+def test_persisted_ack_never_arms_autonomous_paper():
+    assert autonomous_paper_armed(True, AUTONOMOUS_PAPER_ACK, persisted_ack=AUTONOMOUS_PAPER_ACK) is False
+
+
+class ExplodingFlattenIB(FakeIB):
+    """Parent filled, child rejected, then the session dies while flattening."""
+
+    def placeOrder(self, contract, order):
+        if len(self.submitted) >= 3:
+            raise ConnectionError("socket closed")
+        trade = super().placeOrder(contract, order)
+        if len(self.submitted) == 1:
+            trade.orderStatus.filled = 10
+        return trade
+
+
+def test_unwind_failure_records_and_locks_trading(tmp_path):
+    ib = ExplodingFlattenIB(reject_index=1)
+    risk = RiskManager(RiskConfig())
+    result = run(engine(tmp_path, ib, enabled=True, risk_manager=risk).submit(stock(), request()))
+    assert result.submitted is False
+    assert result.reason.startswith("unwind_failed_manual_intervention")
+    assert risk.trading_locked is True
+
+
+class ExplodingTransmitIB(FakeIB):
+    def placeOrder(self, contract, order):
+        raise ConnectionError("socket closed")
+
+
+def test_transmission_error_counts_toward_cap_and_locks(tmp_path):
+    ib = ExplodingTransmitIB()
+    risk = RiskManager(RiskConfig())
+    e = engine(tmp_path, ib, enabled=True, risk_manager=risk, max_entries_per_day=1)
+    result = run(e.submit(stock(), request()))
+    assert result.reason.startswith("transmission_error_manual_check")
+    assert risk.trading_locked is True
+    from datetime import datetime, timezone
+    assert e.journal.submitted_count_on(datetime.now(timezone.utc).date().isoformat()) == 1

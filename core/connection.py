@@ -6,6 +6,7 @@ from ib_async import IB
 
 from config.config import IBKRConfig
 from core.exceptions import IBKRConnectionError
+from core.paper_guard import redact_accounts
 from utils.logger import logger
 
 
@@ -84,7 +85,7 @@ class IBKRConnection:
             "IBKR event reqId=%s code=%s message=%s contract=%s",
             req_id,
             error_code,
-            error_string,
+            redact_accounts(error_string),
             getattr(contract, "localSymbol", None),
         )
 

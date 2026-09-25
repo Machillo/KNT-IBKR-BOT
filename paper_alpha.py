@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import signal
 
+from dotenv import dotenv_values
+
 from config.config import config
 from core.connection import IBKRConnection
 from core.market_data import MarketDataService
@@ -35,7 +37,7 @@ async def shadow_loop(
                 daily_loss_limit_pct=supervisor.context.risk.settings.max_daily_loss_pct,
                 trading_locked=supervisor.context.risk.trading_locked,
             )
-            portfolio_history.record(account=mask_account(account.account), state=state)
+            portfolio_history.record(account=account.account, state=state)
             logger.info(
                 "PORTFOLIO SNAPSHOT | account=%s net_liq=%.2f cash=%.2f committed=%.2f pending=%.2f exposure=%.2f%% daily_loss_used=%.2f/%.2f locked=%s positions=%s orders=%s",
                 mask_account(account.account),
@@ -87,7 +89,10 @@ async def main() -> None:
         intelligence = MarketIntelligenceService(ib, market_data)
         # Orders need BOTH the config flag and the literal per-session ACK, plus a
         # session verified as PAPER by account prefix (not just by port).
-        armed = autonomous_paper_armed(config.runtime.autonomous_trading_enabled)
+        armed = autonomous_paper_armed(
+            config.runtime.autonomous_trading_enabled,
+            persisted_ack=dotenv_values(".env").get("AUTONOMOUS_PAPER_ACK"),
+        )
         if config.runtime.autonomous_trading_enabled and not armed:
             logger.warning("AUTONOMOUS_TRADING_ENABLED=true but AUTONOMOUS_PAPER_ACK missing | executor disabled")
         paper_executor = PaperExecutionEngine(

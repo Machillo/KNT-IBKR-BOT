@@ -67,24 +67,29 @@ class ShadowTradingEngine:
         self.research_budget = max(0, min(research_budget, max_candidates))
 
     async def _fresh_reference(self, candidate) -> tuple[float | None, int | None]:
-        """Read-only quote taken right before a paper submission.
+        """Read-only two-sided quote taken right before a paper submission.
 
-        Returns (price, configured IBKR market-data type). The executor refuses
-        anything that is not live data, so delayed/frozen feeds fail closed.
+        Returns (mid price, effective IBKR market-data type). The type is the
+        WORSE of the configured type and the one the ticker itself reports, so a
+        silent fallback to frozen/delayed data is caught. Without a two-sided
+        quote the price is None and the executor refuses.
         """
         market_data = getattr(self.intelligence, "market_data", None)
         if market_data is None:
             return None, None
-        data_type = getattr(getattr(market_data, "settings", None), "market_data_type", None)
+        configured = getattr(getattr(market_data, "settings", None), "market_data_type", None)
         try:
             snapshot = await market_data.snapshot_contract(candidate.contract, candidate.symbol, timeout=3.0)
         except Exception as exc:
             logger.warning("FRESH REFERENCE unavailable | symbol=%s error=%s", candidate.symbol, exc)
-            return None, data_type
+            return None, configured
+        reported = getattr(snapshot, "market_data_type", None)
+        types = [t for t in (configured, reported) if t is not None]
+        data_type = max(types) if types else None
         bid, ask = snapshot.bid, snapshot.ask
         if bid and ask and 0 < bid <= ask:
             return (bid + ask) / 2.0, data_type
-        return (snapshot.last or snapshot.market_price), data_type
+        return None, data_type
 
     @staticmethod
     def _return_series(bars: list[PriceBar], lookback: int = 60) -> tuple[float, ...]:

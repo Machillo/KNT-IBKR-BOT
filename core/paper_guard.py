@@ -43,6 +43,16 @@ def mask_account(account: str | None) -> str:
     return f"{prefix}***{text[-2:]}" if len(text) > 4 else "***"
 
 
+_ANY_ACCOUNT_RE = re.compile(r"\b(?:DU|DF|DI|U|F|I)\d{5,12}\b")
+
+
+def redact_accounts(text: str | None) -> str:
+    """Mask anything that looks like an IBKR account code inside free text."""
+    if not text:
+        return ""
+    return _ANY_ACCOUNT_RE.sub(lambda m: mask_account(m.group(0)), str(text))
+
+
 def is_paper_account_id(account: str | None) -> bool:
     return bool(account) and bool(PAPER_ACCOUNT_RE.fullmatch(str(account).strip()))
 

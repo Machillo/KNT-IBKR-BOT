@@ -26,6 +26,13 @@ class OrderManager:
         self.account = guard.account if guard is not None else account
         self._callback_order_ids: set[int] = set()
 
+    def _assert_session(self) -> None:
+        """Cancels also need a verified paper session: never touch an unverified account."""
+        if self.guard is None:
+            raise PaperGuardError("No paper guard configured; broker action refused")
+        probe = type("_Probe", (), {"account": self.guard.account})()
+        self.guard.assert_can_transmit(probe)
+
     def _transmit(self, contract: Contract, order) -> Trade:
         if self.guard is None:
             raise PaperGuardError("No paper guard configured; order transmission refused")
@@ -162,6 +169,10 @@ class OrderManager:
             logger.info("Cancellation skipped; order already done | id=%s status=%s",
                         trade.order.orderId, trade.orderStatus.status)
             return trade
+        self._assert_session()
+        order_account = (getattr(trade.order, "account", "") or "").strip()
+        if order_account and order_account != self.account:
+            raise PaperGuardError("Refusing to cancel an order of another account")
         logger.info("ORDER CANCELLATION requested | id=%s", trade.order.orderId)
         return self.ib.cancelOrder(trade.order)
 
@@ -187,6 +198,7 @@ class OrderManager:
         """Cancel this manager's account orders only; never another account's orders."""
         if not self.account:
             raise PaperGuardError("cancel_all_open_orders requires an explicit account")
+        self._assert_session()
         for trade in list(self.ib.openTrades()):
             if trade.isDone():
                 continue

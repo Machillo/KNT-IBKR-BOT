@@ -31,6 +31,8 @@ def main() -> None:
     ap.add_argument("--run-mode", default="shadow_only", help="'any' for every run mode")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--persist", action="store_true", help="store gate results in research_quality")
+    ap.add_argument("--fwd", action="store_true",
+                    help="also run the pre-registered FWD1/FWD2 evaluator (binding only at the registered moment)")
     a = ap.parse_args()
     db = a.db or state_path("shadow_only", "strategy_performance.db")
     run_mode = None if a.run_mode == "any" else a.run_mode
@@ -39,6 +41,10 @@ def main() -> None:
     print(render(summary))
     if a.json:
         print(json.dumps(summary, indent=2, default=str))
+    if a.fwd:
+        from research.fwd_protocol import evaluate_fwd1, evaluate_fwd2
+        for result in (evaluate_fwd1(db), evaluate_fwd2(db)):
+            print(json.dumps(result, indent=2, default=str))
     if a.persist:
         results, session = shadow_quality.evaluate(db, since=since, until=until, run_mode=run_mode)
         shadow_quality.persist(db, results, session)

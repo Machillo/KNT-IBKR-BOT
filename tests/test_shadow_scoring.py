@@ -168,3 +168,14 @@ def test_mae_is_clipped_at_the_stop_price():
     series = bars([(100, 101, 99, 100), (99, 100, 80, 85)])
     out = score_decision("LONG", 95, 120, series, ZERO)
     assert out.exit_reason == "stop" and out.mae_pct == pytest.approx(-5.0)
+
+
+def test_report_measures_selected_excess_versus_same_cycle(tmp_path):
+    db = tmp_path / "s.db"
+    journal_with_decisions(db)
+    scorer = ShadowScorer(db, costs=ZERO)
+    asyncio.run(scorer.score_pending(provider()))
+    report = scorer.report()
+    # AAA (selected) +10 % over 5 bars; cycle mean of AAA, BBB (+10 %) and CCC (+2 %) = 7.33 %.
+    sel = report["selected_vs_cycle_fwd5"]
+    assert sel["n"] == 1 and sel["mean_excess_pct"] == pytest.approx(10.0 - (10.0 + 10.0 + 2.0) / 3, abs=0.05)

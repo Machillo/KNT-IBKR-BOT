@@ -66,14 +66,26 @@ def series_correlation(a: tuple[float, ...], b: tuple[float, ...]) -> float | No
     return sum((i - mx) * (j - my) for i, j in zip(x, y)) / sqrt(vx * vy)
 
 
+def exposure_symbols(state: PortfolioState) -> list[str]:
+    """Symbols already exposed: open positions AND working orders (e.g. entries submitted
+    earlier in the same cycle). Both must count for the correlation guard."""
+    seen: list[str] = []
+    for item in (*state.positions, *state.pending_orders):
+        if item.symbol not in seen:
+            seen.append(item.symbol)
+    return seen
+
+
 def portfolio_correlation(candidate_returns: tuple[float, ...], state: PortfolioState,
                           position_returns: dict[str, tuple[float, ...]]) -> float | None:
-    """Max |correlation| to any open position; None (fail closed) if any series is missing."""
-    if not state.positions:
+    """Max |correlation| to any open position or working order; None (fail closed) if any
+    required series is missing."""
+    symbols = exposure_symbols(state)
+    if not symbols:
         return 0.0
     correlations: list[float] = []
-    for position in state.positions:
-        series = position_returns.get(position.symbol)
+    for symbol in symbols:
+        series = position_returns.get(symbol)
         if not series:
             return None
         corr = series_correlation(candidate_returns, series)

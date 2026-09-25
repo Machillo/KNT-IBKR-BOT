@@ -27,7 +27,8 @@ HONEST LIMITATIONS
 """
 from __future__ import annotations
 
-from bisect import bisect_left
+from bisect import bisect_left, bisect_right
+from itertools import groupby
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime
 from decimal import ROUND_HALF_UP, Decimal
@@ -36,7 +37,7 @@ from math import floor
 from backtest.costs import BASELINE, CostModel
 from backtest.metrics import as_datetime, cagr, daily_equity, period_returns, sharpe, sortino
 from config.config import RiskConfig
-from engine.decision import DecisionPipeline, return_series
+from engine.decision import DecisionPipeline, exposure_symbols, return_series
 from engine.strategy_selector import StrategySelector
 from market.history import PriceBar
 from portfolio.admission import PortfolioAdmissionCoordinator
@@ -47,7 +48,7 @@ from risk.risk_manager import RiskManager
 from strategies.momentum import SignalSide
 
 CONTEXT_BARS = 450
-PIPELINE_VERSION = 2
+PIPELINE_VERSION = 3  # v3: quant-review fixes (aligned correlations, strict limit fills, score priority)
 
 
 @dataclass(frozen=True)
@@ -121,6 +122,8 @@ class PipelineResult:
     unfilled_expired: int = 0
     blocked_by_cap_or_lock: int = 0
     outside_universe: int = 0
+    blocked_session_closed: int = 0
+    censored_at_end: int = 0
     pipeline_version: int = PIPELINE_VERSION
 
 
@@ -138,6 +141,7 @@ class _Open:
     qty: float
     entry_cost: float
     equity_before: float
+    filled_at_open: bool = True
 
 
 @dataclass
@@ -151,7 +155,6 @@ class _Order:
     target: float
     qty: float
     expiry: date
-    raw_open: float = 0.0
 
 
 def _returns(bars: list[PriceBar], lookback: int = 60) -> tuple[float, ...]:
@@ -188,6 +191,9 @@ class PipelineBacktest:
         self.config = cfg = config or PipelineConfig()
         self.data = {s: list(b) for s, b in data.items() if b}
         self.times = {s: [_key(b.time) for b in bars] for s, bars in self.data.items()}
+        # Intraday data = some consecutive bars share a date. Intraday orders decided after the
+        # session's last bar are refused (the executor's session policy is closed then).
+        self.intraday = {s: any(a.date() == b.date() for a, b in zip(ts, ts[1:])) for s, ts in self.times.items()}
         self.universe = universe
         self.selector = StrategySelector(
             cfg.min_score, performance_store=None,
@@ -225,6 +231,15 @@ class PipelineBacktest:
         lo = bisect_left(self.times[symbol], t)
         return self.data[symbol][max(0, lo - lookback):lo]
 
+    def _bars_through(self, symbol: str, t: datetime, lookback: int = 70) -> list[PriceBar]:
+        """Bars of ``symbol`` up to and including the bar stamped ``t``.
+
+        Bars sharing a timestamp complete together, so at a decision on the bar stamped
+        ``t`` every other symbol's bar ``t`` is complete too. Using it keeps correlation
+        inputs aligned with the candidate's own series (same bars, no lag)."""
+        hi = bisect_right(self.times[symbol], t)
+        return self.data[symbol][max(0, hi - lookback):hi]
+
     def _filters_allow(self, side: SignalSide, history: list[PriceBar], t: datetime) -> bool:
         cfg = self.config
         if cfg.symbol_trend_sma is not None:
@@ -260,7 +275,13 @@ class PipelineBacktest:
     # --------------------------------------------------------------------- run
     def run(self, start: datetime | None = None, end: datetime | None = None) -> PipelineResult:
         """Replay decisions whose ENTRY happens in [start, end); earlier bars are warmup
-        context only; bars at or after ``end`` are never read."""
+        context only; bars at or after ``end`` are never read.
+
+        Each timestamp is processed like a runtime cycle: first working orders and exits for
+        every symbol with a bar at ``t``, then decisions on the completed bars ordered by the
+        selector's adjusted score (highest first), so capacity and the daily entry cap go to
+        the strongest setups rather than to alphabetical order.
+        """
         cfg = self.config
         costs = cfg.cost_model
         events: list[tuple[datetime, str, int]] = []
@@ -271,21 +292,22 @@ class PipelineBacktest:
                 events.append((t, symbol, i))
         events.sort(key=lambda e: (e[0], e[1]))
 
-        realized = cfg.initial_equity  # equity with realized P&L and paid costs
+        self._realized = cfg.initial_equity
         open_positions: dict[str, _Open] = {}
         orders: dict[str, _Order] = {}
         last_close: dict[str, float] = {}
         trades: list[PipelineTrade] = []
         curve: list[tuple[object, float]] = []
-        stats = dict(decisions=0, no_trade=0, rejected=0, submitted=0, expired=0, blocked=0, outside=0)
+        stats = dict(decisions=0, no_trade=0, rejected=0, submitted=0, expired=0, blocked=0, outside=0,
+                     session_closed=0, censored=0)
         in_market = total = 0
         day_key = None
-        day_start_equity = realized
+        day_start_equity = self._realized
         entries_today = 0
         active = start is None
 
         def marked() -> float:
-            value = realized
+            value = self._realized
             for pos in open_positions.values():
                 px = last_close.get(pos.symbol, pos.entry_fill)
                 direction = 1 if pos.side == SignalSide.LONG else -1
@@ -295,7 +317,7 @@ class PipelineBacktest:
 
         def cash() -> float:
             spent = sum(p.entry_fill * p.qty for p in open_positions.values() if p.side == SignalSide.LONG)
-            return realized - spent
+            return self._realized - spent
 
         def state(t: datetime) -> PortfolioState:
             equity = marked()
@@ -318,7 +340,6 @@ class PipelineBacktest:
             return PortfolioState(snapshot, positions, pending)
 
         def close_position(pos: _Open, raw_exit: float, reason: str, marketable: bool, t) -> None:
-            nonlocal realized
             exit_fill = costs.marketable_fill(raw_exit, buy=(pos.side == SignalSide.SHORT)) if marketable else raw_exit
             commission = costs.commission(pos.qty, exit_fill)
             if pos.side == SignalSide.LONG:
@@ -328,7 +349,7 @@ class PipelineBacktest:
                 fee = costs.borrow_cost(pos.entry_fill * pos.qty, held)
             direction = 1 if pos.side == SignalSide.LONG else -1
             gross = (exit_fill - pos.entry_fill) * pos.qty * direction
-            realized += gross - commission - fee
+            self._realized += gross - commission - fee
             pnl = gross - pos.entry_cost - commission - fee
             spread = abs(exit_fill - raw_exit) * pos.qty + abs(pos.entry_fill - pos.raw_entry) * pos.qty
             trades.append(PipelineTrade(
@@ -338,23 +359,21 @@ class PipelineBacktest:
             ))
             del open_positions[pos.symbol]
 
-        def open_from(order: _Order, fill: float, raw: float, t) -> None:
-            nonlocal realized
+        def open_from(order: _Order, fill: float, raw: float, t, at_open: bool) -> None:
             buy = order.side == SignalSide.LONG
             commission = costs.commission(order.qty, fill)
             fee = 0.0 if buy else costs.sell_fee(order.qty, fill)
             equity_before = marked()
-            realized -= commission + fee
+            self._realized -= commission + fee
             open_positions[order.symbol] = _Open(order.symbol, order.strategy, order.regime, order.side, t,
                                                  raw, fill, order.stop, order.target, order.qty,
-                                                 commission + fee, equity_before)
+                                                 commission + fee, equity_before, at_open)
 
-        for t, symbol, i in events:
-            bars = self.data[symbol]
-            bar = bars[i]
+        for t, group in groupby(events, key=lambda e: e[0]):
+            group = list(group)
             if not active and start is not None and t >= start:
                 active = True
-                realized = cfg.initial_equity
+                self._realized = cfg.initial_equity
             if t.date() != day_key:
                 day_key = t.date()
                 day_start_equity = marked()
@@ -362,66 +381,82 @@ class PipelineBacktest:
                 self.risk.trading_locked = False  # daily lock is per trading date (sticky within it)
                 self.risk.lock_reason = ""
 
-            # 1) working entry order for this symbol
-            order = orders.get(symbol)
-            if order is not None:
-                if t.date() > order.expiry:
-                    del orders[symbol]
-                    stats["expired"] += 1
-                else:
-                    long = order.side == SignalSide.LONG
-                    fill = raw = None
-                    if cfg.entry_mode == "next_open":
-                        raw = float(bar.open)
-                        fill = costs.marketable_fill(raw, buy=long)
-                    elif long and bar.open <= order.limit:
-                        raw = float(bar.open)
-                        fill = min(order.limit, costs.marketable_fill(raw, buy=True))
-                    elif long and bar.low <= order.limit:
-                        raw = fill = order.limit
-                    elif not long and bar.open >= order.limit:
-                        raw = float(bar.open)
-                        fill = max(order.limit, costs.marketable_fill(raw, buy=False))
-                    elif not long and bar.high >= order.limit:
-                        raw = fill = order.limit
-                    if fill is not None:
+            for _, symbol, i in group:
+                bar = self.data[symbol][i]
+                # 1) working entry order
+                order = orders.get(symbol)
+                if order is not None:
+                    if t.date() > order.expiry:
                         del orders[symbol]
-                        open_from(order, fill, raw, t)
-                    elif cfg.entry_mode == "next_open":
-                        del orders[symbol]
+                        stats["expired"] += 1
+                    else:
+                        long = order.side == SignalSide.LONG
+                        fill = raw = None
+                        at_open = False
+                        if cfg.entry_mode == "next_open":
+                            raw = float(bar.open)
+                            fill, at_open = costs.marketable_fill(raw, buy=long), True
+                        elif long and bar.open <= order.limit:
+                            raw = float(bar.open)
+                            fill, at_open = min(order.limit, costs.marketable_fill(raw, buy=True)), True
+                        elif long and bar.low < order.limit:          # strict trade-through
+                            raw = fill = order.limit
+                        elif not long and bar.open >= order.limit:
+                            raw = float(bar.open)
+                            fill, at_open = max(order.limit, costs.marketable_fill(raw, buy=False)), True
+                        elif not long and bar.high > order.limit:
+                            raw = fill = order.limit
+                        if fill is not None:
+                            del orders[symbol]
+                            open_from(order, fill, raw, t, at_open)
+                        elif cfg.entry_mode == "next_open":
+                            del orders[symbol]
 
-            # 2) exits (children active once the parent has filled)
-            pos = open_positions.get(symbol)
-            if pos is not None:
-                if pos.side == SignalSide.LONG:
-                    if bar.open <= pos.stop:
-                        close_position(pos, float(bar.open), "stop_gap", True, t)
-                    elif bar.low <= pos.stop:
-                        close_position(pos, pos.stop, "stop", True, t)
-                    elif bar.high >= pos.target:
-                        close_position(pos, pos.target, "target", False, t)
-                else:
-                    if bar.open >= pos.stop:
-                        close_position(pos, float(bar.open), "stop_gap", True, t)
-                    elif bar.high >= pos.stop:
-                        close_position(pos, pos.stop, "stop", True, t)
-                    elif bar.low <= pos.target:
-                        close_position(pos, pos.target, "target", False, t)
-            last_close[symbol] = float(bar.close)
+                # 2) exits; after an intrabar fill the target is not credited on the fill bar
+                pos = open_positions.get(symbol)
+                if pos is not None:
+                    fill_bar = pos.entry_time == t
+                    target_ok = not fill_bar or pos.filled_at_open
+                    gap_ok = not fill_bar or pos.filled_at_open
+                    if pos.side == SignalSide.LONG:
+                        if gap_ok and bar.open <= pos.stop:
+                            close_position(pos, float(bar.open), "stop_gap", True, t)
+                        elif bar.low <= pos.stop:
+                            close_position(pos, pos.stop, "stop", True, t)
+                        elif target_ok and bar.high >= pos.target:
+                            close_position(pos, pos.target, "target", False, t)
+                    else:
+                        if gap_ok and bar.open >= pos.stop:
+                            close_position(pos, float(bar.open), "stop_gap", True, t)
+                        elif bar.high >= pos.stop:
+                            close_position(pos, pos.stop, "stop", True, t)
+                        elif target_ok and bar.low <= pos.target:
+                            close_position(pos, pos.target, "target", False, t)
+                last_close[symbol] = float(bar.close)
 
             if active and day_start_equity > 0 and (day_start_equity - marked()) / day_start_equity >= cfg.daily_loss_pct:
                 self.risk.lock_trading("daily loss limit (replay)")
 
-            # 3) decision on the completed bar
-            times = self.times[symbol]
-            if (symbol not in open_positions and symbol not in orders and i + 1 < len(bars)
-                    and (end is None or times[i + 1] < end) and (start is None or times[i + 1] >= start)):
+            # 3) decisions on the completed bars, strongest selection first
+            pending_decisions = []
+            for _, symbol, i in group:
+                bars = self.data[symbol]
+                times = self.times[symbol]
+                if (symbol in open_positions or symbol in orders or i + 1 >= len(bars)
+                        or (end is not None and times[i + 1] >= end) or (start is not None and times[i + 1] < start)):
+                    continue
                 if self.universe is not None and symbol not in self.universe.members_at(t):
                     stats["outside"] += 1
-                else:
-                    self._decide(symbol, bars, i, t, times, state, orders, stats, entries_today)
-                    if symbol in orders:
-                        entries_today += 1
+                    continue
+                history = bars[max(0, i + 1 - CONTEXT_BARS):i + 1]
+                selection = self.pipeline.select(history, symbol=symbol, asset_class="STK", timeframe="")
+                score = selection.selected.adjusted_score if selection.selected is not None else -1.0
+                pending_decisions.append((score, symbol, i, history, selection))
+            pending_decisions.sort(key=lambda x: (-x[0], x[1]))
+            for _, symbol, i, history, selection in pending_decisions:
+                placed = self._decide(symbol, history, selection, i, t, state, orders, stats, entries_today)
+                if placed:
+                    entries_today += 1
 
             if active:
                 total += 1
@@ -431,40 +466,43 @@ class PipelineBacktest:
         final_time = events[-1][0] if events else None
         for pos in list(open_positions.values()):
             close_position(pos, last_close.get(pos.symbol, pos.entry_fill), "end_of_data", True, final_time)
-        stats["expired"] += len(orders)
+        stats["censored"] += len(orders)  # still working when the data ends: censored, not expired
         if curve:
-            curve.append((final_time, realized))
-        return self._result(realized, trades, curve, stats, in_market, total)
+            curve.append((final_time, self._realized))
+        return self._result(self._realized, trades, curve, stats, in_market, total)
 
-    def _decide(self, symbol, bars, i, t, times, state, orders, stats, entries_today) -> None:
+    def _decide(self, symbol, history, selection, i, t, state, orders, stats, entries_today) -> bool:
         cfg = self.config
-        history = bars[max(0, i + 1 - CONTEXT_BARS):i + 1]
-        selection = self.pipeline.select(history, symbol=symbol, asset_class="STK", timeframe="")
         stats["decisions"] += 1
         chosen = selection.selected
         if chosen is not None and cfg.regime_filter is not None and selection.regime.regime.value not in cfg.regime_filter:
             stats["no_trade"] += 1
-            return
+            return False
         if chosen is not None and not self._filters_allow(chosen.signal.side, history, t):
             stats["no_trade"] += 1
-            return
+            return False
         if chosen is not None and cfg.bracket_atr is not None:
             stop, target = self._atr_bracket(chosen.signal.side, history, *cfg.bracket_atr)
             chosen = replace(chosen, signal=replace(chosen.signal, stop=stop, target=target))
             selection = replace(selection, selected=chosen)
-        position_returns = {p.symbol: _returns(self._bars_until(p.symbol, t, 61)) for p in state(t).positions}
+        current = state(t)
+        position_returns = {sym: _returns(self._bars_through(sym, t, 61)) for sym in exposure_symbols(current)}
         decision = self.pipeline.decide(history, symbol=symbol, asset_class="STK", timeframe="",
-                                        portfolio_state=state(t), position_returns=position_returns,
+                                        portfolio_state=current, position_returns=position_returns,
                                         selection=selection)
         if decision.action == "NO_TRADE":
             stats["no_trade"] += 1
-            return
+            return False
         if not decision.approved:
             stats["rejected"] += 1
-            return
+            return False
+        times = self.times[symbol]
+        if self.intraday[symbol] and times[i + 1].date() != t.date():
+            stats["session_closed"] += 1  # decided on the session's last bar: executor refuses
+            return False
         if self.risk.trading_locked or entries_today >= cfg.max_entries_per_day:
             stats["blocked"] += 1  # executor would refuse to transmit
-            return
+            return False
         signal = decision.selection.selected.signal
         orders[symbol] = _Order(
             symbol, decision.selection.selected.strategy, selection.regime.regime.value, signal.side,
@@ -472,6 +510,7 @@ class PipelineBacktest:
             float(decision.proposal.quantity), times[i + 1].date(),
         )
         stats["submitted"] += 1
+        return True
 
     def _result(self, equity, trades, curve, stats, in_market, total) -> PipelineResult:
         cfg = self.config
@@ -515,6 +554,8 @@ class PipelineBacktest:
             unfilled_expired=stats["expired"],
             blocked_by_cap_or_lock=stats["blocked"],
             outside_universe=stats["outside"],
+            blocked_session_closed=stats["session_closed"],
+            censored_at_end=stats["censored"],
         )
 
 

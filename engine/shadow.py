@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from itertools import combinations
+from types import SimpleNamespace
 from math import sqrt
 
 from ib_async import Contract
@@ -171,8 +172,14 @@ class ShadowTradingEngine:
 
     async def _position_returns(self, state: PortfolioState) -> dict[str, tuple[float, ...]]:
         returns: dict[str, tuple[float, ...]] = {}
-        for position in state.positions:
-            if position.con_id <= 0:
+        # Working orders count too: the correlation guard fails closed without their series.
+        exposures = list(state.positions) + [
+            SimpleNamespace(symbol=o.symbol, con_id=o.con_id, asset_class=o.asset_class, exchange="SMART",
+                            currency="USD")
+            for o in state.pending_orders if o.symbol not in {p.symbol for p in state.positions}
+        ]
+        for position in exposures:
+            if position.con_id <= 0 or position.symbol in returns:
                 continue
             try:
                 contract = Contract(conId=position.con_id, symbol=position.symbol,

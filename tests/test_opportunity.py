@@ -118,3 +118,37 @@ def test_short_evaluations_are_not_labelled_eligible_when_shorts_are_disabled():
                           selected=e, evaluations=(e,))
     (o,) = build_opportunities(sel, symbol="X", asset_class="STK", minimum_score=55, context_bars=140)
     assert o.eligibility == "short_disabled" and o.entry == 100.0                # tick-rounded
+
+
+def test_failed_type_lookup_is_a_candidate_error_not_an_exclusion(tmp_path):
+    from test_shadow_research_path import engine, run
+
+    shadow = engine(tmp_path)
+
+    async def broken(contract):
+        raise TimeoutError("pacing")
+    shadow.metadata.ib = SimpleNamespace(reqContractDetailsAsync=broken)
+    assert run(shadow) == []
+    row = sqlite3.connect(shadow.journal.path).execute("SELECT action, reason FROM shadow_decisions").fetchone()
+    assert row == ("CANDIDATE_ERROR", "metadata_unavailable")
+    cycle = sqlite3.connect(shadow.journal.path).execute(
+        "SELECT candidates_attempted, candidate_errors FROM discovery_cycles").fetchone()
+    assert cycle == (1, 1)
+
+
+def test_excluded_types_do_not_consume_deep_analysis_slots(tmp_path):
+    from test_shadow_research_path import engine, run
+
+    shadow = engine(tmp_path, n_candidates=5)
+    shadow.max_candidates = 2
+    types = {1: "ETF", 2: "ETF", 3: "COMMON", 4: "COMMON", 5: "COMMON"}
+
+    async def details(contract):
+        return [SimpleNamespace(industry=f"I{contract.conId}", category="x", stockType=types[contract.conId])]
+    shadow.metadata.ib = SimpleNamespace(reqContractDetailsAsync=details)
+    decisions = run(shadow)
+    assert [d.symbol for d in decisions] == ["C", "D"]               # the first 2 analysable names
+    conn = sqlite3.connect(shadow.journal.path)
+    assert conn.execute("SELECT COUNT(*) FROM shadow_decisions WHERE action='INSTRUMENT_EXCLUDED'").fetchone()[0] == 2
+    recorded = conn.execute("SELECT symbol, stock_type FROM instrument_types ORDER BY id").fetchall()
+    assert recorded == [("A", "ETF"), ("B", "ETF"), ("C", "COMMON"), ("D", "COMMON")]

@@ -209,13 +209,23 @@ class ShadowTradingEngine:
         except Exception as exc:  # exploratory records must never affect the decision journal
             logger.warning("SHADOW JOURNAL opportunity write failed | symbol=%s error=%s", candidate.symbol, exc)
 
-    async def _stock_type(self, candidate) -> str | None:
-        """IBKR stockType of the candidate (read-only, cached, bounded wait); None if unknown."""
+    async def _stock_type(self, candidate) -> tuple[str | None, bool]:
+        """(IBKR stockType, lookup_ok). A FAILED lookup (timeout, error, no or ambiguous details)
+        is NOT an instrument type: it is reported as unavailable so it can be gated as a data
+        problem instead of silently excluding the candidate."""
         try:
             meta = await asyncio.wait_for(self.metadata.get(candidate.contract), timeout=5.0)
         except Exception:
-            return None
-        return None if meta is None else meta.stock_type
+            return None, False
+        if meta is None:
+            return None, False
+        if self.journal is not None:
+            try:
+                self.journal.record_instrument_type(candidate.symbol, int(getattr(candidate.contract, "conId", 0) or 0),
+                                                    meta.stock_type)
+            except Exception as exc:
+                logger.warning("SHADOW JOURNAL instrument type write failed | error=%s", exc)
+        return meta.stock_type, True
 
     def _journal_excluded(self, cycle_id, candidate, stock_type) -> None:
         """Instrument outside the analysed types: recorded (never silently dropped), never scored."""
@@ -233,7 +243,7 @@ class ShadowTradingEngine:
         except Exception as exc:
             logger.warning("SHADOW JOURNAL exclusion write failed | symbol=%s error=%s", candidate.symbol, exc)
 
-    def _journal_error(self, cycle_id, candidate, exc) -> None:
+    def _journal_error(self, cycle_id, candidate, exc_or_reason) -> None:
         """A candidate that failed is recorded (it must not silently vanish from the funnel)."""
         if self.journal is None:
             return
@@ -242,7 +252,8 @@ class ShadowTradingEngine:
                 cycle_id, symbol=candidate.symbol, con_id=int(getattr(candidate.contract, "conId", 0) or 0),
                 bar_time=None, timeframe="1 hour", regime="UNKNOWN", action="CANDIDATE_ERROR",
                 strategy=None, side=None, score=None, entry=None, stop=None, target=None,
-                reason=type(exc).__name__, context={"run_mode": self.run_mode,
+                reason=exc_or_reason if isinstance(exc_or_reason, str) else type(exc_or_reason).__name__,
+                context={"run_mode": self.run_mode,
                                                     "learning_mode": "live" if self.learning_enabled else "frozen"})
         except Exception as journal_exc:
             logger.warning("SHADOW JOURNAL error write failed | symbol=%s error=%s", candidate.symbol, journal_exc)
@@ -428,10 +439,12 @@ class ShadowTradingEngine:
                        portfolio_state: PortfolioState | None = None) -> list[ShadowDecision]:
         ranked = await self.intelligence.ranked_us_opportunity_universe(
             rows_per_plan=rows_per_scanner, quote_budget=self.quote_budget)
-        candidates = [x for x in ranked if x.eligible][:self.max_candidates]
+        # Deep analysis = the first max_candidates ELIGIBLE names (liquidity order) whose IBKR type
+        # is analysable: excluded types do not consume a slot. Type lookups are capped per cycle.
+        candidates = [x for x in ranked if x.eligible]
         cycle_id = ShadowJournal.new_cycle_id()
-        logger.info("SHADOW FUNNEL | ranked=%s eligible=%s deep_analysis=%s",
-                    len(ranked), sum(1 for x in ranked if x.eligible), len(candidates))
+        logger.info("SHADOW FUNNEL | ranked=%s eligible=%s deep_analysis_cap=%s",
+                    len(ranked), len(candidates), self.max_candidates)
         decisions: list[ShadowDecision] = []
         history_by_symbol: dict[str, list[PriceBar]] = {}
         if self.research_execution:
@@ -448,16 +461,24 @@ class ShadowTradingEngine:
         logger.info("MARKET SESSION | asset=US_STOCKS session=%s market_open=%s local=%s",
                     session.session, session.market_open, session.local_time.isoformat())
         if self.learning_enabled:
-            await self.research_scheduler.run_cycle(candidates, market_open=session.market_open)
-        attempted = errors = 0
+            await self.research_scheduler.run_cycle(candidates[:self.max_candidates],
+                                                    market_open=session.market_open)
+        attempted = errors = analysed = 0
 
         for candidate in candidates:
+            if analysed >= self.max_candidates or attempted >= 3 * self.max_candidates:
+                break
             attempted += 1
             try:
-                stock_type = await self._stock_type(candidate)
+                stock_type, lookup_ok = await self._stock_type(candidate)
+                if not lookup_ok:
+                    errors += 1
+                    self._journal_error(cycle_id, candidate, "metadata_unavailable")
+                    continue
                 if stock_type not in TRADABLE_STOCK_TYPES:
                     self._journal_excluded(cycle_id, candidate, stock_type)
                     continue
+                analysed += 1
                 bars = decision_context(await self.history.bars(
                     candidate.contract, duration=DECISION_HISTORY_DURATION, complete_only=True))
                 history_by_symbol[candidate.symbol] = bars

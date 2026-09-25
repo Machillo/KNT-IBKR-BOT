@@ -87,7 +87,7 @@ def test_shadow_cycle_journals_cycle_funnel_and_decision_context(tmp_path, monke
     shadow = ShadowTradingEngine(SimpleNamespace(), intel, research_budget=0)
 
     async def common_stock(candidate):
-        return "COMMON"                     # instrument type lookup (read-only IBKR details) stubbed
+        return "COMMON", True               # instrument type lookup (read-only IBKR details) stubbed
     shadow._stock_type = common_stock
     bars = _bars()
 

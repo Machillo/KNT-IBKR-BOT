@@ -220,6 +220,11 @@ class ShadowJournal:
                 """
             )
             conn.execute("CREATE INDEX IF NOT EXISTS idx_shadow_opportunities_decision ON shadow_opportunities(decision_id)")
+            # Point-in-time IBKR instrument types of every name looked up (FWD3 universe filter).
+            conn.execute(
+                """CREATE TABLE IF NOT EXISTS instrument_types (
+                       id INTEGER PRIMARY KEY AUTOINCREMENT, looked_up_at TEXT NOT NULL,
+                       symbol TEXT NOT NULL, con_id INTEGER, stock_type TEXT)""")
             existing = {row[1] for row in conn.execute("PRAGMA table_info(shadow_decisions)")}
             for name, ddl in _DECISION_EXTRA_COLUMNS:
                 if name not in existing:
@@ -315,6 +320,11 @@ class ShadowJournal:
                 rows,
             )
         return len(rows)
+
+    def record_instrument_type(self, symbol: str, con_id: int, stock_type: str | None) -> None:
+        with sqlite3.connect(self.path) as conn:
+            conn.execute("INSERT INTO instrument_types (looked_up_at, symbol, con_id, stock_type) VALUES (?, ?, ?, ?)",
+                         (datetime.now(timezone.utc).isoformat(), symbol, int(con_id or 0), stock_type))
 
     def record_funnel(self, cycle_id: str, funnel) -> int:
         now = datetime.now(timezone.utc).isoformat()

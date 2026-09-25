@@ -86,7 +86,7 @@ def test_runtime_shadow_decides_through_the_shared_pipeline(tmp_path, monkeypatc
     shadow = ShadowTradingEngine(SimpleNamespace(), intel, research_budget=0)
 
     async def common_stock(candidate):
-        return "COMMON"                     # instrument type lookup (read-only IBKR details) stubbed
+        return "COMMON", True               # instrument type lookup (read-only IBKR details) stubbed
     shadow._stock_type = common_stock
 
     async def fake_bars(contract, **kwargs):

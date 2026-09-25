@@ -56,8 +56,8 @@ class ContractMetadataService:
         meta = InstrumentMetadata(
             sector=(getattr(detail, "industry", "") or "").strip() or None,
             industry_category=(getattr(detail, "category", "") or "").strip() or None,
-            stock_type=(str(getattr(detail, "stockType", "") or "")).strip() or None,
+            stock_type=(str(getattr(detail, "stockType", "") or "")).strip().upper() or None,
         )
-        if con_id and meta.known:
+        if con_id and (meta.known or meta.stock_type):
             self._cache[con_id] = (self._clock(), meta)
         return meta

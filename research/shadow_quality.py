@@ -31,6 +31,7 @@ from research.shadow_journal import DECISION_VERSION, ShadowJournal
 
 GATES_VERSION = "g1"
 MAX_BLOCKING_CYCLE_SHARE = 0.05
+MAX_CANDIDATE_ERROR_SHARE = 0.05
 BAR_SECONDS = 3600
 # pretrade refuses bars older than 75 min at ITS clock; created_at is written a moment later,
 # so the gate allows a small margin before calling a transmit "stale".
@@ -113,8 +114,13 @@ def evaluate(path: str | Path, *, since: datetime | None = None, until: datetime
             if journaled != attempted:
                 add(GateResult("cycle", cid, "decisions_missing", "BLOCKING",
                                f"attempted={attempted} journaled={journaled}"))
-            if (c["candidate_errors"] or 0) > 0:
-                add(GateResult("cycle", cid, "candidate_errors", "WARNING", f"errors={c['candidate_errors']}"))
+            errors_n = c["candidate_errors"] or 0
+            if errors_n > 0:
+                # Failed candidates (history errors, failed instrument-type lookups) are not random:
+                # above MAX_CANDIDATE_ERROR_SHARE the cycle's cohort is not what the scanners offered.
+                share = errors_n / attempted if attempted else 1.0
+                severity = "BLOCKING" if share > MAX_CANDIDATE_ERROR_SHARE else "WARNING"
+                add(GateResult("cycle", cid, "candidate_errors", severity, f"errors={errors_n} of {attempted}"))
             eligible, cap = c["eligible_count"] or 0, c["max_candidates"] or 0
             if cap and eligible > cap:
                 add(GateResult("cycle", cid, "deep_analysis_cap", "INFO", f"eligible={eligible} analysed<={cap}"))

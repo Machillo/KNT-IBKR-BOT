@@ -139,9 +139,14 @@ class DecisionPipeline:
                 selection, symbol=symbol, asset_class=asset_class,
                 minimum_score=float(getattr(self.selector, "minimum_score", 0.0)), context_bars=len(bars),
                 allow_short=self.allow_short)
-        except Exception:
+        except Exception as exc:
             # Recording only: a bug in the recorder can never change or erase a decision.
             opportunities = ()
+            if not getattr(self, "_recorder_warned", False):
+                self._recorder_warned = True
+                from utils.logger import logger
+                logger.warning("OPPORTUNITY RECORDER failed (records empty, decisions unaffected) | %s",
+                               type(exc).__name__)
         return replace(decision, opportunities=opportunities)
 
     def _decide(self, bars, *, symbol, asset_class, portfolio_state, position_returns, selection,

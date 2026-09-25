@@ -166,3 +166,12 @@ def test_rows_without_a_run_mode_are_not_part_of_a_modes_window(tmp_path):
         conn.execute("UPDATE shadow_decisions SET run_mode=NULL")
     _, session = _verdict(db)
     assert session["cycles"] == 0 and session["verdict"] == "INVALID_FOR_RESEARCH"
+
+
+def test_a_cycle_with_many_failed_candidates_is_blocking(tmp_path):
+    db = tmp_path / "j.db"
+    c = _decision(db)
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE discovery_cycles SET candidates_attempted=10, candidate_errors=3 WHERE cycle_id=?", (c,))
+    results, _ = shadow_quality.evaluate(db)
+    assert any(r.gate == "candidate_errors" and r.severity == "BLOCKING" for r in results)

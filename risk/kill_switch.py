@@ -55,6 +55,28 @@ class KillSwitch:
             result.append(trade)
         return result
 
+    async def _all_open_trades(self):
+        """Working orders of the account from EVERY client (read-only request); falls back to this
+        client's own orders when the broker call is unavailable."""
+        request = getattr(self.ib, "reqAllOpenOrdersAsync", None)
+        trades = None
+        if request is not None:
+            try:
+                trades = await asyncio.wait_for(request(), timeout=5)
+            except Exception:
+                trades = None
+        if trades is None:
+            return self._account_open_trades()
+        result = []
+        for trade in list(trades or []):
+            if trade.isDone():
+                continue
+            order_account = (getattr(trade.order, "account", "") or "").strip()
+            if order_account and order_account != self.account:
+                continue
+            result.append(trade)
+        return result
+
     def _account_positions(self):
         return [
             p for p in list(self.ib.positions())
@@ -112,29 +134,58 @@ class KillSwitch:
 
         logger.critical("KILL SWITCH ARMED | account=%s reason=%s", mask_account(self.account), reason)
 
+        # Positions KNT may flatten automatically: whole-share stocks within the drill limit. Every
+        # other position is left to a human WITH its protective orders (cancelling a stop on a
+        # position we will not flatten would leave it naked).
+        def con_id(obj) -> int:
+            return int(getattr(getattr(obj, "contract", None), "conId", 0) or 0)
+
+        flattenable, manual_con_ids = [], set()
+        for position in positions:
+            qty = float(position.position)
+            sec_type = str(getattr(position.contract, "secType", "") or "").upper()
+            if sec_type != "STK" or qty != int(qty):
+                logger.critical("KILL SWITCH FLATTEN skipped | non-stock or fractional position | "
+                                "manual intervention required")
+                manual_con_ids.add(con_id(position))
+            elif self.liquidation_qty_limit is not None and abs(qty) > self.liquidation_qty_limit:
+                logger.critical("KILL SWITCH FLATTEN skipped | position exceeds liquidation limit | "
+                                "manual intervention required")
+                manual_con_ids.add(con_id(position))
+            else:
+                flattenable.append(position)
+
         cancelled = 0
         for trade in working:
+            if con_id(trade) and con_id(trade) in manual_con_ids:
+                continue
             self.ib.cancelOrder(trade.order)
             cancelled += 1
 
         cancel_deadline = asyncio.get_running_loop().time() + 10
         while self._account_open_trades() and asyncio.get_running_loop().time() < cancel_deadline:
+            if all(con_id(t) in manual_con_ids for t in self._account_open_trades() if con_id(t)):
+                break
             await asyncio.sleep(0.25)
 
+        # Every client's working orders (this clientId cannot see or cancel another client's
+        # GTC stop). A live order on a position means a market flatten could later be followed
+        # by that order firing and REVERSING the position: leave it to a human.
+        still_working = {con_id(t) for t in await self._all_open_trades()}
+
+        flattenable_ids = {con_id(p) for p in flattenable}
         liquidation_trades = []
         for position in self._account_positions():
-            qty = float(position.position)
-            sec_type = str(getattr(position.contract, "secType", "") or "").upper()
-            if sec_type != "STK" or qty != int(qty):
-                # KNT only trades whole-share stocks. A market order on a future, option or FX
-                # position (multiplier, exercise, fractional lots) is not a safe automatic action:
-                # it is left for a human, and the result below reports the account as not flat.
-                logger.critical("KILL SWITCH FLATTEN skipped | non-stock or fractional position | "
-                                "manual intervention required")
+            if con_id(position) not in flattenable_ids or con_id(position) in manual_con_ids:
                 continue
+            qty = float(position.position)
             if self.liquidation_qty_limit is not None and abs(qty) > self.liquidation_qty_limit:
                 logger.critical("KILL SWITCH FLATTEN skipped | position exceeds liquidation limit | "
                                 "manual intervention required")
+                continue
+            if con_id(position) in still_working:
+                logger.critical("KILL SWITCH FLATTEN skipped | a working order on this position is still live "
+                                "(other client or unconfirmed cancel) | manual intervention required")
                 continue
             action = "SELL" if qty > 0 else "BUY"
             order = MarketOrder(action, abs(qty), tif="DAY")
@@ -161,7 +212,11 @@ class KillSwitch:
                 await asyncio.sleep(0.25)
 
         final_state = await self.state.wait_until_flat(self.account, timeout=10)
-        if not final_state.is_flat:
+        # Flat means no position AND no working order from ANY client (a leftover GTC child could
+        # reopen a position later).
+        leftover_orders = await self._all_open_trades()
+        flat = bool(final_state.is_flat) and not leftover_orders
+        if not flat:
             logger.critical("KILL SWITCH INCOMPLETE | manual intervention required")
         else:
             logger.critical("KILL SWITCH COMPLETE | account=%s broker confirmed flat", mask_account(self.account))
@@ -171,7 +226,7 @@ class KillSwitch:
             dry_run=False,
             cancelled_orders=cancelled,
             liquidation_orders=len(liquidation_trades),
-            flat_confirmed=final_state.is_flat,
+            flat_confirmed=flat,
             reason=reason,
         )
         return self._last_result

@@ -131,3 +131,70 @@ def test_kill_switch_never_market_flattens_non_stock_positions():
     result = aio.run(KillSwitch(stock, RiskConfig(kill_switch_enabled=True, kill_switch_dry_run=False), ACCOUNT,
                                 guard=build_paper_guard(stock, SETTINGS)).execute("daily loss"))
     assert len(stock.placed) == 1                                         # stocks are still flattened
+
+
+class GtcIB(FakeIB):
+    """Positions and working orders carry conIds; cancels mark this client's orders done."""
+
+    def __init__(self, positions, own=(), other=()):
+        super().__init__()
+        self._positions = [SimpleNamespace(account=ACCOUNT, position=q, contract=SimpleNamespace(
+            symbol=sym, localSymbol=sym, secType=st, conId=cid)) for sym, cid, q, st in positions]
+        self._trades = [self._order(cid) for cid in own]
+        self.other_clients = [self._order(cid) for cid in other]
+
+    @staticmethod
+    def _order(cid):
+        trade = SimpleNamespace(order=SimpleNamespace(account=ACCOUNT, orderId=cid), contract=SimpleNamespace(conId=cid),
+                                done=False)
+        trade.isDone = lambda t=trade: t.done
+        return trade
+
+    def cancelOrder(self, order):
+        self.cancelled.append(order)
+        for t in self._trades:
+            if t.order is order:
+                t.done = True
+
+    def placeOrder(self, contract, order):
+        self.placed.append((contract, order))
+        self._positions = [p for p in self._positions if p.contract is not contract]
+        return SimpleNamespace(isDone=lambda: True)
+
+
+def _armed(ib):
+    import asyncio as aio
+    from config.config import RiskConfig
+    from core.paper_guard import build_paper_guard
+    from risk.kill_switch import KillSwitch
+
+    return aio.run(KillSwitch(ib, RiskConfig(kill_switch_enabled=True, kill_switch_dry_run=False), ACCOUNT,
+                              guard=build_paper_guard(ib, SETTINGS)).execute("daily loss"))
+
+
+def test_kill_switch_cancels_own_protection_then_flattens_the_stock():
+    ib = GtcIB([("AAA", 11, 1, "STK")], own=(11,))
+    result = _armed(ib)
+    assert len(ib.cancelled) == 1 and len(ib.placed) == 1 and result.flat_confirmed
+
+
+def test_kill_switch_never_flattens_under_another_clients_live_gtc_stop():
+    # The stop belongs to another clientId: this session cannot cancel it. A market flatten now
+    # would leave the stop live to fire later and REVERSE the position.
+    ib = GtcIB([("AAA", 11, 1, "STK")], other=(11,))
+    result = _armed(ib)
+    assert ib.placed == [] and result.flat_confirmed is False
+
+
+def test_kill_switch_keeps_the_protection_of_positions_it_leaves_to_a_human():
+    ib = GtcIB([("ESZ6", 21, 1, "FUT"), ("AAA", 11, 1, "STK")], own=(21, 11))
+    result = _armed(ib)
+    cancelled_ids = [o.orderId for o in ib.cancelled]
+    assert cancelled_ids == [11]                                  # the FUT's stop is left in place
+    assert [c.symbol for c, _ in ib.placed] == ["AAA"] and result.flat_confirmed is False
+
+
+def test_kill_switch_skips_fractional_stock_positions():
+    ib = GtcIB([("AAA", 11, 0.5, "STK")])
+    result = _armed(ib)
+    assert ib.placed == [] and result.flat_confirmed is False

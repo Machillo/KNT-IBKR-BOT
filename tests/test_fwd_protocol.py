@@ -13,7 +13,7 @@ START = datetime(2026, 10, 1, 14, 0, tzinfo=timezone.utc)
 
 
 def build(path, *, days=45, cycles_per_day=2, selected_effect=0.0, cf_effect=0.0, noise=0.05, seed=1,
-          leak=False):
+          leak=False, late_effect=None):
     rng = Random(seed)
     j = ShadowJournal(path)
     ShadowScorer(path)
@@ -41,7 +41,8 @@ def build(path, *, days=45, cycles_per_day=2, selected_effect=0.0, cf_effect=0.0
                     entry=1.0, stop=0.9, target=1.2, reason="x",
                     top={"strategy": "s", "side": "LONG", "score": 40, "entry": 1.0, "stop": 0.9, "target": 1.2},
                     context=ctx, created_at=created)
-                fwd5 = base + (selected_effect if selected else cf_effect) + rng.gauss(0, noise)
+                effect = selected_effect if late_effect is None or day < 40 else late_effect
+                fwd5 = base + (effect if selected else cf_effect) + rng.gauss(0, noise)
                 outcomes.append((did, SCORER_VERSION, "SELECTED" if selected else "COUNTERFACTUAL", fwd5))
             j.record_cycle_end(cycle, eligible=8, attempted=8, errors=0, max_candidates=12,
                                run_mode="shadow_only", learning_mode="frozen", scanner_rows={}, scanner_errors={},
@@ -65,7 +66,8 @@ def test_fwd1_reject_when_upper_bound_is_below_cost(tmp_path):
 
 def test_fwd1_inconclusive_below_minimum_sample(tmp_path):
     out = fwd_protocol.evaluate_fwd1(build(tmp_path / "c.db", days=10, selected_effect=0.8))
-    assert out["decision"] == "INCONCLUSIVE" and out["reason"] == "minimum sample not reached"
+    assert out["decision"] == "INCONCLUSIVE" and out["reason"].startswith("monitoring only")
+    assert out["window"]["binding"] is False
 
 
 def test_fwd_evaluation_refuses_an_invalid_evidence_window(tmp_path):
@@ -78,3 +80,17 @@ def test_fwd2_keep_and_equivalence(tmp_path):
     assert better["decision"] == "KEEP", better
     same = fwd_protocol.evaluate_fwd2(build(tmp_path / "f.db", selected_effect=0.0, cf_effect=0.0, noise=0.02))
     assert same["decision"] == "REJECT", same
+
+
+
+def test_data_after_the_binding_cutoff_is_never_used(tmp_path):
+    # Minimums are met on day 40 (-0.2 % effect -> REJECT); a strong later effect must not flip it.
+    out = fwd_protocol.evaluate_fwd1(build(tmp_path / "g.db", days=60, selected_effect=-0.2, late_effect=2.0))
+    assert out["window"]["binding"] is True and out["sample"]["days"] == 40
+    assert out["decision"] == "REJECT", out
+
+
+def test_student_t_critical_values():
+    assert abs(fwd_protocol.t_quantile(0.975, 10) - 2.228) < 1e-3
+    assert abs(fwd_protocol.critical_t(10_000) - 2.394) < 1e-2        # Bonferroni K=3 -> normal limit
+    assert fwd_protocol.critical_t(40) > 2.45                          # small samples need more

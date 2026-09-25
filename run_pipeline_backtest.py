@@ -80,7 +80,8 @@ def main() -> None:
     ap.add_argument("--profile", choices=list(PROFILES), default="long_10y")
     ap.add_argument("--universe", choices=[*VALIDATION_UNIVERSES, "all", "files"], default="all",
                     help="validation cohort, or 'files' = every cached file in --cache-dir")
-    ap.add_argument("--segment", choices=["train", "validation", "development", "holdout"], default="train")
+    ap.add_argument("--segment", choices=["train", "validation", "development", "holdout", "forward"], default="train",
+                    help="forward = data recorded after the FWD-v1 registration (journal universe)")
     ap.add_argument("--variant", choices=list(VARIANTS), default="live_default")
     ap.add_argument("--cost", choices=list(COSTS), default="baseline")
     ap.add_argument("--equity", type=float, default=100_000.0)
@@ -97,6 +98,9 @@ def main() -> None:
     ap.add_argument("--config-from-env", action="store_true",
                     help="live_default risk limits from .env (BotConfig) instead of code defaults")
     a = ap.parse_args()
+    if a.split == "fraction" and not a.confirm_holdout:
+        ap.error("--split fraction mixes holdout-calendar data into every segment; it counts as a holdout use "
+                 "(pass --confirm-holdout only for a frozen candidate).")
     if a.segment == "holdout" and not a.confirm_holdout:
         ap.error("HOLDOUT is single-use. Freeze the configuration in docs/experiments first, then pass --confirm-holdout.")
     from config.config import reports_path

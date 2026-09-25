@@ -206,7 +206,8 @@ executor-style LIMIT/DAY entries). No parameter may change between now and evalu
 | FWD2 | NO_TRADE passes on setups as good as the ones it takes | `counterfactual_vs_cycle_fwd5` vs `selected_vs_cycle_fwd5` (same measure) | difference of per-cycle means with t; ≥ 300 each |
 | FWD3 | Cross-sectional 12-1 momentum works on the point-in-time scanner universe | F1 signal on `JournalUniverse` + `reports/pit_cache` bars | needs ≥ 12 monthly rebalances of journal data; same KEEP rule as round 3 |
 
-**Exact evaluation (added before any forward data exists, hypotheses unchanged):**
+**Exact evaluation (added before any v2 forward data exists, hypotheses unchanged; revised
+once after the quant review of the same day, still before any v2 data):**
 `docs/FWD_PROTOCOL.md` (FWD-v1) fixes the evidence window (v2 decisions only), population,
 leave-one-out benchmark, day-clustered Newey–West inference, K = 3 (|t| ≥ 2.40), sample
 minimums, KEEP/REJECT/INCONCLUSIVE rules, deadlines and invalidation. It supersedes the

@@ -132,7 +132,7 @@ class PortfolioAdmissionCoordinator:
         if not hard.approved:
             return PortfolioAdmissionDecision(False, f"hard_risk:{hard.reason}", hard, None, None, correlation_to_portfolio)
 
-        if state.positions and correlation_to_portfolio is None:
+        if (state.positions or state.pending_orders) and correlation_to_portfolio is None:
             return PortfolioAdmissionDecision(False, "correlation_unavailable", hard, None, None, None)
 
         opportunity = __import__("portfolio.brain", fromlist=["PortfolioOpportunity"]).PortfolioOpportunity(

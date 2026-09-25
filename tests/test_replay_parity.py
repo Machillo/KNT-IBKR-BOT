@@ -102,7 +102,8 @@ def test_limit_entry_fills_only_if_price_trades_through_and_expires_same_day():
         bars.append(PriceBar(T0 + timedelta(hours=i), price * 1.01, price * 1.02, price * 1.005, price * 1.015, 1e6))
         price *= 1.015
     result = replay({"A": bars}).run()
-    assert result.trades == 0 and result.submitted > 0 and result.unfilled_expired == result.submitted
+    assert result.trades == 0 and result.submitted > 0
+    assert result.unfilled_expired + result.censored_at_end == result.submitted
     legacy = replay({"A": bars}, entry_mode="next_open").run()
     assert legacy.trades > 0  # the old v1 assumption would have filled every one of them
 
@@ -152,3 +153,96 @@ def test_point_in_time_csv_honours_delisting(tmp_path):
     assert u.members_at(datetime(2020, 3, 1)) == {"AAA", "BBB"}
     assert u.members_at(datetime(2020, 8, 1)) == {"AAA"}
     assert u.members_at(datetime(2019, 1, 1)) == frozenset()
+
+
+def test_replay_correlation_inputs_are_aligned_not_lagged():
+    data = {"A": walk(1), "B": walk(2)}
+    bt = replay(data)
+    t = bt.times["A"][150]
+    through = bt._bars_through("B", t, 61)
+    assert through[-1].time == data["B"][150].time        # includes the bar completed at t
+    assert bt._bars_until("B", t, 61)[-1].time == data["B"][149].time
+
+
+def test_identical_series_are_rejected_by_the_correlation_guard():
+    base = walk(7)
+    twin = [PriceBar(b.time, b.open * 2, b.high * 2, b.low * 2, b.close * 2, b.volume) for b in base]
+    result = replay({"A": base, "B": twin}).run()
+    # A and B move identically: once one is held, the other must be rejected (corr 1.0 > 0.85).
+    overlaps = [(x, y) for x in result.trade_log for y in result.trade_log
+                if x.symbol != y.symbol and x.entry_time < y.exit_time and y.entry_time < x.exit_time]
+    assert overlaps == []
+    assert result.rejected_by_portfolio > 0
+
+
+class Scored:
+    warmup = 30
+
+    def __init__(self, name, score):
+        self.name, self.score = name, score
+
+    def evaluate(self, bars):
+        p = bars[-1].close
+        return StrategySignal(SignalSide.LONG, self.score, p, p * 0.97, p * 1.03, self.name)
+
+
+def test_capacity_goes_to_the_highest_score_not_alphabetical_order():
+    rng = Random(3)
+    data = {name: walk(rng.randint(0, 999)) for name in ("AAA", "ZZZ")}
+    bt = PipelineBacktest(data, PipelineConfig(cost_model=CostModel.zero(), pause_high_volatility=False,
+                                               max_entries_per_day=1, max_correlation=1.0))
+
+    class BySymbol:
+        name, warmup = "by_symbol", 30
+
+        def evaluate(self, bars):
+            p = bars[-1].close
+            score = 90 if abs(p - data["ZZZ"][len(bars) - 1].close) < 1e-9 else 60
+            return StrategySignal(SignalSide.LONG, score, p, p * 0.97, p * 1.03, "s")
+
+    bt.selector.strategies = [BySymbol()]
+    result = bt.run()
+    first = min(result.trade_log, key=lambda x: x.entry_time)
+    assert first.symbol == "ZZZ"
+
+
+def test_intraday_orders_decided_after_the_session_close_are_refused():
+    bars = []
+    for d in range(10):
+        for h in range(7):
+            p = 100 + d + h * 0.1
+            bars.append(PriceBar(datetime(2024, 1, 2 + d, 10 + h), p, p + 0.5, p - 0.5, p, 1e6))
+
+    class LastBarOnly:
+        name, warmup = "last_bar_only", 30
+
+        def evaluate(self, b):
+            p = b[-1].close
+            if b[-1].time.hour != 16:
+                return StrategySignal(SignalSide.FLAT, 0, None, None, None, "flat")
+            return StrategySignal(SignalSide.LONG, 99, p, p * 0.97, p * 1.03, "close")
+
+    bt = replay({"A": bars})
+    bt.selector.strategies = [LastBarOnly()]
+    result = bt.run()
+    assert result.blocked_session_closed > 0 and result.submitted == 0
+
+
+def test_working_orders_count_for_the_correlation_guard_and_fail_closed():
+    from portfolio.admission import PortfolioAdmissionCoordinator
+    from portfolio.allocation import PortfolioAllocator
+    from portfolio.state import PendingOrderExposure
+    from engine.strategy_selector import StrategySelector
+
+    selector = StrategySelector(performance_store=None, pause_directional_high_volatility=False)
+    selector.strategies = [AlwaysLong()]
+    risk = RiskManager(RiskConfig())
+    pipeline = DecisionPipeline(selector, PortfolioAllocator(), PortfolioAdmissionCoordinator(risk))
+    bars = walk(9, 200)
+    pending = (PendingOrderExposure("B", "STK", 10, 100.0, 1_000.0, con_id=2),)
+    state = PortfolioState(PortfolioSnapshot(100_000, 100_000, 0, 0, 1_000, 0, 10_000), (), pending)
+    missing = pipeline.decide(bars, symbol="A", portfolio_state=state, position_returns={})
+    assert missing.action == "PORTFOLIO_REJECTED" and missing.reason == "correlation_unavailable"
+    from engine.decision import return_series
+    same = pipeline.decide(bars, symbol="A", portfolio_state=state, position_returns={"B": return_series(bars)})
+    assert same.action == "PORTFOLIO_REJECTED" and same.reason == "correlation_limit"

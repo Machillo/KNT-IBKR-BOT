@@ -54,9 +54,11 @@ class JournalUniverse:
                  max_age: timedelta = timedelta(days=1)) -> None:
         self.max_age = max_age
         with sqlite3.connect(Path(db_path)) as conn:
+            # LEFT JOIN: a cycle whose funnel is empty is a real (empty) snapshot and must
+            # replace the previous membership instead of silently carrying it forward.
             rows = conn.execute(
                 "SELECT c.created_at, f.symbol, f.status FROM discovery_cycles c "
-                "JOIN discovery_funnel f ON f.cycle_id=c.cycle_id ORDER BY c.created_at"
+                "LEFT JOIN discovery_funnel f ON f.cycle_id=c.cycle_id ORDER BY c.created_at"
             ).fetchall()
         cycles: dict[datetime, set[str]] = {}
         for created, symbol, status in rows:
@@ -64,7 +66,7 @@ class JournalUniverse:
             if t is None:
                 continue
             members = cycles.setdefault(t, set())
-            if status in statuses:
+            if symbol is not None and status in statuses:
                 members.add(symbol)
         self.times = sorted(cycles)
         self.members = [frozenset(cycles[t]) for t in self.times]
@@ -84,24 +86,34 @@ class JournalUniverse:
 
 
 class PointInTimeCsvUniverse:
+    """External survivorship-free membership file (see docs/POINT_IN_TIME_DATA.md).
+
+    Convention: a snapshot dated D describes membership KNOWN AT THE CLOSE of D; it takes
+    effect ``effective_lag_days`` later (default 1: from the next day) so same-day bars
+    never see it. ``delisted_on`` is enforced against the query time t, and a snapshot
+    older than ``max_age_days`` yields an empty universe (fail closed).
+    """
+
     survivorship_biased = False
 
-    def __init__(self, path: str | Path) -> None:
-        snapshots: dict[datetime, set[str]] = {}
+    def __init__(self, path: str | Path, *, effective_lag_days: int = 1, max_age_days: int = 45) -> None:
+        self.lag = timedelta(days=max(0, int(effective_lag_days)))
+        self.max_age = timedelta(days=max(1, int(max_age_days)))
+        snapshots: dict[datetime, dict[str, datetime | None]] = {}
         with Path(path).open(newline="", encoding="utf-8") as fh:
             for row in csv.DictReader(fh):
                 date = _naive_utc(row["date"])
                 if date is None:
                     raise ValueError(f"bad date in point-in-time universe: {row['date']!r}")
-                members = snapshots.setdefault(date, set())
-                delisted = _naive_utc(row.get("delisted_on") or "")
-                if str(row.get("in_universe", "1")).strip() in {"1", "true", "True"} and (
-                        delisted is None or delisted > date):
-                    members.add(row["symbol"].strip().upper())
+                members = snapshots.setdefault(date + self.lag, {})
+                if str(row.get("in_universe", "1")).strip() in {"1", "true", "True"}:
+                    members[row["symbol"].strip().upper()] = _naive_utc(row.get("delisted_on") or "")
         self.times = sorted(snapshots)
-        self.members = [frozenset(snapshots[t]) for t in self.times]
+        self.members = [snapshots[t] for t in self.times]
 
     def members_at(self, t) -> frozenset[str]:
         when = _naive_utc(t)
         i = -1 if when is None else bisect_right(self.times, when) - 1
-        return self.members[i] if i >= 0 else frozenset()
+        if i < 0 or when - self.times[i] > self.max_age:
+            return frozenset()
+        return frozenset(sym for sym, delisted in self.members[i].items() if delisted is None or delisted > when)

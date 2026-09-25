@@ -31,8 +31,8 @@ def planted_signal(symbol, bars, ctx):
 
 
 def test_detects_a_planted_edge_and_not_a_null_one():
-    planted = summarize(run_event_study(cohort(plant=True), planted_signal, horizon=3, costs=ZERO), 3)
-    null = summarize(run_event_study(cohort(plant=False), planted_signal, horizon=3, costs=ZERO), 3)
+    planted = summarize(run_event_study(cohort(plant=True, n=1000), planted_signal, horizon=3, costs=ZERO), 3)
+    null = summarize(run_event_study(cohort(plant=False, n=1000), planted_signal, horizon=3, costs=ZERO), 3)
     assert planted.mean_net_excess_bps > 200 and planted.nw_t > 3
     assert abs(null.nw_t or 0) < 3
 
@@ -87,3 +87,23 @@ def test_newey_west_matches_plain_t_without_autocorrelation():
     n, m = len(series), sum(series) / len(series)
     plain = m / ((sum((x - m) ** 2 for x in series) / n) / n) ** 0.5
     assert newey_west_t(series, 0) == pytest.approx(plain)
+
+
+def test_t_stat_needs_enough_dates_and_lag_follows_real_overlap():
+    from research.event_study import MIN_DATES, overlap_lag
+
+    few = summarize(run_event_study(cohort(plant=True), planted_signal, horizon=3, costs=ZERO), 3)
+    assert few.dates < MIN_DATES and few.nw_t is None
+    daily_overlap = run_event_study(cohort(), lambda s, b, c: 1 if s == "S1" else 0, horizon=5, costs=ZERO)
+    assert overlap_lag(daily_overlap) == 4          # consecutive daily windows overlap 4 later dates
+    monthly = run_event_study(cohort(n=1000), lambda s, b, c: 1 if s == "S1" and len(b) % 25 == 0 else 0,
+                              horizon=21, costs=ZERO)
+    assert overlap_lag(monthly) == 0                 # non-overlapping rebalances: no NW inflation
+
+
+def test_holdout_bars_are_not_visible_to_signals():
+    data = cohort()
+    end = data["S0"][200].time
+    seen = []
+    run_event_study(data, lambda s, b, c: seen.append(b[-1].time) or 0, horizon=5, costs=ZERO, segment=(None, end))
+    assert max(seen) < end

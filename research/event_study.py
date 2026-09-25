@@ -59,10 +59,15 @@ class EventResult:
 class StudyStats:
     events: int
     dates: int
-    mean_net_excess_bps: float
-    mean_raw_bps: float
+    mean_net_excess_bps: float      # mean of per-date means (what the t-stat tests)
+    mean_raw_bps: float             # per-event mean of the raw (side-adjusted) return
     hit_rate_pct: float
-    nw_t: float | None
+    nw_t: float | None              # None when fewer than MIN_DATES dates
+    nw_lag: int = 0
+    per_event_net_bps: float = 0.0  # per-event mean, reported for reference
+
+
+MIN_DATES = 30
 
 
 class StudyContext:
@@ -104,12 +109,15 @@ def round_trip_cost(costs: CostModel) -> float:
 
 def run_event_study(data: dict[str, list[PriceBar]], signal: SignalFn, *, horizon: int,
                     entry_delay: int = 1, costs: CostModel = BASELINE, cost_multiplier: float = 1.0,
-                    segment: tuple[datetime | None, datetime | None] = (None, None),
-                    sample_every: int = 1) -> list[EventResult]:
+                    segment: tuple[datetime | None, datetime | None] = (None, None)) -> list[EventResult]:
     if horizon < 1 or entry_delay < 1:
         raise ValueError("horizon and entry_delay must be >= 1")
-    ctx = StudyContext(data)
     start, end = segment
+    if end is not None:
+        # Enforced: nothing at or after the segment end is even visible to signals/benchmarks.
+        data = {s: [b for b in bars if _stamp(b) < end] for s, bars in data.items()}
+        data = {s: bars for s, bars in data.items() if bars}
+    ctx = StudyContext(data)
     cost = round_trip_cost(costs) * cost_multiplier
     # Window returns of every symbol keyed by (entry_stamp, exit_stamp) for the benchmark.
     window_returns: dict[tuple[datetime, datetime], dict[str, float]] = defaultdict(dict)
@@ -130,7 +138,7 @@ def run_event_study(data: dict[str, list[PriceBar]], signal: SignalFn, *, horizo
 
     events: list[EventResult] = []
     for symbol, bars in data.items():
-        for i in range(0, len(bars), max(1, sample_every)):
+        for i in range(len(bars)):
             w = window(symbol, i)
             if w is None:
                 continue
@@ -168,18 +176,41 @@ def newey_west_t(series: list[float], lag: int) -> float | None:
     return m / sqrt(var / n)
 
 
-def summarize(events: list[EventResult], horizon: int) -> StudyStats:
+def overlap_lag(events: list[EventResult]) -> int:
+    """Newey-West lag in units of the DATE series: how many subsequent event dates, on
+    average, start before a date's windows end (0 for non-overlapping rebalances)."""
+    windows: dict[datetime, datetime] = {}
+    for e in events:
+        windows[e.entry_time] = max(windows.get(e.entry_time, e.exit_time), e.exit_time)
+    dates = sorted(windows)
+    if len(dates) < 2:
+        return 0
+    counts = []
+    j = 0
+    for i, d in enumerate(dates):
+        j = max(j, i + 1)
+        while j < len(dates) and dates[j] <= windows[d]:
+            j += 1
+        counts.append(j - i - 1)
+    counts.sort()
+    return int(counts[len(counts) // 2])
+
+
+def summarize(events: list[EventResult], horizon: int | None = None) -> StudyStats:
     if not events:
         return StudyStats(0, 0, 0.0, 0.0, 0.0, None)
     by_date: dict[datetime, list[float]] = defaultdict(list)
     for e in events:
         by_date[e.entry_time].append(e.net_excess)
     series = [sum(v) / len(v) for _, v in sorted(by_date.items())]
+    lag = overlap_lag(events)
     return StudyStats(
         events=len(events),
         dates=len(series),
-        mean_net_excess_bps=sum(e.net_excess for e in events) / len(events) * 10_000,
+        mean_net_excess_bps=sum(series) / len(series) * 10_000,
         mean_raw_bps=sum(e.raw_return for e in events) / len(events) * 10_000,
         hit_rate_pct=sum(e.net_excess > 0 for e in events) / len(events) * 100,
-        nw_t=newey_west_t(series, max(0, horizon - 1)),
+        nw_t=newey_west_t(series, lag) if len(series) >= MIN_DATES else None,
+        nw_lag=lag,
+        per_event_net_bps=sum(e.net_excess for e in events) / len(events) * 10_000,
     )

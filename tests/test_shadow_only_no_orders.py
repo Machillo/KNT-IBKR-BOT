@@ -51,6 +51,9 @@ class RecordingIB:
 
     def __getattr__(self, name):
         if name in MUTATING:
+            # Recorded BEFORE raising: the runner's per-cycle ``except Exception`` would
+            # otherwise swallow the AssertionError and hide the call.
+            self.calls.append(name)
             raise AssertionError(f"shadow-only reached a mutating call: {name}")
         if name.endswith("Event"):
             return SimpleNamespace(__iadd__=lambda *a: None)
@@ -72,7 +75,8 @@ class RecordingIB:
 
     async def accountSummaryAsync(self, account=""):
         self.calls.append("accountSummaryAsync")
-        return [SimpleNamespace(account=ACCOUNT, tag="NetLiquidation", currency="BASE", value="100000")]
+        return [SimpleNamespace(account=ACCOUNT, tag=tag, currency="BASE", value="100000")
+                for tag in ("NetLiquidation", "TotalCashValue", "AvailableFunds", "BuyingPower")]
 
     def positions(self, account=""):
         return [self._position]
@@ -82,6 +86,10 @@ class RecordingIB:
 
     def openTrades(self):
         return [self._trade]
+
+    async def reqContractDetailsAsync(self, contract):
+        self.calls.append("reqContractDetailsAsync")
+        return [SimpleNamespace(industry="Technology", category="Semiconductors")]
 
 
 def test_full_shadow_only_cycle_makes_no_mutating_call(isolated_state_dir, monkeypatch):
@@ -126,3 +134,88 @@ def test_full_shadow_only_cycle_makes_no_mutating_call(isolated_state_dir, monke
     assert kill_executions == [True]
     assert not set(ib.calls) & set(MUTATING)
     assert "accountSummaryAsync" in ib.calls  # the path really ran
+
+
+
+def test_seeded_cycle_reaches_the_research_path_without_any_mutating_call(isolated_state_dir, monkeypatch):
+    """A flat account and one eligible candidate that the selector APPROVES: the cycle goes all
+    the way to SHADOW_SUBMIT (pretrade + hard risk on a live read-only quote) and still makes
+    no order/cancel/account-mutation call."""
+    import sqlite3
+    from datetime import datetime, timedelta, timezone
+
+    import run_shadow_only
+    from config.config import BotConfig, IBKRConfig, MarketDataConfig, RiskConfig, RuntimeConfig
+    from core.connection import IBKRConnection
+    from core.market_data import MarketDataService
+    from engine import shadow as shadow_module
+    from market.history import HistoricalDataService, PriceBar
+    from market.intelligence import MarketIntelligenceService
+    from strategies.momentum import SignalSide
+    from test_shadow_submit_gate import Fixed
+
+    ib = RecordingIB()
+    ib._trade = None
+    ib.openTrades = lambda: []
+    ib.positions = lambda account="": []
+    base = BotConfig(ibkr=IBKRConfig(port=7497, allow_live_trading=False, client_id=901),
+                     risk=RiskConfig(kill_switch_dry_run=False),
+                     runtime=RuntimeConfig(autonomous_trading_enabled=True, require_flat_startup=True),
+                     market_data=MarketDataConfig(market_data_type=1))
+    monkeypatch.setattr(run_shadow_only, "config", base)
+    monkeypatch.setattr(run_shadow_only, "STATE_DIR", isolated_state_dir)
+
+    async def connect(self):
+        return ib
+
+    async def disconnect(self):
+        return None
+    monkeypatch.setattr(IBKRConnection, "connect", connect)
+    monkeypatch.setattr(IBKRConnection, "disconnect", disconnect)
+
+    contract = SimpleNamespace(symbol="AAA", localSymbol="AAA", conId=11, secType="STK", exchange="SMART",
+                               currency="USD")
+    candidate = SimpleNamespace(symbol="AAA", score=90.0, eligible=True, scanner_rank=1, reference_price=100.0,
+                                spread_bps=1.0, reason="ok", contract=contract)
+
+    async def ranked(self, rows_per_plan=25, quote_budget=40):
+        return [candidate]
+    monkeypatch.setattr(MarketIntelligenceService, "ranked_us_opportunity_universe", ranked)
+
+    last_start = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(minutes=70)
+    series, price = [], 100.0
+    for i in range(160):
+        price *= 1.001 + 0.002 * (((i * 7) % 5) - 2) / 2
+        series.append(PriceBar(last_start - timedelta(hours=159 - i), price * 0.999, price * 1.003,
+                               price * 0.997, price, 1e6))
+
+    async def bars(self, contract, **kw):
+        return list(series)
+    monkeypatch.setattr(HistoricalDataService, "bars", bars)
+
+    async def quote(self, contract, symbol=None, timeout=3.0):
+        px = series[-1].close
+        return SimpleNamespace(bid=px, ask=px + 0.01, last=px, market_price=px, market_data_type=1)
+    monkeypatch.setattr(MarketDataService, "snapshot_contract", quote)
+
+    class ApprovingSelector(shadow_module.StrategySelector):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            self.strategies = [Fixed(SignalSide.LONG)]
+            self.pause_directional_high_volatility = False
+    monkeypatch.setattr(shadow_module, "StrategySelector", ApprovingSelector)
+
+    class OpenSession:
+        async def refresh(self, ib):
+            return None
+
+        def state(self, now=None):
+            return SimpleNamespace(market_open=True, session="REGULAR", local_time=datetime.now(timezone.utc))
+    monkeypatch.setattr("market.session.BrokerCalendarSessionPolicy", lambda *a, **k: OpenSession())
+
+    asyncio.run(run_shadow_only.main_async(SimpleNamespace(cycles=1)))
+    assert not set(ib.calls) & set(MUTATING), ib.calls
+    db = isolated_state_dir / "shadow_only" / "strategy_performance.db"
+    with sqlite3.connect(db) as conn:
+        actions = [r[0] for r in conn.execute("SELECT action FROM shadow_decisions")]
+    assert actions == ["SHADOW_SUBMIT"], actions

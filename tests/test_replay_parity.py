@@ -511,13 +511,14 @@ def test_merge_bars_dedupes_the_same_instant_written_differently():
     assert [r["close"] for r in merged] == [2]
 
 
-def test_pipeline_sizes_on_tick_rounded_prices_and_hard_risk_defaults_to_one_percent():
+def test_pipeline_sizes_on_tick_rounded_prices_and_hard_risk_defaults_to_one_percent(monkeypatch):
     from config.config import RiskConfig as RC
     from engine.decision import DecisionPipeline as DP
     from engine.strategy_selector import StrategySelector
     from portfolio.admission import PortfolioAdmissionCoordinator
     from portfolio.allocation import PortfolioAllocator
 
+    monkeypatch.delenv("MAX_TRADE_RISK_PCT", raising=False)      # the CODE default, not a local .env
     assert RC().max_trade_risk_pct == 0.01 and PipelineConfig().max_trade_risk_pct == 0.01
 
     class SubTickEntry(AlwaysLong):

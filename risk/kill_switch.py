@@ -155,6 +155,9 @@ class KillSwitch:
         # 1) Decide FIRST, from the every-client view, which positions may be flattened, so that
         #    no protective order is ever cancelled on a position that will then NOT be flattened.
         all_orders = await self._all_open_trades()
+        if own_client is None:
+            # Without our own clientId, foreign orders cannot be told apart: the view is unusable.
+            all_orders = None
         if all_orders is None:
             logger.critical("KILL SWITCH | every-client order view unavailable: no flatten and no protective "
                             "order cancelled | manual intervention required")
@@ -163,6 +166,9 @@ class KillSwitch:
             if own_client is not None and isinstance(getattr(t.order, "clientId", None), int)
             and t.order.clientId != own_client}
 
+        # Positions are re-read AFTER the (up to 5 s) view request: an entry that filled in the
+        # meantime must be classified too, or its fresh stop would be cancelled and never flattened.
+        positions = self._account_positions()
         position_ids = {con_id(p) for p in positions}
         flattenable, manual_con_ids = [], set()
         for position in positions:
@@ -233,8 +239,9 @@ class KillSwitch:
                 logger.critical("KILL SWITCH FLATTEN refused by paper guard | %s", exc)
                 continue
             trade = self.ib.placeOrder(position.contract, order)
-            placed = getattr(trade, "order", None) or order
-            self._liquidation_order_ids.add(int(getattr(placed, "orderId", 0) or 0))
+            placed_id = int(getattr(getattr(trade, "order", None) or order, "orderId", 0) or 0)
+            if placed_id:
+                self._liquidation_order_ids.add(placed_id)
             liquidation_trades.append(trade)
             logger.critical(
                 "KILL SWITCH FLATTEN requested | symbol=%s qty=%s action=%s",

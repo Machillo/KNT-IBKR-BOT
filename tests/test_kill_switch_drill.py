@@ -11,7 +11,7 @@ SETTINGS = IBKRConfig(port=7497, allow_live_trading=False, account=None)
 class FakeIB:
     def __init__(self, accounts=(ACCOUNT,), qty=1, sec_type="STK"):
         self.accounts = list(accounts)
-        self.client = SimpleNamespace(port=7497)
+        self.client = SimpleNamespace(port=7497, clientId=1)
         self.placed, self.cancelled = [], []
         self._positions = [SimpleNamespace(account=ACCOUNT, position=qty,
                                            contract=SimpleNamespace(symbol="ABC", localSymbol="ABC", secType=sec_type,
@@ -294,3 +294,31 @@ def test_kill_switch_rerun_never_cancels_or_duplicates_its_own_pending_liquidati
     second = aio.run(switch.execute("daily loss"))
     assert [o.orderId for o in ib.cancelled] == [11]        # the liquidation order is never cancelled
     assert len(ib.placed) == 1 and second.flat_confirmed is False   # and never duplicated
+
+
+def test_kill_switch_classifies_a_position_that_opened_while_it_waited_for_the_view():
+    # An own entry fills during the every-client request: its fresh stop must not be cancelled
+    # unless the position is flattened.
+    import asyncio as aio
+
+    ib = GtcIB([], own=(31,))
+    ib.client = SimpleNamespace(port=7497, clientId=7)
+    ib._trades[0].order.clientId = 7
+    original = ib.reqAllOpenOrdersAsync
+
+    async def slow_view():
+        ib._positions = [SimpleNamespace(account=ACCOUNT, position=1.5, contract=SimpleNamespace(
+            symbol="NEW", localSymbol="NEW", secType="STK", conId=31))]        # fractional: manual
+        return await original()
+    ib.reqAllOpenOrdersAsync = slow_view
+    result = aio.run(_switch(ib).execute("daily loss"))
+    assert ib.cancelled == [] and ib.placed == [] and result.flat_confirmed is False
+
+
+def test_kill_switch_without_its_own_client_id_treats_the_view_as_unusable():
+    import asyncio as aio
+
+    ib = GtcIB([("AAA", 11, 1, "STK")], own=(11,))
+    ib.client = SimpleNamespace(port=7497)                                   # clientId unknown
+    result = aio.run(_switch(ib).execute("daily loss"))
+    assert ib.cancelled == [] and ib.placed == [] and result.flat_confirmed is False

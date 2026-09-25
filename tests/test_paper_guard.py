@@ -17,7 +17,7 @@ ACCOUNT = "DU0000001"
 class FakeIB:
     def __init__(self, accounts=(ACCOUNT,), port=7497, connected=True):
         self.accounts = list(accounts)
-        self.client = SimpleNamespace(port=port)
+        self.client = SimpleNamespace(port=port, clientId=1)
         self.connected = connected
         self.placed = []
         self.cancelled = []

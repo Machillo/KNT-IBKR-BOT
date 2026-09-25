@@ -172,6 +172,25 @@ Reading (worded per the review):
 - "Net excess" is not a tradeable long/short return: the benchmark leg carries no cost, and the
   flat 2 bps commission allowance understates IBKR minimums for small orders.
 
+## Diagnostic: baseline under replay v3 (not a test, no selection)
+
+Replay v3 (commit 955edc2+) mirrors the executor: LIMIT at the signal close with DAY validity,
+strict trade-through, 3 entries/day, score-ordered cycles, working orders in correlation. The
+unchanged `live_default` now shows positive absolute results (daily TRAIN +48.2 %, PF 1.18;
+daily VAL +10.7 %; 4h VAL +19.4 %, Sharpe 1.16) — while the cohort's buy-and-hold made +304 % /
++64 % in the same windows.
+
+Null model under the SAME v3 mechanics (`run_null_benchmark.py --segment development`, 6 seeds):
+
+| profile | live_default | null mean (sd) | nulls ≥ live |
+|---|---|---|---|
+| 4h DEVELOPMENT | +6.97 % / PF 1.03 | +6.96 % (9.49) / PF 1.03 | 3 / 6 |
+| 1d DEVELOPMENT | +62.3 % / PF 1.17 | +47.6 % (29.6) / PF 1.14 | 2 / 6 |
+
+Reading: the improvement versus replay v1 comes from execution mechanics (buying pullbacks to
+the signal close with limit orders, in a cohort that rose strongly), not from the selector —
+random entries with the same brackets earn the same. Consistent with F6. No claim of edge.
+
 ## Stop condition reached on this dataset
 Tests on the protocol-v1 VALIDATION set: **15** (H1–H9 pipeline variants + F1–F6), plus
 diagnostics (baseline, null models) not used for selection. Further searching on the same 38-name,

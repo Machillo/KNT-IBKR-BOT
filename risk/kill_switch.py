@@ -124,6 +124,14 @@ class KillSwitch:
         liquidation_trades = []
         for position in self._account_positions():
             qty = float(position.position)
+            sec_type = str(getattr(position.contract, "secType", "") or "").upper()
+            if sec_type != "STK" or qty != int(qty):
+                # KNT only trades whole-share stocks. A market order on a future, option or FX
+                # position (multiplier, exercise, fractional lots) is not a safe automatic action:
+                # it is left for a human, and the result below reports the account as not flat.
+                logger.critical("KILL SWITCH FLATTEN skipped | non-stock or fractional position | "
+                                "manual intervention required")
+                continue
             if self.liquidation_qty_limit is not None and abs(qty) > self.liquidation_qty_limit:
                 logger.critical("KILL SWITCH FLATTEN skipped | position exceeds liquidation limit | "
                                 "manual intervention required")

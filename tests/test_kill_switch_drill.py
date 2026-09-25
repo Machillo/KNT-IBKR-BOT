@@ -111,3 +111,23 @@ def test_drill_sees_other_clients_working_orders_and_fails_closed():
     blind.reqAllOpenOrdersAsync = boom
     assert drill(blind, armed=True, ack=DRILL_ACK).reason == "open_orders_unverifiable"
     assert ib.placed == [] and blind.placed == [] and ib.cancelled == []
+
+
+def test_kill_switch_never_market_flattens_non_stock_positions():
+    import asyncio as aio
+    from config.config import RiskConfig
+    from core.paper_guard import build_paper_guard
+    from risk.kill_switch import KillSwitch
+
+    for sec_type in ("FUT", "OPT", "CASH"):
+        ib = FakeIB(qty=1, sec_type=sec_type)
+        ks = KillSwitch(ib, RiskConfig(kill_switch_enabled=True, kill_switch_dry_run=False), ACCOUNT,
+                        guard=build_paper_guard(ib, SETTINGS))
+        result = aio.run(ks.execute("daily loss"))
+        assert ib.placed == [] and result.flat_confirmed is False, sec_type
+    stock = FakeIB(qty=1)
+    KillSwitch(stock, RiskConfig(kill_switch_enabled=True, kill_switch_dry_run=False), ACCOUNT,
+               guard=build_paper_guard(stock, SETTINGS))
+    result = aio.run(KillSwitch(stock, RiskConfig(kill_switch_enabled=True, kill_switch_dry_run=False), ACCOUNT,
+                                guard=build_paper_guard(stock, SETTINGS)).execute("daily loss"))
+    assert len(stock.placed) == 1                                         # stocks are still flattened

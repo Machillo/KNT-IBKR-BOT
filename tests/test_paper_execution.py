@@ -12,6 +12,7 @@ from execution.paper import (
     autonomous_paper_armed,
 )
 from risk.risk_manager import RiskManager
+from strategies.lifecycle import PLUMBING_ONLY
 
 ACCOUNT = "DU0000001"
 PAPER_SETTINGS = IBKRConfig(port=7497, allow_live_trading=False, account=None)
@@ -110,7 +111,7 @@ class FakeSessionPolicy:
 
 def request(**overrides):
     values = dict(
-        symbol="AAPL", strategy="momentum_v1", side="LONG", quantity=10,
+        symbol="AAPL", strategy="breakout_v1", side="LONG", quantity=10,
         entry_price=100, stop_price=95, target_price=110, regime="TRENDING",
         account_equity=100_000.0, reference_price=100.0, market_data_type=1,
         bar_completed_at=datetime.now(timezone.utc) - timedelta(minutes=5),
@@ -124,6 +125,9 @@ def engine(tmp_path, ib=None, **kwargs):
     kwargs.setdefault("paper_guard", build_paper_guard(ib, PAPER_SETTINGS, ACCOUNT))
     kwargs.setdefault("risk_manager", RiskManager(RiskConfig()))
     kwargs.setdefault("session_policy", FakeSessionPolicy(True))
+    # These tests exercise the order path (like the supervised plumbing runner); the default
+    # executor gate is tested on its own below.
+    kwargs.setdefault("allowed_strategy_statuses", PLUMBING_ONLY)
     return PaperExecutionEngine(
         ib,
         account=ACCOUNT,
@@ -549,3 +553,46 @@ def test_bracket_entry_is_day_but_protective_children_are_gtc(tmp_path):
     assert result.submitted
     tifs = [order.tif for _, order, _ in ib.submitted]
     assert tifs == ["DAY", "GTC", "GTC"]
+
+
+
+def test_autonomous_executor_refuses_strategies_without_paper_status(tmp_path):
+    """Default gate: only committed PAPER/LIVE_ELIGIBLE strategies; today there are none."""
+    ib = FakeIB()
+    e = PaperExecutionEngine(ib, account=ACCOUNT, enabled=True, paper_guard=build_paper_guard(ib, PAPER_SETTINGS, ACCOUNT),
+                             risk_manager=RiskManager(RiskConfig()), session_policy=FakeSessionPolicy(True),
+                             journal=TradeJournalStore(tmp_path / "j.db"), acceptance_delay_seconds=0)
+    result = run(e.submit(stock(), request()))
+    assert (result.submitted, result.reason) == (False, "strategy_not_paper_eligible:SHADOW")
+    unknown = run(engine(tmp_path, ib, enabled=True).submit(stock(), request(strategy="invented_v9")))
+    assert unknown.reason == "strategy_not_paper_eligible:RESEARCH"            # even for plumbing
+    assert ib.submitted == []
+
+
+def test_lifecycle_registry_is_read_only_and_covers_every_selectable_strategy():
+    import pytest
+    from pathlib import Path
+
+    from strategies.library import SINGLE_ASSET_STRATEGIES
+    from strategies.lifecycle import REGISTRY, StrategyStatus
+
+    names = {f().name for f in SINGLE_ASSET_STRATEGIES}
+    assert names <= set(REGISTRY)
+    assert set(REGISTRY.values()) == {StrategyStatus.SHADOW}           # nothing validated yet
+    with pytest.raises(TypeError):
+        REGISTRY["breakout_v1"] = StrategyStatus.PAPER                 # no runtime promotion
+    root = Path(__file__).resolve().parents[1]
+    offenders = [str(p.relative_to(root)) for p in root.rglob("*.py")
+                 if "tests" not in p.parts and p.name != "lifecycle.py"
+                 and "_REGISTRY" in p.read_text(encoding="utf-8")]
+    assert offenders == []
+
+
+def test_selector_never_evaluates_research_or_retired_strategies(monkeypatch):
+    from engine.strategy_selector import StrategySelector
+    from strategies import lifecycle
+
+    monkeypatch.setitem(lifecycle._REGISTRY, "momentum_gap_v1", lifecycle.StrategyStatus.RETIRED)
+    monkeypatch.setitem(lifecycle._REGISTRY, "breakout_v1", lifecycle.StrategyStatus.RESEARCH)
+    names = {s.name for s in StrategySelector(55.0, None).strategies}
+    assert "momentum_gap_v1" not in names and "breakout_v1" not in names and "trend_following_v1" in names

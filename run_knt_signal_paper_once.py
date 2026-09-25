@@ -23,6 +23,7 @@ from execution.paper import PaperExecutionEngine, PaperExecutionRequest, PaperEx
 from market.intelligence import MarketIntelligenceService
 from market.session import BrokerCalendarSessionPolicy
 from portfolio.state import PortfolioStateService
+from strategies.lifecycle import PLUMBING_ONLY
 from utils.logger import logger
 
 ACK = "I_UNDERSTAND_KNT_WILL_SUBMIT_ONE_PAPER_SIGNAL"
@@ -148,6 +149,8 @@ async def main(args) -> None:
             risk_manager=context.risk,
             session_policy=session_policy,
             max_entries_per_day=1,
+            # Plumbing validates the ORDER PATH with 1 share; no strategy is PAPER-eligible yet.
+            allowed_strategy_statuses=PLUMBING_ONLY,
         )
         executor = OneShotCappedPaperExecutor(raw_executor, max_quantity=max_qty)
         shadow = ShadowTradingEngine(

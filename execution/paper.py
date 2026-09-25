@@ -14,6 +14,7 @@ from core.order_manager import OrderManager
 from core.paper_guard import PaperGuardError, PaperOrderGuard
 from execution import pretrade
 from risk.execution_lock import ExecutionLockStore
+from strategies.lifecycle import PAPER_TRADABLE, status_of
 from utils.logger import logger
 
 # Literal acknowledgement required, in addition to AUTONOMOUS_TRADING_ENABLED=true,
@@ -173,6 +174,7 @@ class PaperExecutionEngine:
         max_reference_deviation_pct: float = 0.015,
         allow_short: bool = False,
         execution_lock: ExecutionLockStore | None = None,
+        allowed_strategy_statuses: frozenset = PAPER_TRADABLE,
     ) -> None:
         self.ib = ib
         self.account = account
@@ -191,6 +193,9 @@ class PaperExecutionEngine:
         self.allow_short = bool(allow_short)
         self._in_flight: set[str] = set()
         self.execution_lock = execution_lock or ExecutionLockStore()
+        # Default: only strategies whose committed status is PAPER or LIVE_ELIGIBLE. The supervised
+        # plumbing runner passes PLUMBING_ONLY explicitly (it tests the order path, not a strategy).
+        self.allowed_strategy_statuses = frozenset(allowed_strategy_statuses)
 
     @staticmethod
     def _normalize_stock_price(value: float) -> float:
@@ -367,6 +372,9 @@ class PaperExecutionEngine:
             return self._reject(request, "BLOCKED", "broker_disconnected")
         if self.risk_manager is None:
             return self._reject(request, "BLOCKED", "risk_manager_required")
+        status = status_of(request.strategy)
+        if status not in self.allowed_strategy_statuses:
+            return self._reject(request, "REJECTED", f"strategy_not_paper_eligible:{status.value}")
         today = datetime.now(timezone.utc).date().isoformat()
         if self.execution_lock.read() is not None:
             return self._reject(request, "BLOCKED", "execution_lock_present")

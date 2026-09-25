@@ -23,3 +23,12 @@ def test_shadow_only_runner_never_builds_an_executor():
     text = (Path(__file__).resolve().parents[1] / "run_shadow_only.py").read_text(encoding="utf-8")
     assert "PaperExecutionEngine" not in text and "OrderManager" not in text
     assert "paper_executor=None" in text
+
+
+def test_research_lock_ignores_only_the_expected_readonly_lock():
+    from types import SimpleNamespace
+    from run_shadow_only import EXPECTED_READONLY_LOCK, research_lock
+
+    assert research_lock(SimpleNamespace(trading_locked=True, lock_reason=EXPECTED_READONLY_LOCK)) is False
+    assert research_lock(SimpleNamespace(trading_locked=True, lock_reason="Daily loss limit reached")) is True
+    assert research_lock(SimpleNamespace(trading_locked=False, lock_reason="")) is False

@@ -135,3 +135,40 @@ Bonferroni at α = 0.05 → VALIDATION requires Newey–West t ≥ 2.71.
 Otherwise REJECT; INCONCLUSIVE if steps 1–2 pass on fewer events than required. A KEEP here is
 "worth a pipeline implementation and forward shadow evidence", not an edge claim: the cohort is
 still hindsight-selected and the HOLDOUT stays unused until a frozen implementation exists.
+
+## Round 3 results (`run_event_families.py`; net excess per event after ≈ 9.3 bps round trip)
+
+| family | daily TRAIN (events / net bps / NW t) | daily VAL | 4h VAL | decision |
+|---|---|---|---|---|
+| F1 XS momentum 12-1 | 553 / −9.0 / −0.27 | 136 / **+523.7** / **4.64** | 144 / +298.8 / 8.96 | REJECT (TRAIN fails; TRAIN halves not both positive) |
+| F2 short-term reversal | 13 634 / −9.0 / −1.04 | 2 960 / +2.9 / 0.16 | 7 240 / −0.4 / −0.05 | REJECT |
+| F3 vol-compression breakout | 201 / +22.6 / −0.20 | 55 / +173.4 / 2.24 | 174 / −43.9 / −0.67 | REJECT |
+| F4 gap-down reversal | 1 010 / +6.9 / 0.61 | 191 / +178.7 / 2.28 | 198 / +51.8 / 0.34 | REJECT |
+| F5 market-residual reversal | 6 979 / −2.1 / −0.17 | 1 480 / +23.7 / 0.77 | 3 620 / +7.3 / 0.66 | REJECT |
+| F6 live selector LONG | 29 546 / −10.3 / −1.24 | 6 841 / **−26.5** / **−3.64** | 17 632 / −13.5 / −3.42 | REJECT (negative) |
+
+Reading:
+- **F1** is the textbook survivorship artefact the pre-registration warned about: nothing in
+  seven TRAIN years, then very strong in 2023-09 → 2025-03, when the hindsight-picked winners
+  (AI/semis) led. Cross-sectional momentum inside a cohort chosen *because* it went up cannot be
+  evaluated honestly here. Worth re-testing only on a point-in-time universe.
+- **F6** is the most consistent statistical result of the night: the live selector's LONG picks
+  **underperform the rest of the cohort** after costs, significantly in VALIDATION on both
+  profiles and negative in TRAIN. The current selector should not be trusted with capital.
+  Inverting it would be a new hypothesis fitted on the same data — not done.
+- Every "near miss" (F3, F4 at t≈2.2–2.3 in VAL) fails TRAIN or the other profile.
+
+## Stop condition reached on this dataset
+Tests on the protocol-v1 VALIDATION set: **15** (H1–H9 pipeline variants + F1–F6), plus
+diagnostics (baseline, null models) not used for selection. Further searching on the same 38-name,
+hindsight-selected sample would mostly manufacture false discoveries. The HOLDOUT (≥ 2025-03-01)
+remains unused. Research continues on NEW data only.
+
+## Forward-only hypotheses (pre-registered now; evaluated ONLY on shadow data recorded after 2026-09-24)
+Scored with `run_score_shadow.py` on journaled decisions (point-in-time universe, 1-hour bars,
+executor-style LIMIT/DAY entries). No parameter may change between now and evaluation.
+| id | hypothesis | measurement | decision rule |
+|---|---|---|---|
+| FWD1 | Selected LONG setups are not better than the cohort (replication of F6) | SELECTED outcomes and 5-bar forward returns vs same-cycle eligible names | after ≥ 300 non-duplicate selected decisions: report mean net return and t; a positive, t ≥ 2 result would contradict F6 |
+| FWD2 | NO_TRADE passes on setups as good as the ones it takes | COUNTERFACTUAL vs SELECTED net return | difference of means with t; ≥ 300 each |
+| FWD3 | Cross-sectional 12-1 momentum works on the point-in-time scanner universe | F1 signal on `JournalUniverse` + `reports/pit_cache` bars | needs ≥ 12 monthly rebalances of journal data; same KEEP rule as round 3 |

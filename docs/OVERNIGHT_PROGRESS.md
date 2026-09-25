@@ -54,23 +54,50 @@ check, cash reserve, replay liquidity order), plus ad-hoc ones during the round 
 readonly/dry-run, injected cancel, supervisor shielding, UTC keys, virtual book + restore,
 learning freeze, scorer executable gate / LOO, replay drawdown / pretrade, leakage gate).
 
-## Session 2, round 4 — target-architecture audit (commits after 6d8aab4)
-Audit against the target pipeline (docs/ARCHITECTURE_TARGET.md): three independent audits
-(decision flow / multi-strategy, asset-class coupling, capital allocation / evidence) plus a
-descriptive selector census on TRAIN bars (the selector picks a trade 76–86 % of the time;
-momentum_gap_v1 alone 51–57 %; three trend-like strategies ~93 %).
-Implemented (pre-FWD, small, golden-digest-guarded):
-- **safety**: bracket protective children GTC (DAY children left filled entries unprotected
-  overnight); kill switch never market-flattens non-stock / fractional positions;
-- **risk**: hard per-trade risk default 1 % (was 10 %); sizing on tick-rounded prices;
-- **selection hygiene**: online learning OFF by default in every mode; committed strategy
-  lifecycle (all SHADOW), selector evaluates SELECTABLE only, autonomous paper needs PAPER;
-- **evidence**: Opportunity records for every strategy evaluation (exploratory table, embargoed,
-  never read by FWD), IBKR stockType per decision; FWD2 counterfactual pinned;
-- **FWD protection**: restart guard on a registered window; pinned-deployment rule.
-Design only (roadmap PR-B … PR-G): evidence store with pooling, InstrumentSpec, capital
-feasibility, calibrated comparison, lifecycle promotion tooling, other asset classes.
-Mutation check: 19/19 killed (`python tools/mutation_check.py`).
+## Session 2, round 4 — target-architecture audit + pre-FWD fixes (commits after 6d8aab4)
+Audit against the target pipeline (docs/ARCHITECTURE_TARGET.md): three independent audits plus a
+descriptive TRAIN-only selector census (trade chosen in 76–86 % of evaluations; momentum_gap_v1
+alone 51–57 %; three trend-like strategies ~93 %; 1h rates unknown).
+Implemented before FWD registration (small commits; golden digest for recording-only changes):
+- **safety**:
+  - bracket protective children GTC;
+  - the kill switch:
+    - sees every client's orders;
+    - never market-flattens non-stock or fractional positions, and keeps their protection;
+    - never flattens under a live opposite order;
+  - the daily-loss baseline rolls per exchange date in long-running processes;
+  - no balances in `paper_alpha` logs;
+- **risk**:
+  - hard per-trade risk default 1 % (preflight refuses looser), with a float tolerance;
+  - sizing on tick-rounded prices;
+- **selection hygiene**:
+  - online learning OFF by default everywhere;
+  - committed strategy lifecycle (all SHADOW); autonomous paper needs PAPER status;
+  - the plumbing exception is confined to its runner;
+- **universe**: only IBKR stockType COMMON/ADR/REIT is analysed; ETFs (incl. leveraged/inverse)
+  and unknown types are excluded before deciding (INSTRUMENT_EXCLUDED);
+- **evidence**:
+  - Opportunity records for every strategy evaluation (exploratory, embargoed, never able to
+    break a decision);
+  - IBKR `stockType` recorded per decision;
+- **FWD integrity (r3)**:
+  - registration from `run_shadow_only`, pinning the decision + protocol fingerprints and the
+    config hash;
+  - exactly one committed registration line per id (git history), never backdated;
+  - pre-registration looks refused; ended windows recorded;
+  - interim statistics blinded; missing data gated per arm; first forward returns frozen;
+  - shared state via `KNT_STATE_DIR` / `KNT_BOT_STATE_DIR`; exact pinned-deployment recipe.
+Reviews (6 independent perspectives):
+- **Round 4:**
+  - research integrity: 3 blockers → fixed;
+  - release gate: 1 blocker (PR body) → fixed;
+  - quant: 1 (deployment) → fixed;
+  - the remaining reviews: should-fix items → fixed or documented.
+- **Re-verification:** see PR #3.
+Mutation check: **29/29 killed** (`python tools/mutation_check.py`). Tests: 485 → 507.
+Design only (roadmap PR-B … PR-G, docs/ARCHITECTURE_TARGET.md §11): evidence store with pooling,
+InstrumentSpec, capital feasibility + heat/gap budget, calibrated comparison, lifecycle tooling,
+other asset classes.
 
 ## Research status
 - Tests on protocol-v1 VALIDATION: **15** (H1–H9, F1–F6) → stop searching this dataset.
@@ -80,13 +107,18 @@ Mutation check: 19/19 killed (`python tools/mutation_check.py`).
 - FWD1–FWD3 pre-registered; evaluation rules fixed in FWD-v1. No forward data exists yet.
 
 ## Next actions (human)
-1. Review draft PR #3, including the behavior changes listed in its body. Do not merge unreviewed.
-2. Local `.env`: `MARKET_DATA_TYPE=1` and `MAX_TRADE_RISK_PCT=0.01` (the local file still says 0.10).
-   From a PINNED worktree of the reviewed commit, start `python run_shadow_only.py` during market
-   hours (read-only), then `python run_shadow_report.py --register-fwd-window` once and commit the
-   printed line to docs/experiments/LOG.md.
-3. Daily/weekly: `python run_fetch_journal_bars.py`, `python run_score_shadow.py`,
-   `python run_shadow_report.py --persist`.
-4. After ≥ 10 VALID trading days and a dry-run drill: `python run_paper_preflight.py`, then the
-   supervised 1-share plumbing test (`docs/PAPER_PLUMBING_TEST.md`).
-5. Decide on an external survivorship-free dataset (`docs/POINT_IN_TIME_DATA.md`).
+1. Review draft PR #3, including every behavior change in its body. Decide the scope question
+   (see the PR body). Do not merge unreviewed.
+2. Decide the risk limits BEFORE registration (they are in the config hash): per-trade 1 %
+   (set `MAX_TRADE_RISK_PCT=0.01` in your local `.env`; it still says 0.10). The reviewers
+   recommend daily loss 2–3 % and drawdown ≈ 10 % (today 10 % / 15 %).
+3. Deploy FWD-v1 exactly per docs/FWD_PROTOCOL.md §Pinned deployment:
+   - a pinned worktree with a copied `.env`;
+   - `KNT_STATE_DIR` / `KNT_BOT_STATE_DIR` set;
+   - `python run_shadow_only.py --register-fwd-window` during market hours;
+   - commit the printed line to LOG.md within 3 days.
+4. Periodically, from the worktree: `run_fetch_journal_bars.py`, `run_score_shadow.py`
+   (counts only), `run_shadow_report.py --persist`.
+5. After ≥ 10 VALID days and a dry-run drill: `run_paper_preflight.py`, then the supervised
+   1-share plumbing test. Check on paper the GTC children after a partial fill.
+6. Decide on an external survivorship-free dataset (`docs/POINT_IN_TIME_DATA.md`).

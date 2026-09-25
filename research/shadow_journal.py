@@ -47,6 +47,7 @@ _CYCLE_EXTRA_COLUMNS = (
     ("cycle_end", "TEXT"), ("eligible_count", "INTEGER"), ("candidates_attempted", "INTEGER"),
     ("candidate_errors", "INTEGER"), ("max_candidates", "INTEGER"), ("run_mode", "TEXT"),
     ("learning_mode", "TEXT"), ("code_version", "TEXT"), ("decision_version", "TEXT"),
+    ("scanner_rows", "TEXT"), ("scanner_errors", "TEXT"),
 )
 # v2: frozen-learning shadow-only, pretrade execution model (SHADOW_SUBMIT/SHADOW_BLOCKED),
 # duplicates keyed by conId + run mode, conflicting re-decisions flagged.
@@ -193,15 +194,18 @@ class ShadowJournal:
             )
 
     def record_cycle_end(self, cycle_id: str, *, eligible: int, attempted: int, errors: int,
-                         max_candidates: int, run_mode: str, learning_mode: str) -> None:
+                         max_candidates: int, run_mode: str, learning_mode: str,
+                         scanner_rows: dict | None = None, scanner_errors: dict | None = None) -> None:
         """Completion marker: a cycle without ``cycle_end`` is INCOMPLETE for research."""
         with sqlite3.connect(self.path) as conn:
             conn.execute(
                 """UPDATE discovery_cycles SET cycle_end=?, eligible_count=?, candidates_attempted=?,
                    candidate_errors=?, max_candidates=?, run_mode=?, learning_mode=?, code_version=?,
-                   decision_version=? WHERE cycle_id=?""",
+                   decision_version=?, scanner_rows=?, scanner_errors=? WHERE cycle_id=?""",
                 (datetime.now(timezone.utc).isoformat(), int(eligible), int(attempted), int(errors),
-                 int(max_candidates), run_mode, learning_mode, code_version(), DECISION_VERSION, cycle_id),
+                 int(max_candidates), run_mode, learning_mode, code_version(), DECISION_VERSION,
+                 None if scanner_rows is None else json.dumps(scanner_rows, sort_keys=True),
+                 None if scanner_errors is None else json.dumps(scanner_errors, sort_keys=True), cycle_id),
             )
 
     def record_funnel(self, cycle_id: str, funnel) -> int:

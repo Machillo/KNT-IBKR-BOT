@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from itertools import combinations
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,7 +14,7 @@ from engine.decision import (DECISION_HISTORY_DURATION, DecisionPipeline, decisi
 from engine.strategy_selector import StrategySelection, StrategySelector
 from execution import pretrade
 from execution.paper import PaperExecutionEngine, PaperExecutionRequest
-from market.history import HistoricalDataService, PriceBar
+from market.history import HistoricalDataService, PriceBar, bar_size_seconds
 from market.session import USStockSessionPolicy
 from portfolio.admission import PortfolioAdmissionCoordinator, RiskDecisionStore
 from portfolio.allocation import PortfolioAllocator
@@ -210,9 +210,12 @@ class ShadowTradingEngine:
         if self.journal is None:
             return
         try:
+            discovery = getattr(self.intelligence, "discovery", None)
             self.journal.record_cycle_end(cycle_id, eligible=eligible, attempted=attempted, errors=errors,
                                           max_candidates=self.max_candidates, run_mode=self.run_mode,
-                                          learning_mode="live" if self.learning_enabled else "frozen")
+                                          learning_mode="live" if self.learning_enabled else "frozen",
+                                          scanner_rows=getattr(discovery, "last_scan_rows", None),
+                                          scanner_errors=getattr(discovery, "last_scan_errors", None))
         except Exception as exc:
             logger.warning("SHADOW JOURNAL cycle end write failed | error=%s", exc)
 
@@ -256,7 +259,14 @@ class ShadowTradingEngine:
         today = datetime.now(timezone.utc).date().isoformat()
         return sum(1 for d, _ in self._virtual_book if d == today)
 
-    async def _research_submission(self, candidate, selected, proposal, state: PortfolioState, session):
+    @staticmethod
+    def _bar_completed_at(bars) -> datetime | None:
+        """Completion time of the decision bar (start + 1 hour), tz-aware; None if unknown."""
+        if not bars or not isinstance(bars[-1].time, datetime) or bars[-1].time.tzinfo is None:
+            return None
+        return bars[-1].time + timedelta(seconds=bar_size_seconds("1 hour"))
+
+    async def _research_submission(self, candidate, selected, proposal, state: PortfolioState, session, bars=()):
         """Everything the executor would check before transmitting, minus the broker-only
         checks (paper guard, connection, broker equity). Returns (action, reason, extra)."""
         signal = selected.signal
@@ -273,8 +283,9 @@ class ShadowTradingEngine:
                 side=signal.side.value, quantity=float(proposal.quantity),
                 entry_price=float(proposal.entry_price), stop_price=float(proposal.stop_price),
                 target_price=float(target), sec_type=sec_type, reference_price=reference_price,
-                market_data_type=data_type),
+                market_data_type=data_type, bar_completed_at=self._bar_completed_at(bars)),
             pretrade.PreTradeContext(
+                now=datetime.now(timezone.utc),
                 session_open=bool(getattr(session, "market_open", False)) and sec_type.upper() == "STK",
                 trading_locked=bool(getattr(self.risk_manager, "trading_locked", True)),
                 entries_today=self._virtual_entries_today(),
@@ -406,7 +417,8 @@ class ShadowTradingEngine:
                                 target_price=float(target), regime=selection.regime.regime.value,
                                 account_equity=float(portfolio_state.snapshot.net_liquidation),
                                 reference_price=reference_price, market_data_type=data_type,
-                                con_id=int(getattr(candidate.contract, "conId", 0) or 0)))
+                                con_id=int(getattr(candidate.contract, "conId", 0) or 0),
+                                bar_completed_at=self._bar_completed_at(bars)))
                         action = "PAPER_SUBMITTED" if result.submitted else "PAPER_BLOCKED"
                         portfolio_reason = result.reason
                         if result.submitted:
@@ -418,7 +430,7 @@ class ShadowTradingEngine:
                                                 candidate.symbol: self._return_series(bars)}
                 elif decision.approved and self.research_execution:
                     action, portfolio_reason, execution_extra = await self._research_submission(
-                        candidate, selected, proposal, portfolio_state, session)
+                        candidate, selected, proposal, portfolio_state, session, bars)
                     extra.update(execution_extra)
                     if action == "SHADOW_SUBMIT":
                         pending = PendingOrderExposure(

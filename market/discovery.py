@@ -58,9 +58,15 @@ class IBKRDiscoveryService:
     async def scan_many(self, plans: list[ScannerPlan], rows_per_plan: int = 10) -> list[DiscoveryCandidate]:
         """Run multiple broker-native market segments and dedupe contracts by conId."""
         merged: dict[tuple[str, int | str], DiscoveryCandidate] = {}
+        # Per-cycle record for data-quality gates: rows returned per scanner and scanners that
+        # failed (a failure used to vanish into a log line).
+        self.last_scan_rows: dict[str, int] = {}
+        self.last_scan_errors: dict[str, str] = {}
         for plan in plans:
             try:
-                for candidate in await self.scan(plan, rows_per_plan):
+                results = await self.scan(plan, rows_per_plan)
+                self.last_scan_rows[plan.name] = len(results)
+                for candidate in results:
                     con_id = getattr(candidate.contract, "conId", 0)
                     key = (candidate.sec_type, con_id or candidate.symbol)
                     current = merged.get(key)
@@ -71,6 +77,7 @@ class IBKRDiscoveryService:
                         best = candidate if candidate.rank < current.rank else current
                         merged[key] = replace(best, sources=current.sources + candidate.sources)
             except Exception as exc:
+                self.last_scan_errors[plan.name] = type(exc).__name__
                 logger.warning("DISCOVERY adapter skipped | adapter=%s error=%s", plan.name, exc)
         return list(merged.values())
 

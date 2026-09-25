@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from config.config import RiskConfig
@@ -14,7 +14,7 @@ from test_shadow_submit_gate import Fixed, bars, state
 
 
 def engine(tmp_path, *, market_open=True, data_type=1, n_candidates=1, bid=None, fail_symbol=None,
-           learning_enabled=False, locked=False):
+           learning_enabled=False, locked=False, bar_age=timedelta(0)):
     from engine.shadow import ShadowTradingEngine
 
     symbols = (("A", 1), ("B", 2), ("C", 3), ("D", 4), ("E", 5))[:n_candidates]
@@ -56,8 +56,12 @@ def engine(tmp_path, *, market_open=True, data_type=1, n_candidates=1, bid=None,
         # Different return paths per symbol so correlation never blocks in these tests.
         from random import Random
         rng = Random(int(getattr(contract, "conId", 1) or 1))
-        out = [b.__class__(b.time, b.open, b.high, b.low, b.close * (1 + rng.gauss(0, 0.004)), b.volume)
-               for b in series]
+        # tz-aware hourly bars whose LAST bar completed 10 minutes ago (fresh decision bar)
+        last_start = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(minutes=70) - bar_age
+        n = len(series)
+        out = [b.__class__(last_start - timedelta(hours=n - 1 - i), b.open, b.high, b.low,
+                           b.close * (1 + rng.gauss(0, 0.004)), b.volume)
+               for i, b in enumerate(series)]
         last_close[contract.symbol] = out[-1].close
         return out
 
@@ -172,3 +176,9 @@ def test_virtual_entry_is_pending_exposure_in_the_next_cycle(tmp_path):
     # Seen as exposure (like a real working order): admission refuses it against itself.
     assert again.action != "SHADOW_SUBMIT"
     assert again.portfolio_reason in {"correlation_limit", "duplicate_symbol_exposure"}
+
+
+
+def test_yesterdays_last_bar_is_not_traded_at_the_open(tmp_path):
+    decisions = run(engine(tmp_path, bar_age=timedelta(hours=17)))
+    assert (decisions[0].action, decisions[0].portfolio_reason) == ("SHADOW_BLOCKED", "stale_decision_bar")

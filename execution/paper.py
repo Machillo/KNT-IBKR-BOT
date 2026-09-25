@@ -53,6 +53,8 @@ class PaperExecutionRequest:
     reference_price: float | None = None
     market_data_type: int | None = None
     con_id: int = 0
+    # Completion time (tz-aware) of the bar the signal was computed on; required.
+    bar_completed_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -354,7 +356,7 @@ class PaperExecutionEngine:
                 side=request.side, quantity=float(request.quantity), entry_price=float(request.entry_price),
                 stop_price=float(request.stop_price), target_price=float(request.target_price),
                 sec_type=str(getattr(contract, "secType", "") or ""), reference_price=request.reference_price,
-                market_data_type=request.market_data_type,
+                market_data_type=request.market_data_type, bar_completed_at=request.bar_completed_at,
             ),
             pretrade.PreTradeContext(
                 session_open=self._session_allows(contract),
@@ -364,6 +366,7 @@ class PaperExecutionEngine:
                 allow_short=self.allow_short,
                 max_reference_deviation_pct=self.max_reference_deviation_pct,
                 reference_available=True,
+                now=datetime.now(timezone.utc),
             ),
         )
         normalized = replace(request, entry_price=check.request.entry_price, stop_price=check.request.stop_price,

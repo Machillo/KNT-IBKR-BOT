@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime, timedelta, timezone
 import sqlite3
 from types import SimpleNamespace
 
@@ -112,6 +113,7 @@ def request(**overrides):
         symbol="AAPL", strategy="momentum_v1", side="LONG", quantity=10,
         entry_price=100, stop_price=95, target_price=110, regime="TRENDING",
         account_equity=100_000.0, reference_price=100.0, market_data_type=1,
+        bar_completed_at=datetime.now(timezone.utc) - timedelta(minutes=5),
     )
     values.update(overrides)
     return PaperExecutionRequest(**values)
@@ -447,3 +449,17 @@ def test_journal_failure_after_transmit_still_confirms_and_locks(tmp_path):
     result = run(e.submit(stock(), request()))
     assert result.submitted is True and result.reason == "bracket_confirmed"   # broker state is the truth
     assert risk.trading_locked is True and "journal write failed" in risk.lock_reason
+
+
+
+@pytest.mark.parametrize("completed,reason", [
+    (None, "decision_bar_time_missing"),
+    (datetime(2026, 1, 5, 16), "decision_bar_time_missing"),                         # naive: unprovable
+    (datetime.now(timezone.utc) - timedelta(hours=17), "stale_decision_bar"),        # yesterday's last bar at the open
+    (datetime.now(timezone.utc) + timedelta(minutes=30), "stale_decision_bar"),      # bar not complete yet
+])
+def test_paper_execution_refuses_stale_or_unknown_decision_bars(tmp_path, completed, reason):
+    ib = FakeIB()
+    result = run(engine(tmp_path, ib, enabled=True).submit(stock(), request(bar_completed_at=completed)))
+    assert (result.submitted, result.reason) == (False, reason)
+    assert ib.submitted == []

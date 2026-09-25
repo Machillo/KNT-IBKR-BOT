@@ -69,3 +69,16 @@ def test_executor_uses_the_shared_module():
     src = inspect.getsource(paper.PaperExecutionEngine.submit)
     assert "pretrade.evaluate(" in src
     assert "reference_available=True" in src  # the executor may never skip the live reference
+
+
+def test_decision_bar_freshness():
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime(2026, 3, 2, 14, 40, tzinfo=timezone.utc)
+    fresh = _req(bar_completed_at=now - timedelta(minutes=10))
+    assert pretrade.evaluate(fresh, _ctx(now=now)).passed
+    stale = _req(bar_completed_at=now - timedelta(hours=17))
+    assert pretrade.evaluate(stale, _ctx(now=now)).reason == "stale_decision_bar"
+    assert pretrade.evaluate(_req(), _ctx(now=now)).reason == "decision_bar_time_missing"
+    # Replay (now=None): fresh by construction, not checked.
+    assert pretrade.evaluate(_req(), _ctx()).passed

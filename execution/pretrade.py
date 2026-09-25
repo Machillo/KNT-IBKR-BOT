@@ -6,8 +6,13 @@ the request and a context lives here, so the three paths refuse the same setups 
 reasons, in the same order:
 
     session -> risk lock -> request sanity -> side -> short policy -> daily entry cap
-    -> instrument / whole-share quantity -> tick normalization -> price geometry
-    -> fresh live reference
+    -> decision-bar freshness -> instrument / whole-share quantity -> tick normalization
+    -> price geometry -> fresh live reference
+
+Decision-bar freshness: a signal computed on a bar that completed more than
+``max_bar_age_seconds`` ago is refused (``stale_decision_bar``). Without it the first cycles
+after the open would transmit on the PREVIOUS session's last bar (~17 h old), which the replay
+never does (it refuses decisions available only after the close).
 
 ``reference_available=False`` is for replay only (no historical quote tape): the check is then
 reported as UNAVAILABLE instead of silently passing.
@@ -15,6 +20,7 @@ reported as UNAVAILABLE instead of silently passing.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from datetime import datetime
 from decimal import ROUND_HALF_UP, Decimal
 
 from core.exceptions import RiskRejectedError
@@ -33,6 +39,7 @@ class PreTradeRequest:
     sec_type: str = "STK"
     reference_price: float | None = None
     market_data_type: int | None = None
+    bar_completed_at: datetime | None = None   # when the decision bar completed (aware)
 
 
 @dataclass(frozen=True)
@@ -44,6 +51,8 @@ class PreTradeContext:
     allow_short: bool = False
     max_reference_deviation_pct: float = 0.015
     reference_available: bool = True
+    now: datetime | None = None                # None = freshness not checkable (replay: fresh by construction)
+    max_bar_age_seconds: float = 4500.0        # bar size (1 h) + cadence (15 min)
 
 
 @dataclass(frozen=True)
@@ -91,6 +100,13 @@ def evaluate(request: PreTradeRequest, ctx: PreTradeContext) -> PreTradeResult:
         return _result("short_entries_disabled", request)
     if ctx.entries_today >= ctx.max_entries_per_day:
         return _result("daily_entry_limit_reached", request)
+    if ctx.now is not None:
+        done = request.bar_completed_at
+        if done is None or done.tzinfo is None:
+            return _result("decision_bar_time_missing", request)
+        age = (ctx.now - done).total_seconds()
+        if age < 0 or age > ctx.max_bar_age_seconds:
+            return _result("stale_decision_bar", request)
     if str(request.sec_type or "").upper() != "STK" or float(request.quantity) != int(request.quantity):
         return _result("unsupported_instrument_or_quantity", request)
     normalized = replace(request, entry_price=tick(request.entry_price), stop_price=tick(request.stop_price),

@@ -6,6 +6,7 @@ from math import sqrt
 
 from ib_async import Contract
 
+from engine.decision import DecisionPipeline, portfolio_correlation, return_series, series_correlation
 from engine.strategy_selector import StrategySelection, StrategySelector
 from execution.paper import PaperExecutionEngine, PaperExecutionRequest
 from market.history import HistoricalDataService, PriceBar
@@ -68,6 +69,11 @@ class ShadowTradingEngine:
             logger.warning("SHADOW JOURNAL unavailable | error=%s", exc)
             self.journal = None
         self.paper_executor = paper_executor
+        # The one decision path shared with offline replay (research/pipeline_backtest.py).
+        self.decision_pipeline = DecisionPipeline(
+            self.selector, self.allocator, self.admission,
+            allow_short=bool(getattr(paper_executor, "allow_short", False)),
+        )
         self.pairs = PairsTradingStrategy()
         self.max_candidates = max_candidates
         self.quote_budget = quote_budget
@@ -157,24 +163,11 @@ class ShadowTradingEngine:
 
     @staticmethod
     def _return_series(bars: list[PriceBar], lookback: int = 60) -> tuple[float, ...]:
-        closes = [float(b.close) for b in bars[-(lookback + 1):] if float(b.close) > 0]
-        if len(closes) < lookback + 1:
-            return ()
-        return tuple((closes[i] / closes[i - 1]) - 1.0 for i in range(1, len(closes)))
+        return return_series(bars, lookback)
 
     @staticmethod
     def _series_correlation(a: tuple[float, ...], b: tuple[float, ...]) -> float | None:
-        n = min(len(a), len(b))
-        if n < 40:
-            return None
-        x, y = a[-n:], b[-n:]
-        mx, my = sum(x) / n, sum(y) / n
-        vx = sum((v - mx) ** 2 for v in x)
-        vy = sum((v - my) ** 2 for v in y)
-        if vx <= 0 or vy <= 0:
-            return None
-        cov = sum((i - mx) * (j - my) for i, j in zip(x, y))
-        return cov / sqrt(vx * vy)
+        return series_correlation(a, b)
 
     async def _position_returns(self, state: PortfolioState) -> dict[str, tuple[float, ...]]:
         returns: dict[str, tuple[float, ...]] = {}
@@ -196,18 +189,7 @@ class ShadowTradingEngine:
     @classmethod
     def _portfolio_correlation(cls, candidate_returns: tuple[float, ...], state: PortfolioState,
                                position_returns: dict[str, tuple[float, ...]]) -> float | None:
-        if not state.positions:
-            return 0.0
-        correlations: list[float] = []
-        for position in state.positions:
-            series = position_returns.get(position.symbol)
-            if not series:
-                return None
-            corr = cls._series_correlation(candidate_returns, series)
-            if corr is None:
-                return None
-            correlations.append(abs(corr))
-        return max(correlations) if correlations else None
+        return portfolio_correlation(candidate_returns, state, position_returns)
 
     async def run_once(self, rows_per_scanner: int = 25, *,
                        portfolio_state: PortfolioState | None = None) -> list[ShadowDecision]:
@@ -234,73 +216,49 @@ class ShadowTradingEngine:
             try:
                 bars = await self.history.bars(candidate.contract, complete_only=True)
                 history_by_symbol[candidate.symbol] = bars
-                candidate_returns = self._return_series(bars)
                 asset_class = candidate.contract.secType or "STK"
-                selection = self.selector.evaluate(bars, symbol=candidate.symbol,
-                                                   asset_class=asset_class, timeframe="1 hour")
+                decision = self.decision_pipeline.decide(
+                    bars, symbol=candidate.symbol, asset_class=asset_class, timeframe="1 hour",
+                    portfolio_state=portfolio_state, position_returns=position_returns,
+                )
+                selection = decision.selection
                 selected = selection.selected
-                action = "NO_TRADE" if selected is None else f"WOULD_{selected.signal.side.value}"
-                portfolio_reason = None
+                action = decision.action
+                portfolio_reason = None if decision.reason == selection.reason else decision.reason
+                proposal, admission, corr = decision.proposal, decision.admission, decision.correlation
 
-                if selected is not None and portfolio_state is not None:
+                if decision.approved and self.paper_executor is not None:
                     signal = selected.signal
-                    if signal.entry is None or signal.stop is None:
-                        action, portfolio_reason = "NO_TRADE", "invalid_signal_prices"
-                    elif self.admission is None:
-                        action, portfolio_reason = "PORTFOLIO_REJECTED", "hard_risk_manager_unavailable"
+                    target = signal.target
+                    if target is None or target <= 0:
+                        action, portfolio_reason = "PAPER_REJECTED", "invalid_target_price"
                     else:
-                        stress = max(1.0, float(selection.regime.volatility_stress or 1.0))
-                        volatility_multiplier = max(0.25, min(1.0, 1.0 / stress))
-                        proposal = self.allocator.propose(
-                            portfolio_state.snapshot, symbol=candidate.symbol, asset_class=asset_class,
-                            entry_price=float(signal.entry), stop_price=float(signal.stop),
-                            volatility_multiplier=volatility_multiplier)
-                        if proposal is None:
-                            action, portfolio_reason = "PORTFOLIO_REJECTED", "allocation_unavailable"
-                        else:
-                            corr = self._portfolio_correlation(candidate_returns, portfolio_state, position_returns)
-                            admission = self.admission.evaluate(
-                                state=portfolio_state, symbol=candidate.symbol, asset_class=asset_class,
+                        reference_price, data_type = await self._fresh_reference(candidate)
+                        result = await self.paper_executor.submit(
+                            candidate.contract,
+                            PaperExecutionRequest(
+                                symbol=candidate.symbol, strategy=selected.strategy,
                                 side=signal.side.value, quantity=proposal.quantity,
                                 entry_price=proposal.entry_price, stop_price=proposal.stop_price,
-                                proposed_notional=proposal.proposed_notional, proposed_risk=proposal.proposed_risk,
-                                candidate_returns=candidate_returns, position_returns=position_returns,
-                                correlation_to_portfolio=corr)
-                            portfolio_reason = admission.reason
-                            if not admission.approved:
-                                action = "PORTFOLIO_REJECTED"
-                            else:
-                                action = f"APPROVED_{signal.side.value}"
-                                if self.paper_executor is not None:
-                                    target = signal.target
-                                    if target is None or target <= 0:
-                                        action, portfolio_reason = "PAPER_REJECTED", "invalid_target_price"
-                                    else:
-                                        reference_price, data_type = await self._fresh_reference(candidate)
-                                        result = await self.paper_executor.submit(
-                                            candidate.contract,
-                                            PaperExecutionRequest(
-                                                symbol=candidate.symbol, strategy=selected.strategy,
-                                                side=signal.side.value, quantity=proposal.quantity,
-                                                entry_price=proposal.entry_price, stop_price=proposal.stop_price,
-                                                target_price=float(target), regime=selection.regime.regime.value,
-                                                account_equity=float(portfolio_state.snapshot.net_liquidation),
-                                                reference_price=reference_price, market_data_type=data_type,
-                                                con_id=int(getattr(candidate.contract, "conId", 0) or 0)))
-                                        action = "PAPER_SUBMITTED" if result.submitted else "PAPER_BLOCKED"
-                                        portfolio_reason = result.reason
-                            self.risk_decisions.record(
-                                symbol=candidate.symbol, side=signal.side.value, strategy=selected.strategy,
-                                approved=admission.approved, reason=admission.reason,
-                                quantity=proposal.quantity, entry_price=proposal.entry_price,
-                                stop_price=proposal.stop_price, proposed_notional=proposal.proposed_notional,
-                                proposed_risk=proposal.proposed_risk, correlation=corr,
-                                regime=selection.regime.regime.value)
-                            logger.info("PORTFOLIO ADMISSION | symbol=%s qty=%.4f notional=%.2f risk=%.2f vol_mult=%.2f corr=%s approved=%s reason=%s action=%s",
-                                        candidate.symbol, proposal.quantity, proposal.proposed_notional,
-                                        proposal.proposed_risk, proposal.volatility_multiplier,
-                                        "NA" if corr is None else f"{corr:.2f}", admission.approved,
-                                        admission.reason, action)
+                                target_price=float(target), regime=selection.regime.regime.value,
+                                account_equity=float(portfolio_state.snapshot.net_liquidation),
+                                reference_price=reference_price, market_data_type=data_type,
+                                con_id=int(getattr(candidate.contract, "conId", 0) or 0)))
+                        action = "PAPER_SUBMITTED" if result.submitted else "PAPER_BLOCKED"
+                        portfolio_reason = result.reason
+                if admission is not None and proposal is not None:
+                    self.risk_decisions.record(
+                        symbol=candidate.symbol, side=selected.signal.side.value, strategy=selected.strategy,
+                        approved=admission.approved, reason=admission.reason,
+                        quantity=proposal.quantity, entry_price=proposal.entry_price,
+                        stop_price=proposal.stop_price, proposed_notional=proposal.proposed_notional,
+                        proposed_risk=proposal.proposed_risk, correlation=corr,
+                        regime=selection.regime.regime.value)
+                    logger.info("PORTFOLIO ADMISSION | symbol=%s qty=%.4f notional=%.2f risk=%.2f vol_mult=%.2f corr=%s approved=%s reason=%s action=%s",
+                                candidate.symbol, proposal.quantity, proposal.proposed_notional,
+                                proposal.proposed_risk, proposal.volatility_multiplier,
+                                "NA" if corr is None else f"{corr:.2f}", admission.approved,
+                                admission.reason, action)
 
                 decisions.append(ShadowDecision(candidate.symbol, candidate.score, selection, action, portfolio_reason))
                 self._journal_decision(cycle_id, candidate, bars, selection, action, portfolio_reason)
@@ -310,7 +268,7 @@ class ShadowTradingEngine:
                     selection.regime.adx, selection.regime.ema_slope_pct,
                     selection.regime.volatility_stress, action,
                     None if selected is None else selected.strategy,
-                    [f"{x.strategy}:{x.signal.side.value}:{x.adjusted_score:.1f}:learn={x.learning.status.value if x.learning else 'NA'}:{x.learning.confidence if x.learning else 0:.0%}:bonus={x.learning.bonus if x.learning else 0:+.1f}" for x in selection.evaluations[:3]],
+                    [f"{x.strategy}:{x.signal.side.value}:{x.adjusted_score:.1f}:learn={x.learning.status.value if x.learning else 'NA'}:{x.learning.confidence if x.learning else 0:.0%}:bonus={x.learning.selector_bonus if x.learning else 0:+.1f}" for x in selection.evaluations[:3]],
                     selection.reason, portfolio_reason)
             except Exception as exc:
                 logger.exception("SHADOW candidate failed | symbol=%s error=%s", candidate.symbol, exc)

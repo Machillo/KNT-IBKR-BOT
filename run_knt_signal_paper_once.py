@@ -1,5 +1,14 @@
+"""Supervised PAPER plumbing test: at most ONE strategy-originated bracket of at most 1 share.
+
+Three independent confirmations are required (docs/PAPER_PLUMBING_TEST.md):
+1. ``KNT_SIGNAL_PAPER_ACK`` set to the literal below for this run (refused if stored in .env);
+2. the ``--confirm-paper-plumbing`` command-line flag;
+3. an in-process read-only preflight that passes: verified paper account, live two-sided
+   quote, flat account (positions and EVERY client's open orders), no persisted lock.
+"""
 from __future__ import annotations
 
+import argparse
 import asyncio
 from dataclasses import replace
 from os import getenv
@@ -50,7 +59,17 @@ class OneShotCappedPaperExecutor:
         return result
 
 
-async def main() -> None:
+async def main(args) -> None:
+    from dotenv import dotenv_values
+    from ib_async import Stock
+
+    from config.config import STATE_DIR
+    from execution.preflight import MAX_PLUMBING_QTY, broker_checks, config_checks, verdict
+
+    if not args.confirm_paper_plumbing:
+        raise RuntimeError("Pass --confirm-paper-plumbing (second confirmation) for this one run")
+    if dotenv_values(".env").get("KNT_SIGNAL_PAPER_ACK"):
+        raise RuntimeError("KNT_SIGNAL_PAPER_ACK must not be stored in .env; set it for this run only")
     config.validate()
     if config.ibkr.port not in config.ibkr.paper_ports:
         raise RuntimeError(f"KNT signal probe requires an IBKR Paper port; got {config.ibkr.port}")
@@ -66,8 +85,11 @@ async def main() -> None:
         raise RuntimeError(f"Set KNT_SIGNAL_PAPER_ACK={ACK} for this one run")
 
     max_qty = float(getenv("KNT_SIGNAL_PAPER_MAX_QTY", "1"))
-    if max_qty <= 0 or max_qty > 10:
-        raise RuntimeError("KNT_SIGNAL_PAPER_MAX_QTY must be > 0 and <= 10")
+    if max_qty <= 0 or max_qty > MAX_PLUMBING_QTY:
+        raise RuntimeError(f"KNT_SIGNAL_PAPER_MAX_QTY must be > 0 and <= {MAX_PLUMBING_QTY:g} for plumbing")
+    failed_config = [c.name for c in config_checks(config, dotenv_values(".env")) if c.required and not c.ok]
+    if failed_config:
+        raise RuntimeError(f"Paper plumbing preflight (config) failed: {failed_config}")
 
     connection = IBKRConnection(config.ibkr)
     try:
@@ -95,6 +117,13 @@ async def main() -> None:
             )
 
         market_data = MarketDataService(ib, config.market_data)
+        market_data.configure()
+        checks, _ = await broker_checks(ib, config, state_dir=STATE_DIR, market_data=market_data,
+                                        probe_contract=Stock("SPY", "SMART", "USD"), session_policy=session_policy)
+        result, failed = verdict(checks)
+        if failed:
+            raise RuntimeError(f"Paper plumbing preflight (broker) failed: {failed}")
+        logger.warning("KNT PAPER PLUMBING PREFLIGHT | %s", result)
         intelligence = MarketIntelligenceService(ib, market_data)
         portfolio_state = PortfolioStateService(ib).build(
             account,
@@ -182,4 +211,6 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--confirm-paper-plumbing", action="store_true")
+    asyncio.run(main(parser.parse_args()))

@@ -55,19 +55,9 @@ def research_locked(supervisor, equity: float | None, real_state_dir: Path | Non
 
 
 def _real_bot_lock(state_dir: Path, account: str, trading_date: str) -> str | None:
-    from risk.drawdown_guard import DrawdownStateStore
-    from risk.state_store import DailyRiskStateStore
+    from risk.persisted_locks import persisted_lock_reason
 
-    try:
-        daily = DailyRiskStateStore(state_dir / "risk_state.json").get(account=account, trading_date=trading_date)
-        drawdown = DrawdownStateStore(state_dir / "drawdown_state.json").get(account)
-    except Exception:
-        return "bot_state_unreadable"
-    if daily is not None and daily.kill_switch_triggered:
-        return "bot_sticky_daily_kill"
-    if drawdown is not None and drawdown.locked:
-        return "bot_multi_day_drawdown"
-    return None
+    return persisted_lock_reason(state_dir, account, trading_date)
 
 
 def shadow_only_config(base: BotConfig) -> BotConfig:

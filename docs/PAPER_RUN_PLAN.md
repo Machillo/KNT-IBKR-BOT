@@ -26,8 +26,11 @@ then cleanup with all three legs cancelled, zero fills. If anything fills: stop 
 
 ## Step B — one strategy-originated signal, max 1 share
 ```bash
-KNT_SIGNAL_PAPER_ACK=I_UNDERSTAND_KNT_WILL_SUBMIT_ONE_PAPER_SIGNAL KNT_SIGNAL_PAPER_MAX_QTY=1 python run_knt_signal_paper_once.py
+python run_paper_preflight.py   # read-only; must print READY_FOR_SUPERVISED_PLUMBING
+KNT_SIGNAL_PAPER_ACK=I_UNDERSTAND_KNT_WILL_SUBMIT_ONE_PAPER_SIGNAL KNT_SIGNAL_PAPER_MAX_QTY=1 python run_knt_signal_paper_once.py --confirm-paper-plumbing
 ```
+Full procedure, confirmations and rollback: `docs/PAPER_PLUMBING_TEST.md` (max 1 share, the ACK
+must not be stored in `.env`, in-process preflight incl. every client's open orders).
 Expect either `no strategy setup passed every gate` (valid outcome) or exactly one bracket.
 Other valid, fail-closed outcomes added in session 2 (nothing is sent):
 - `PORTFOLIO_REJECTED ... sector_metadata_missing` — IBKR contract details had no industry for the

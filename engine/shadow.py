@@ -98,11 +98,46 @@ class ShadowTradingEngine:
             return (bid + ask) / 2.0, data_type
         return None, data_type
 
+    def _journal_cycle(self, cycle_id, ranked, rows_per_scanner, session) -> None:
+        """Point-in-time record of what discovery returned this cycle (never used for decisions)."""
+        if self.journal is None:
+            return
+        try:
+            universe = getattr(self.intelligence, "universe", None)
+            scanners = [getattr(p, "name", str(p)) for p in getattr(universe, "scanners", ())]
+            market_data = getattr(self.intelligence, "market_data", None)
+            data_type = getattr(getattr(market_data, "settings", None), "market_data_type", None)
+            self.journal.record_cycle(
+                cycle_id, universe=getattr(universe, "name", None), scanners=scanners,
+                rows_per_scanner=rows_per_scanner, quote_budget=self.quote_budget,
+                market_data_type=data_type, session=getattr(session, "session", None),
+                market_open=getattr(session, "market_open", None),
+            )
+            funnel = list(getattr(self.intelligence, "last_funnel", []) or [])
+            if funnel:
+                self.journal.record_funnel(cycle_id, funnel)
+            self.journal.record_discovery(cycle_id, ranked)
+        except Exception as exc:  # journaling must never break the loop
+            logger.warning("SHADOW JOURNAL cycle write failed | error=%s", exc)
+
     def _journal_decision(self, cycle_id, candidate, bars, selection, action, reason) -> None:
         if self.journal is None:
             return
         chosen = selection.selected
         sig = None if chosen is None else chosen.signal
+        top_eval = next((e for e in selection.evaluations if e.signal.side.value != "FLAT"), None)
+        top = {} if top_eval is None else {
+            "strategy": top_eval.strategy, "side": top_eval.signal.side.value,
+            "score": float(top_eval.adjusted_score), "entry": top_eval.signal.entry,
+            "stop": top_eval.signal.stop, "target": top_eval.signal.target,
+        }
+        regime = selection.regime
+        context = {
+            "atr": (regime.atr_pct / 100 * bars[-1].close) if bars else None,
+            "adx": regime.adx, "volatility_stress": regime.volatility_stress,
+            "liquidity_score": getattr(candidate, "score", None),
+            "selector_threshold": getattr(self.selector, "minimum_score", None),
+        }
         try:
             self.journal.record_decision(
                 cycle_id, symbol=candidate.symbol,
@@ -114,7 +149,7 @@ class ShadowTradingEngine:
                 score=None if chosen is None else float(chosen.adjusted_score),
                 entry=None if sig is None else sig.entry, stop=None if sig is None else sig.stop,
                 target=None if sig is None else sig.target,
-                reason=reason or selection.reason,
+                reason=reason or selection.reason, top=top, context=context,
             )
         except Exception as exc:
             logger.warning("SHADOW JOURNAL decision write failed | symbol=%s error=%s", candidate.symbol, exc)
@@ -179,11 +214,6 @@ class ShadowTradingEngine:
             rows_per_plan=rows_per_scanner, quote_budget=self.quote_budget)
         candidates = [x for x in ranked if x.eligible][:self.max_candidates]
         cycle_id = ShadowJournal.new_cycle_id()
-        try:
-            if self.journal is not None:
-                self.journal.record_discovery(cycle_id, ranked)
-        except Exception as exc:  # journaling must never break the loop
-            logger.warning("SHADOW JOURNAL discovery write failed | error=%s", exc)
         logger.info("SHADOW FUNNEL | ranked=%s eligible=%s deep_analysis=%s",
                     len(ranked), sum(1 for x in ranked if x.eligible), len(candidates))
         decisions: list[ShadowDecision] = []
@@ -194,6 +224,7 @@ class ShadowTradingEngine:
         if refresh is not None:
             await refresh(self.ib)  # read-only broker calendar; failure keeps the market CLOSED
         session = self.session_policy.state()
+        self._journal_cycle(cycle_id, ranked, rows_per_scanner, session)
         logger.info("MARKET SESSION | asset=US_STOCKS session=%s market_open=%s local=%s",
                     session.session, session.market_open, session.local_time.isoformat())
         await self.research_scheduler.run_cycle(candidates, market_open=session.market_open)

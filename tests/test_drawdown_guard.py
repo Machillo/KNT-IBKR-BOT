@@ -75,7 +75,7 @@ class FakeIB:
         return []
 
 
-def test_supervisor_restores_drawdown_lock_on_startup(tmp_path, monkeypatch):
+def test_supervisor_restores_drawdown_lock_on_startup(tmp_path, monkeypatch, isolated_state_dir):
     monkeypatch.chdir(tmp_path)
     from engine.supervisor import PaperSupervisor
 
@@ -93,3 +93,53 @@ def test_supervisor_restores_drawdown_lock_on_startup(tmp_path, monkeypatch):
     context2, _ = asyncio.run(second.initialize())
     assert context2.risk.trading_locked is True
     assert "drawdown" in context2.risk.lock_reason
+
+
+def test_missing_state_for_account_with_history_fails_closed(tmp_path):
+    g = guard(tmp_path)
+    with pytest.raises(RuntimeError):
+        g.evaluate(100_000, allow_initialize=False)
+
+
+def test_readonly_sessions_are_never_verified_as_paper():
+    from core.paper_guard import verify_paper_account
+
+    ib = FakeIB(100_000)
+    v = verify_paper_account(ib, IBKRConfig(port=7497, allow_live_trading=False, readonly=True))
+    assert (v.verified, v.reason) == (False, "readonly_session")
+
+
+def test_max_drawdown_above_half_is_rejected():
+    with pytest.raises(ValueError):
+        RiskConfig(max_drawdown_pct=0.9).validate()
+
+
+def test_drawdown_failure_locks_entries_but_daily_guard_still_runs(isolated_state_dir, monkeypatch):
+    from engine.supervisor import PaperSupervisor
+
+    cfg = BotConfig(ibkr=IBKRConfig(port=7497, allow_live_trading=False, account=None),
+                    risk=RiskConfig(), runtime=RuntimeConfig())
+    sup = PaperSupervisor(FakeIB(100_000), cfg, state_dir=isolated_state_dir)
+    context, _ = asyncio.run(sup.initialize())
+    calls = []
+    original = sup.context.guard.evaluate
+    sup.context.guard.evaluate = lambda eq: calls.append(eq) or original(eq)
+    monkeypatch.setattr(sup.drawdown, "evaluate", lambda *a, **k: (_ for _ in ()).throw(PermissionError("locked file")))
+    asyncio.run(sup.evaluate())
+    assert calls, "daily guard / kill switch path must still run"
+    assert context.risk.trading_locked and "drawdown guard unavailable" in context.risk.lock_reason
+
+
+def test_deleted_drawdown_state_with_prior_days_locks_on_startup(isolated_state_dir):
+    import json
+    from engine.supervisor import PaperSupervisor
+
+    isolated_state_dir.mkdir(parents=True, exist_ok=True)
+    (isolated_state_dir / "risk_state.json").write_text(json.dumps({"version": 1, "records": {
+        f"{ACCOUNT}:2020-01-02": {"account": ACCOUNT, "trading_date": "2020-01-02", "starting_equity": 100000.0,
+                                  "kill_switch_triggered": False, "trigger_reason": "", "updated_at_utc": ""}}}),
+        encoding="utf-8")
+    cfg = BotConfig(ibkr=IBKRConfig(port=7497, allow_live_trading=False, account=None),
+                    risk=RiskConfig(), runtime=RuntimeConfig())
+    context, _ = asyncio.run(PaperSupervisor(FakeIB(100_000), cfg, state_dir=isolated_state_dir).initialize())
+    assert context.risk.trading_locked and "drawdown guard unavailable" in context.risk.lock_reason

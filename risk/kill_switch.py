@@ -30,7 +30,11 @@ class KillSwitch:
     """
 
     def __init__(self, ib: IB, settings: RiskConfig, account: str,
-                 guard: PaperOrderGuard | None = None) -> None:
+                 guard: PaperOrderGuard | None = None,
+                 liquidation_qty_limit: float | None = None) -> None:
+        # Drills pass a tiny limit: a position larger than this is NOT liquidated (re-checked
+        # at liquidation time, after cancels, so a late fill cannot be flattened at size).
+        self.liquidation_qty_limit = liquidation_qty_limit
         self.ib = ib
         self.settings = settings
         self.account = account
@@ -120,6 +124,10 @@ class KillSwitch:
         liquidation_trades = []
         for position in self._account_positions():
             qty = float(position.position)
+            if self.liquidation_qty_limit is not None and abs(qty) > self.liquidation_qty_limit:
+                logger.critical("KILL SWITCH FLATTEN skipped | position exceeds liquidation limit | "
+                                "manual intervention required")
+                continue
             action = "SELL" if qty > 0 else "BUY"
             order = MarketOrder(action, abs(qty), tif="DAY")
             order.account = self.account

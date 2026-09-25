@@ -18,6 +18,7 @@ from core.paper_guard import build_paper_guard, mask_account
 from risk.kill_switch import KillSwitch
 
 DRILL_ACK = "I_AM_WATCHING_AND_ACCEPT_THE_PAPER_KILL_SWITCH_DRILL"
+MAX_DRILL_QTY = 5.0  # hard cap: the drill can never flatten more than a handful of shares
 
 
 @dataclass(frozen=True)
@@ -30,7 +31,12 @@ class DrillOutcome:
     flat_confirmed: bool = False
 
 
-async def run_drill(ib, settings: IBKRConfig, *, armed: bool, ack: str, max_qty: float = 1.0) -> DrillOutcome:
+async def run_drill(ib, settings: IBKRConfig, *, armed: bool, ack: str, max_qty: float = 1.0,
+                    persisted_ack: str | None = None) -> DrillOutcome:
+    if not 0 < max_qty <= MAX_DRILL_QTY:
+        return DrillOutcome(False, armed, "max_qty_out_of_range")
+    if persisted_ack:
+        return DrillOutcome(False, armed, "ack_must_not_be_persisted_in_env")
     guard = build_paper_guard(ib, settings, settings.account)
     if not guard.verification.verified:
         return DrillOutcome(False, armed, f"paper_unverified:{guard.verification.reason}")
@@ -40,23 +46,35 @@ async def run_drill(ib, settings: IBKRConfig, *, armed: bool, ack: str, max_qty:
                  if str(getattr(p.contract, "secType", "")).upper() != "STK" or abs(float(p.position)) > max_qty]
     if oversized:
         return DrillOutcome(False, armed, "positions_exceed_drill_limits")
+    working = [t for t in ib.openTrades() if not t.isDone()]
+    if working:
+        # A working order could fill during the drill; and the kill switch cancels every
+        # working order of the account. The drill only runs on a quiet account.
+        return DrillOutcome(False, armed, "open_orders_present")
     if armed and ack != DRILL_ACK:
         return DrillOutcome(False, armed, "missing_drill_ack")
     risk = RiskConfig(kill_switch_enabled=True, kill_switch_dry_run=not armed)
-    result = await KillSwitch(ib, risk, account, guard=guard).execute("supervised paper drill")
+    result = await KillSwitch(ib, risk, account, guard=guard,
+                              liquidation_qty_limit=max_qty).execute("supervised paper drill")
     return DrillOutcome(True, armed, "executed", result.cancelled_orders, result.liquidation_orders,
                         result.flat_confirmed)
 
 
 async def main_async(args) -> None:
+    from dataclasses import replace
+
+    from dotenv import dotenv_values
+
     from config.config import config
     from core.connection import IBKRConnection
 
-    connection = IBKRConnection(config.ibkr)
+    settings = replace(config.ibkr, client_id=config.ibkr.client_id + 54)  # never the bot's clientId
+    connection = IBKRConnection(settings)
     try:
         ib = await connection.connect()
-        outcome = await run_drill(ib, config.ibkr, armed=args.armed, ack=getenv("KILL_SWITCH_DRILL_ACK", ""),
-                                  max_qty=args.max_qty)
+        outcome = await run_drill(ib, settings, armed=args.armed, ack=getenv("KILL_SWITCH_DRILL_ACK", ""),
+                                  max_qty=args.max_qty,
+                                  persisted_ack=dotenv_values(".env").get("KILL_SWITCH_DRILL_ACK"))
         print(f"KILL SWITCH DRILL | account={mask_account(config.ibkr.account)} {outcome}")
     finally:
         await connection.disconnect()

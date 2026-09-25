@@ -421,3 +421,17 @@ def test_research_variants_are_flagged_as_not_runtime_equivalent():
                    dict(use_volatility_multiplier=False), dict(entry_mode="next_open"), dict(context_bars=450)):
         assert PipelineConfig(**change).runtime_equivalent is False
     assert replay({"A": walk(1)}, regime_filter=("TRENDING",)).run().runtime_equivalent is False
+
+
+def test_journal_universe_top_n_matches_the_runtime_deep_analysis_cap(tmp_path):
+    import sqlite3
+    db = tmp_path / "j.db"
+    ShadowJournal(db)
+    with sqlite3.connect(db) as conn:
+        conn.execute("INSERT INTO discovery_cycles (cycle_id, created_at) VALUES ('c1', '2026-03-02T15:00:00+00:00')")
+        for sym, score, rank in [("LOW", 10.0, 1), ("HIGH", 90.0, 5), ("MID", 50.0, 2), ("TIE", 50.0, 1)]:
+            conn.execute("INSERT INTO discovery_funnel (cycle_id, created_at, symbol, status, liquidity_score, best_rank) "
+                         "VALUES ('c1', '', ?, 'ranked_eligible', ?, ?)", (sym, score, rank))
+    at = datetime(2026, 3, 2, 11, 0)
+    assert JournalUniverse(db).members_at(at) == {"LOW", "HIGH", "MID", "TIE"}
+    assert JournalUniverse(db, top_n=2).members_at(at) == {"HIGH", "TIE"}   # score desc, then scanner rank

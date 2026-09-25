@@ -15,7 +15,7 @@ from statistics import mean, median
 
 from backtest.costs import BASELINE, SEVERE, STRESSED
 from backtest.universes import VALIDATION_UNIVERSES, universe_symbols
-from research.pipeline_backtest import PipelineBacktest, PipelineConfig, time_split
+from research.pipeline_backtest import PIPELINE_VERSION, PipelineBacktest, PipelineConfig, time_split
 from research.pipeline_variants import VARIANTS
 from research.protocol import PROTOCOL, SEGMENTS
 from run_monthly_target_suite import PROFILES, _cache_path, _load_bars
@@ -91,16 +91,27 @@ def main() -> None:
                     help="cohort = static cache cohort (survivorship-biased); journal = KNT shadow "
                          "discovery journal; csv = external point-in-time membership file")
     ap.add_argument("--universe-path", default=None, help="default: <repo>/state/strategy_performance.db")
+    ap.add_argument("--journal-top-n", type=int, default=None,
+                    help="journal universe: runtime deep-analysis cap (default SHADOW_MAX_CANDIDATES; 0 = no cap)")
+    ap.add_argument("--config-from-env", action="store_true",
+                    help="live_default risk limits from .env (BotConfig) instead of code defaults")
     a = ap.parse_args()
     if a.segment == "holdout" and not a.confirm_holdout:
         ap.error("HOLDOUT is single-use. Freeze the configuration in docs/experiments first, then pass --confirm-holdout.")
     data = load(a.universe, a.profile, a.cache_dir)
     config: PipelineConfig = VARIANTS[a.variant].variant(cost_model=COSTS[a.cost], initial_equity=a.equity)
+    if a.config_from_env:
+        from config.config import config as bot_config
+        if a.variant != "live_default":
+            ap.error("--config-from-env only applies to the live_default variant")
+        config = PipelineConfig.from_bot_config(bot_config, cost_model=COSTS[a.cost], initial_equity=a.equity)
     universe = None
     if a.universe_source == "journal":
         from research.universe_provider import JournalUniverse
         from config.config import state_path
-        universe = JournalUniverse(a.universe_path or state_path("strategy_performance.db"))
+        from config.config import config as bot_config
+        top_n = bot_config.runtime.shadow_max_candidates if a.journal_top_n is None else (a.journal_top_n or None)
+        universe = JournalUniverse(a.universe_path or state_path("strategy_performance.db"), top_n=top_n)
     elif a.universe_source == "csv":
         from research.universe_provider import PointInTimeCsvUniverse
         universe = PointInTimeCsvUniverse(a.universe_path)
@@ -110,6 +121,8 @@ def main() -> None:
           f"cost={a.cost} equity={a.equity:.0f} window=[{start or 'begin'} .. {end or 'end'})")
     biased = universe is None or getattr(universe, "survivorship_biased", True)
     print(f"UNIVERSE | source={a.universe_source} survivorship_biased={biased}")
+    print(f"REPLAY | pipeline_version={PIPELINE_VERSION} runtime_equivalent={config.runtime_equivalent} "
+          f"context_bars={config.context_bars}")
     if a.segment == "holdout":
         print("*** HOLDOUT EVALUATION — record the result; do not tune against it. ***")
     print(summarize(bt.run(start, end)))

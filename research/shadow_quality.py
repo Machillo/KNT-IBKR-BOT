@@ -161,7 +161,7 @@ def evaluate(path: str | Path, *, since: datetime | None = None, until: datetime
     for d in decisions:
         did = str(d["id"])
         action = str(d["action"] or "")
-        if action == "CANDIDATE_ERROR":
+        if action in ("CANDIDATE_ERROR", "INSTRUMENT_EXCLUDED"):
             continue  # accounted for at cycle level
         created, bar = _utc(d["created_at"]), _utc(d["bar_time"])
         # G5 clock / G11 leakage (canonical rows only: duplicates are re-decisions by design)

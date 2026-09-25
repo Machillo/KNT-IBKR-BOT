@@ -74,18 +74,24 @@ def test_opportunity_journal_failure_never_breaks_the_decision_journal(tmp_path,
     assert sqlite3.connect(shadow.journal.path).execute("SELECT COUNT(*) FROM shadow_decisions").fetchone()[0] == 1
 
 
-def test_stock_type_is_journaled_from_contract_details(tmp_path):
+def test_stock_type_is_journaled_and_non_common_instruments_are_excluded_before_deciding(tmp_path):
     from test_shadow_research_path import engine, run
 
-    shadow = engine(tmp_path)
+    for stock_type, expected in (("COMMON", "SHADOW_SUBMIT"), ("ADR", "SHADOW_SUBMIT"), ("ETF", "INSTRUMENT_EXCLUDED"),
+                                 (None, "INSTRUMENT_EXCLUDED")):
+        shadow = engine(tmp_path / str(stock_type))
 
-    async def details(contract):
-        return [SimpleNamespace(industry="Tech", category="x", stockType="ETF")]
-    shadow.metadata.ib = SimpleNamespace(reqContractDetailsAsync=details)
-    run(shadow)
-    row = sqlite3.connect(shadow.journal.path).execute("SELECT stock_type FROM shadow_decisions").fetchone()
-    assert row == ("ETF",)
-
+        async def details(contract, st=stock_type):
+            return [SimpleNamespace(industry="Tech", category="x", stockType=st)]
+        shadow.metadata.ib = SimpleNamespace(reqContractDetailsAsync=details)
+        decisions = run(shadow)
+        row = sqlite3.connect(shadow.journal.path).execute(
+            "SELECT action, stock_type, bar_time FROM shadow_decisions").fetchone()
+        assert row[0] == expected, (stock_type, row)
+        if expected == "INSTRUMENT_EXCLUDED":
+            assert decisions == [] and row[2] is None                 # never decided, never scored
+        else:
+            assert row[1] == stock_type
 
 
 def test_a_recorder_failure_never_changes_the_decision(monkeypatch):

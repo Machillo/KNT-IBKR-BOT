@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from itertools import combinations
@@ -18,7 +20,7 @@ from market.history import HistoricalDataService, PriceBar, bar_size_seconds
 from market.session import USStockSessionPolicy
 from portfolio.admission import PortfolioAdmissionCoordinator, RiskDecisionStore
 from portfolio.allocation import PortfolioAllocator
-from portfolio.metadata import ContractMetadataService
+from portfolio.metadata import TRADABLE_STOCK_TYPES, ContractMetadataService
 from portfolio.state import PendingOrderExposure, PortfolioState
 from research.coordinator import ContinuousResearchCoordinator
 from research.performance import StrategyPerformanceStore
@@ -206,6 +208,30 @@ class ShadowTradingEngine:
                 self.journal.record_opportunities(decision_id, cycle_id, opportunities)
         except Exception as exc:  # exploratory records must never affect the decision journal
             logger.warning("SHADOW JOURNAL opportunity write failed | symbol=%s error=%s", candidate.symbol, exc)
+
+    async def _stock_type(self, candidate) -> str | None:
+        """IBKR stockType of the candidate (read-only, cached, bounded wait); None if unknown."""
+        try:
+            meta = await asyncio.wait_for(self.metadata.get(candidate.contract), timeout=5.0)
+        except Exception:
+            return None
+        return None if meta is None else meta.stock_type
+
+    def _journal_excluded(self, cycle_id, candidate, stock_type) -> None:
+        """Instrument outside the analysed types: recorded (never silently dropped), never scored."""
+        logger.info("SHADOW INSTRUMENT EXCLUDED | symbol=%s stock_type=%s", candidate.symbol, stock_type)
+        if self.journal is None:
+            return
+        try:
+            self.journal.record_decision(
+                cycle_id, symbol=candidate.symbol, con_id=int(getattr(candidate.contract, "conId", 0) or 0),
+                bar_time=None, timeframe="1 hour", regime="UNKNOWN", action="INSTRUMENT_EXCLUDED",
+                strategy=None, side=None, score=None, entry=None, stop=None, target=None,
+                reason=f"instrument_type:{stock_type or 'UNKNOWN'}",
+                context={"run_mode": self.run_mode, "stock_type": stock_type,
+                         "learning_mode": "live" if self.learning_enabled else "frozen"})
+        except Exception as exc:
+            logger.warning("SHADOW JOURNAL exclusion write failed | symbol=%s error=%s", candidate.symbol, exc)
 
     def _journal_error(self, cycle_id, candidate, exc) -> None:
         """A candidate that failed is recorded (it must not silently vanish from the funnel)."""
@@ -428,6 +454,10 @@ class ShadowTradingEngine:
         for candidate in candidates:
             attempted += 1
             try:
+                stock_type = await self._stock_type(candidate)
+                if stock_type not in TRADABLE_STOCK_TYPES:
+                    self._journal_excluded(cycle_id, candidate, stock_type)
+                    continue
                 bars = decision_context(await self.history.bars(
                     candidate.contract, duration=DECISION_HISTORY_DURATION, complete_only=True))
                 history_by_symbol[candidate.symbol] = bars
@@ -445,12 +475,6 @@ class ShadowTradingEngine:
                 action = decision.action
                 portfolio_reason = None if decision.reason == selection.reason else decision.reason
                 proposal, admission, corr = decision.proposal, decision.admission, decision.correlation
-                stock_type = None
-                try:
-                    meta = await self.metadata.get(candidate.contract)   # read-only, cached
-                    stock_type = None if meta is None else meta.stock_type
-                except Exception:
-                    stock_type = None
                 extra = {"session_open": getattr(session, "market_open", None), "sector": sector,
                          "correlation": corr, "stock_type": stock_type}
                 if proposal is not None:

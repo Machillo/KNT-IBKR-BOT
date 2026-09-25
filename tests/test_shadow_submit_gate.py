@@ -79,7 +79,7 @@ def run_shadow(tmp_path, monkeypatch, side, portfolio_state, risk=True, industry
                             market_data=SimpleNamespace(snapshot_contract=snap, settings=SimpleNamespace(market_data_type=1)))
     executor = RecordingExecutor()
     async def details(contract):
-        return [SimpleNamespace(industry=industry, category="Semiconductors")]
+        return [SimpleNamespace(industry=industry, category="Semiconductors", stockType="COMMON")]
 
     shadow = ShadowTradingEngine(SimpleNamespace(reqContractDetailsAsync=details), intel, research_budget=0,
                                  risk_manager=RiskManager(RiskConfig()) if risk else None,

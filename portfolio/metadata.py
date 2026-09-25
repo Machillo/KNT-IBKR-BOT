@@ -10,7 +10,12 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 
-CACHE_TTL_SECONDS = 24 * 3600  # sector classifications change rarely, but never trust a stale one forever
+CACHE_TTL_SECONDS = 24 * 3600
+# Instrument types the current (single-stock) strategies and risk model are built for. ETFs —
+# including leveraged and inverse ones, whose risk is a multiple of the underlying — ETNs,
+# closed-end funds, preferreds, warrants, rights and units are NOT analysed; an unknown type is
+# refused (fail closed). Widening this set is a decision-path change (new FWD version).
+TRADABLE_STOCK_TYPES = frozenset({"COMMON", "ADR", "REIT"})  # sector classifications change rarely, but never trust a stale one forever
 
 
 @dataclass(frozen=True)

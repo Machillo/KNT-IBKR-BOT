@@ -85,6 +85,10 @@ def test_shadow_cycle_journals_cycle_funnel_and_decision_context(tmp_path, monke
 
     intel = MarketIntelligenceService(IB, FakeMarketData({"AAA": (10.0, 10.01), "BBB": (5.0, 5.01), "CCC": (3.0, 3.001)}))
     shadow = ShadowTradingEngine(SimpleNamespace(), intel, research_budget=0)
+
+    async def common_stock(candidate):
+        return "COMMON"                     # instrument type lookup (read-only IBKR details) stubbed
+    shadow._stock_type = common_stock
     bars = _bars()
 
     async def fake_bars(contract, **kwargs):

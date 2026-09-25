@@ -37,7 +37,7 @@ def engine(tmp_path, *, market_open=True, data_type=1, n_candidates=1, bid=None,
                                                         settings=SimpleNamespace(market_data_type=1)))
 
     async def details(contract):
-        return [SimpleNamespace(industry=f"Industry{contract.conId}", category="x")]
+        return [SimpleNamespace(industry=f"Industry{contract.conId}", category="x", stockType="COMMON")]
 
     risk = RiskManager(RiskConfig())
     if locked:

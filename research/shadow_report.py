@@ -49,7 +49,8 @@ def summarize(path: str | Path, *, since: datetime | None = None, until: datetim
                                             (SCORER_VERSION,)).fetchall() if o["decision_id"] in decision_ids]
     conn.close()
 
-    canonical = [d for d in decisions if d["duplicate_of"] is None and d["action"] != "CANDIDATE_ERROR"]
+    canonical = [d for d in decisions if d["duplicate_of"] is None
+                 and d["action"] not in ("CANDIDATE_ERROR", "INSTRUMENT_EXCLUDED")]
     actions = Counter(str(d["action"]) for d in canonical)
     selected = [d for d in canonical if d["strategy"] is not None]
     no_trade = [d for d in canonical if d["action"] == "NO_TRADE"]
@@ -91,6 +92,8 @@ def summarize(path: str | Path, *, since: datetime | None = None, until: datetim
             "duplicates": sum(1 for d in decisions if d["duplicate_of"] is not None),
             "conflicts": sum(1 for d in decisions if d["conflict_with"] is not None),
             "candidate_errors": sum(1 for d in decisions if d["action"] == "CANDIDATE_ERROR"),
+            "instrument_excluded": dict(Counter(str(d["reason"]) for d in decisions
+                                                if d["action"] == "INSTRUMENT_EXCLUDED")),
             "by_action": dict(sorted(actions.items())),
             "trade": sum(actions[a] for a in TRADE_ACTIONS),
             "no_trade": len(no_trade),

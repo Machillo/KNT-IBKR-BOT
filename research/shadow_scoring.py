@@ -281,7 +281,7 @@ class ShadowScorer:
                                            None, None, None, 0, {}), provider_name)
                 counts["DUPLICATE"] += 1
                 continue
-            if str(row["action"] or "") == "CANDIDATE_ERROR" or row["bar_time"] is None:
+            if str(row["action"] or "") in ("CANDIDATE_ERROR", "INSTRUMENT_EXCLUDED") or row["bar_time"] is None:
                 self._upsert(ScoredOutcome(int(row["id"]), "NOT_EVALUABLE", None, None, None, False,
                                            "no_decision_bar", None, None, None, 0, {}), provider_name)
                 counts["NOT_EVALUABLE"] += 1

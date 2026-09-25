@@ -89,7 +89,7 @@ class RecordingIB:
 
     async def reqContractDetailsAsync(self, contract):
         self.calls.append("reqContractDetailsAsync")
-        return [SimpleNamespace(industry="Technology", category="Semiconductors")]
+        return [SimpleNamespace(industry="Technology", category="Semiconductors", stockType="COMMON")]
 
 
 def test_full_shadow_only_cycle_makes_no_mutating_call(isolated_state_dir, monkeypatch):

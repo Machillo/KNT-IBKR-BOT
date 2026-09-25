@@ -62,8 +62,11 @@ def test_replay_and_runtime_share_the_decision_pipeline(tmp_path, monkeypatch):
     bars = walk(3, 200)
     snap = PortfolioSnapshot(100_000, 100_000, 0, 0, 0, 0, 10_000)
     state = PortfolioState(snap, (), ())
-    a = shadow.decision_pipeline.decide(bars, symbol="A", portfolio_state=state)
-    b = bt.pipeline.decide(bars, symbol="A", portfolio_state=state)
+    a = shadow.decision_pipeline.decide(bars, symbol="A", portfolio_state=state, sector="Technology")
+    b = bt.pipeline.decide(bars, symbol="A", portfolio_state=state, sector="Technology")
+    # Documented difference: runtime requires sector metadata (the cache has none).
+    assert shadow.admission.require_sector_metadata is True and bt.admission.require_sector_metadata is False
+    assert shadow.decision_pipeline.decide(bars, symbol="A", portfolio_state=state).reason == "sector_metadata_missing"
     assert (a.action, a.reason, a.proposal.quantity) == (b.action, b.reason, b.proposal.quantity)
     assert a.approved
 

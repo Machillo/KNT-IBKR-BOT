@@ -14,6 +14,7 @@ from market.history import HistoricalDataService, PriceBar
 from market.session import USStockSessionPolicy
 from portfolio.admission import PortfolioAdmissionCoordinator, RiskDecisionStore
 from portfolio.allocation import PortfolioAllocator
+from portfolio.metadata import ContractMetadataService
 from portfolio.state import PortfolioState
 from research.coordinator import ContinuousResearchCoordinator
 from research.performance import StrategyPerformanceStore
@@ -62,7 +63,10 @@ class ShadowTradingEngine:
         risk_pct = 0.01 if risk_manager is None else min(0.01, risk_manager.settings.max_trade_risk_pct)
         max_position_pct = 0.10 if risk_manager is None else risk_manager.settings.max_position_pct
         self.allocator = PortfolioAllocator(risk_pct=risk_pct, max_position_pct=max_position_pct)
-        self.admission = None if risk_manager is None else PortfolioAdmissionCoordinator(risk_manager)
+        # Runtime admission requires sector metadata (fails closed without it).
+        self.admission = None if risk_manager is None else PortfolioAdmissionCoordinator(
+            risk_manager, require_sector_metadata=True)
+        self.metadata = ContractMetadataService(ib)
         self.risk_decisions = RiskDecisionStore()
         try:
             self.journal: ShadowJournal | None = ShadowJournal()
@@ -170,6 +174,20 @@ class ShadowTradingEngine:
     def _series_correlation(a: tuple[float, ...], b: tuple[float, ...]) -> float | None:
         return series_correlation(a, b)
 
+    async def _sectors(self, candidate, state: PortfolioState) -> tuple[str | None, dict[str, str]]:
+        """Read-only sector lookup for the candidate and every current exposure (cached)."""
+        candidate_meta = await self.metadata.get(candidate.contract)
+        sectors: dict[str, str] = {}
+        exposures = list(state.positions) + list(state.pending_orders)
+        for item in exposures:
+            con_id = int(getattr(item, "con_id", 0) or 0)
+            if con_id <= 0 or item.symbol in sectors:
+                continue
+            meta = await self.metadata.get(Contract(conId=con_id, exchange="SMART"))
+            if meta is not None and meta.known:
+                sectors[item.symbol] = meta.sector
+        return (candidate_meta.sector if candidate_meta is not None and candidate_meta.known else None), sectors
+
     async def _position_returns(self, state: PortfolioState) -> dict[str, tuple[float, ...]]:
         returns: dict[str, tuple[float, ...]] = {}
         # Working orders count too: the correlation guard fails closed without their series.
@@ -224,9 +242,13 @@ class ShadowTradingEngine:
                 bars = await self.history.bars(candidate.contract, complete_only=True)
                 history_by_symbol[candidate.symbol] = bars
                 asset_class = candidate.contract.secType or "STK"
+                sector, sectors = None, {}
+                if portfolio_state is not None:
+                    sector, sectors = await self._sectors(candidate, portfolio_state)
                 decision = self.decision_pipeline.decide(
                     bars, symbol=candidate.symbol, asset_class=asset_class, timeframe="1 hour",
                     portfolio_state=portfolio_state, position_returns=position_returns,
+                    sector=sector, sectors=sectors,
                 )
                 selection = decision.selection
                 selected = selection.selected

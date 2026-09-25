@@ -27,7 +27,7 @@ H1–H9 all REJECT, null model, shadow journal v1. Tests 124 → 275.
 
 At the end of round 2: tests 275 → 352.
 
-## Session 2, round 3 — forward-evidence readiness (35 commits, 620282a … cf6e889)
+## Session 2, round 3 — forward-evidence readiness (commits from 620282a to the PR head)
 | block | what changed | key commits |
 |---|---|---|
 | State safety | every store/runner defaults to repo-anchored `STATE_DIR`/`REPORTS_DIR`; repo-anchored `.env` for ACK refusals; per-test isolation + real-state guard | 620282a, f051864, 634c215 |
@@ -47,7 +47,7 @@ Reviews in round 3 (independent agents, read-only):
 - trading-architect: 3 must-fix → fixed (ea87927).
 - release-gate: 3 blockers (upgraded-install drawdown state, this stale doc, PR disclosures) → fixed (f8a7155, this file, PR body).
 
-Tests: 352 → 468 passing (`python -m pytest -q`). Mutation evidence: `python tools/mutation_check.py`
+Tests: 352 → 471 passing (`python -m pytest -q`). Mutation evidence: `python tools/mutation_check.py`
 (12/12 killed: stale bar, execution lock, restart backstop, journal-after-transmit lock, flatten
 lock, lock-before-journal, merge by instant, scorer v3 base, FWD deadline cap, preflight drawdown
 check, cash reserve, replay liquidity order), plus ad-hoc ones during the round (shadow-only

@@ -207,10 +207,12 @@ executor-style LIMIT/DAY entries). No parameter may change between now and evalu
 | FWD3 | Cross-sectional 12-1 momentum works on the point-in-time scanner universe | F1 signal on `JournalUniverse` + `reports/pit_cache` bars | needs ≥ 12 monthly rebalances of journal data; same KEEP rule as round 3 |
 
 **Exact evaluation (added before any v2 forward data exists, hypotheses unchanged; revised
-once after the quant review of the same day, still before any v2 data):**
+twice after the quant reviews of the same day, still before any v2 data):**
 `docs/FWD_PROTOCOL.md` (FWD-v1) fixes the evidence window (v2 decisions only), population,
 leave-one-out benchmark, day-clustered inference with Hansen–Hodrick lag-1 weights and Student-t
 critical values (K = 3: about 2.50 at 40 days, 2.39 in the limit), binding cutoff, sample
 minimums, KEEP/REJECT/INCONCLUSIVE rules, deadlines and invalidation. It supersedes the
-shorthand rules in this table where they differ (e.g. "t ≥ 2" → 2.40 after the K = 3 correction;
-"t over per-cycle means" → per-day NW, which is more conservative).
+shorthand rules in this table where they differ (e.g. "t ≥ 2" → the K = 3 Student-t critical
+value; "t over per-cycle means" → per-trading-day means with Hansen–Hodrick lag-1 standard
+errors, which is more conservative). The window registration line is appended below when the
+human registers it.

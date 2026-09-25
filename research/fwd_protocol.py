@@ -32,7 +32,7 @@ from zoneinfo import ZoneInfo
 
 from research import shadow_quality
 from research.shadow_journal import DECISION_VERSION
-from research.shadow_scoring import MIN_CYCLE_ROWS, SCORER_VERSION
+from research.shadow_scoring import MIN_CYCLE_ROWS, SCORER_VERSION, TRADE_ACTION_PREFIXES
 
 PROTOCOL_ID = "FWD-v1"
 ROUND_TRIP_COST_PCT = 0.093          # 9.3 bps, BASELINE cost model round trip
@@ -116,7 +116,7 @@ def _population(path: Path, run_mode: str = "shadow_only"):
     with conn:
         rows = conn.execute(
             """SELECT d.id, d.cycle_id, d.symbol, d.created_at, d.bar_time, d.action, d.strategy, d.side AS d_side,
-                      d.top_side, o.status, o.evaluated, o.side, o.fwd_5, c.market_open,
+                      d.top_side, d.top_stop, d.top_target, o.status, o.evaluated, o.side, o.fwd_5, c.market_open,
                       c.created_at AS cycle_created, c.decision_fingerprint, c.config_hash
                FROM shadow_decisions d
                JOIN discovery_cycles c ON c.cycle_id = d.cycle_id
@@ -190,16 +190,29 @@ def window_file(path: Path) -> Path:
     return path.with_name(path.stem + ".fwd_window.json")
 
 
-def register_window(path: str | Path, *, start: datetime | None = None) -> dict:
+LOG_FILE = Path(__file__).resolve().parents[1] / "docs" / "experiments" / "LOG.md"
+
+
+def registration_line(record: dict) -> str:
+    """The exact line that must be COMMITTED to docs/experiments/LOG.md (tamper evidence: the
+    state file is gitignored and could be deleted and re-registered; the commit cannot)."""
+    return (f"FWD-v1 WINDOW REGISTERED: start_utc={record['start_utc']} "
+            f"decision_fingerprint={record['decision_fingerprint']} config_hash={record['config_hash']}")
+
+
+def register_window(path: str | Path, *, config_hash: str, start: datetime | None = None) -> dict:
     """Pin the evidence window ONCE (refuses to overwrite). Records the start, the decision-code
     fingerprint and the decision-config hash that every cycle of the window must carry."""
     from research.shadow_journal import decision_fingerprint
 
+    if not config_hash:
+        raise ValueError("config_hash is required")
     target = window_file(Path(path))
     if target.exists():
         raise FileExistsError(f"FWD window already registered: {target}")
     record = {"protocol": PROTOCOL_ID, "start_utc": (start or datetime.now(timezone.utc)).isoformat(),
-              "decision_fingerprint": decision_fingerprint(), "registered_at_utc": datetime.now(timezone.utc).isoformat()}
+              "decision_fingerprint": decision_fingerprint(), "config_hash": config_hash,
+              "registered_at_utc": datetime.now(timezone.utc).isoformat()}
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(record, indent=2), encoding="utf-8")
     return record
@@ -218,20 +231,29 @@ def _decision_minimums(rows, test: str) -> bool:
     for r in rows:
         by_cycle[r["cycle_id"]] = by_cycle.get(r["cycle_id"], 0) + 1
     usable = [r for r in rows if by_cycle[r["cycle_id"]] >= MIN_CYCLE_ROWS]
-    selected = [r for r in usable if r["strategy"] is not None and r["d_side"] == "LONG"]
+    # Same definitions as the scorer (evaluate_row): SELECTED = a chosen LONG signal with a
+    # trade-type action; COUNTERFACTUAL = no selection but a scorable best LONG evaluation.
+    selected = [r for r in usable if r["strategy"] is not None and r["d_side"] == "LONG"
+                and str(r["action"] or "").startswith(TRADE_ACTION_PREFIXES)]
     if test == "FWD1":
         return (len(selected) >= MIN_EVENTS and len({_day(r) for r in selected}) >= MIN_DAYS
                 and len({r["symbol"] for r in selected}) >= MIN_SYMBOLS)
-    counterfactual = [r for r in usable if r["strategy"] is None and r["top_side"] == "LONG"]
+    counterfactual = [r for r in usable if r["strategy"] is None and r["top_side"] == "LONG"
+                      and r["top_stop"] is not None and r["top_target"] is not None]
     paired = {_day(r) for r in selected} & {_day(r) for r in counterfactual}
     return len(selected) >= MIN_EVENTS and len(counterfactual) >= MIN_EVENTS and len(paired) >= MIN_PAIRED_DAYS
 
 
-def _window(path: Path, run_mode: str, test: str) -> tuple[list, dict]:
+def _window(path: Path, run_mode: str, test: str, log_file: Path | None = None) -> tuple[list, dict]:
     """Rows up to the binding cutoff, with the cutoff, the binding flag and the window verdict."""
     registration = _registration(path)
     if registration is None:
         return [], {"binding": False, "reason": "window not registered (run_shadow_report.py --register-fwd-window)"}
+    log = Path(log_file) if log_file is not None else LOG_FILE
+    committed = log.read_text(encoding="utf-8") if log.exists() else ""
+    if registration.get("config_hash") is None or registration_line(registration) not in committed:
+        return [], {"binding": False,
+                    "reason": "registration not recorded in docs/experiments/LOG.md (commit the registration line)"}
     start = _utc(registration["start_utc"])
     deadline_end = datetime.combine(EVIDENCE_DEADLINE + timedelta(days=1), datetime.min.time(), tzinfo=_ET)
     rows = [r for r in _population(path, run_mode)
@@ -267,6 +289,8 @@ def _window(path: Path, run_mode: str, test: str) -> tuple[list, dict]:
         reasons = list(session["reasons"])
         if fingerprints != {registration.get("decision_fingerprint")}:
             reasons.append("decision code differs from the registered fingerprint")
+        if {r["config_hash"] for r in rows} != {registration.get("config_hash")}:
+            reasons.append("decision config differs from the registered config hash")
         window.update(quality="VALID_FOR_RESEARCH" if not reasons else "INVALID_FOR_RESEARCH",
                       quality_reasons=reasons, config_hashes=session.get("config_hashes"))
     return rows, window

@@ -40,9 +40,14 @@ def main() -> None:
     run_mode = None if a.run_mode == "any" else a.run_mode
     since, until = _parse(a.since), _parse(a.until)
     if a.register_fwd_window:
-        from research.fwd_protocol import register_window
-        record = register_window(db)
-        print(f"FWD WINDOW registered | start={record['start_utc']} fingerprint={record['decision_fingerprint']}")
+        from config.config import config
+        from research.fwd_protocol import register_window, registration_line
+        from run_shadow_only import decision_config_hash, shadow_only_config
+
+        record = register_window(db, config_hash=decision_config_hash(shadow_only_config(config)))
+        print("FWD WINDOW registered. Commit this exact line to docs/experiments/LOG.md now "
+              "(the evaluator refuses a window that is not recorded there):")
+        print(registration_line(record))
     summary = summarize(db, since=since, until=until, run_mode=run_mode)
     print(render(summary))
     if a.json:

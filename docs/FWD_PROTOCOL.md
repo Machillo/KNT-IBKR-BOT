@@ -4,7 +4,7 @@ The three hypotheses were registered in `docs/experiments/LOG.md` on 2026-09-24 
 changed here. This document fixes HOW they are evaluated, before any forward result exists.
 The evaluator is `research/fwd_protocol.py`, with tests in `tests/test_fwd_protocol.py`.
 Changing any constant below is a new pre-registration (new id, new evidence window), never an
-edit of this one. The version was revised once, after the quant-methodology review of
+edit of this one. The version was revised twice (FWD-v1 r1 and r2), after the quant-methodology reviews of
 2026-09-24 and before any v2 forward row existed.
 
 **A monthly return target (e.g. "5 %/month") is NOT a statistical criterion and plays no role
@@ -27,6 +27,10 @@ multiple-testing correction cannot tell skill from luck or from market drift.
   - Commits that do not touch the decision path (docs, scorer, reports) do not change the
     fingerprint. Any change to the decision path does, and invalidates the window.
   - Rows before the registered start never count.
+  - **Tamper evidence:** the registration command prints one line. It must be COMMITTED to
+    `docs/experiments/LOG.md` immediately. The evaluator refuses a window whose registration
+    file is not recorded there. The file sits in gitignored `state/`, so on its own it could be
+    deleted and re-registered later; the commit cannot be.
 - **Binding cutoff:** the FIRST trading day, never after **2027-03-31**, on which every sample
   minimum of the test holds, or the deadline.
   - The minimums are counted from the **decisions** themselves, after the per-cycle quality
@@ -154,6 +158,14 @@ from IBKR. Only the IBKR provider may expire an unalignable row to NOT_EVALUABLE
 lacks the bars leaves the row pending.
 
 ## Invalidation (the count restarts under a NEW registration)
+The decision-code fingerprint deliberately covers ALL of `engine/`, `execution/`, `market/`,
+`portfolio/`, `risk/`, `strategies/`, `core/`, `config/config.py`,
+`research/shadow_journal.py` and `run_shadow_only.py`. It is conservative: even a harmless
+edit there (for example a log line), once deployed and restarted, invalidates FWD1/FWD2.
+**Do not patch or restart the shadow-only process on changed code during the window.**
+`research/learning.py` and `research/performance.py` are not covered. That is safe only
+because learning is frozen in shadow-only, and the gates enforce it (`learning_drift`).
+
 Any of the following invalidates the window:
 - a change inside the window of:
   - the decision-code fingerprint (any decision-path file, modified or untracked);

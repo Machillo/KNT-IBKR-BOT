@@ -12,11 +12,32 @@ from research.shadow_scoring import SCORER_VERSION, ShadowScorer
 START = datetime(2026, 10, 1, 14, 0, tzinfo=timezone.utc)
 
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def committed_log(tmp_path, monkeypatch):
+    """A stand-in for docs/experiments/LOG.md into which registrations are 'committed'."""
+    log = tmp_path / "LOG.md"
+    log.write_text("# log" + chr(10), encoding="utf-8")
+    monkeypatch.setattr(fwd_protocol, "LOG_FILE", log)
+    return log
+
+
+def _register(path, start, record_in_log=True, config_hash="cfg-test"):
+    record = fwd_protocol.register_window(path, config_hash=config_hash, start=start)
+    if record_in_log:
+        with fwd_protocol.LOG_FILE.open("a", encoding="utf-8") as fh:
+            fh.write(fwd_protocol.registration_line(record) + chr(10))
+    return record
+
+
 def build(path, *, days=45, cycles_per_day=2, selected_effect=0.0, cf_effect=0.0, noise=0.05, seed=1,
-          leak=False, late_effect=None, register=True, unscored_day=None, start=START):
+          leak=False, late_effect=None, register=True, unscored_day=None, start=START, record_in_log=True,
+          registered_config="cfg-test"):
     rng = Random(seed)
     if register:
-        fwd_protocol.register_window(path, start=datetime.now(timezone.utc) - timedelta(minutes=1))
+        _register(path, datetime.now(timezone.utc) - timedelta(minutes=1), record_in_log, registered_config)
     j = ShadowJournal(path)
     ShadowScorer(path)
     outcomes = []
@@ -103,10 +124,19 @@ def test_student_t_critical_values():
 def test_unregistered_window_is_never_evaluated(tmp_path):
     out = fwd_protocol.evaluate_fwd1(build(tmp_path / "h.db", selected_effect=0.8, register=False))
     assert out["decision"] == "INCONCLUSIVE" and "not registered" in out["reason"]
-    fwd_protocol.register_window(tmp_path / "x.db")
-    import pytest
+    fwd_protocol.register_window(tmp_path / "x.db", config_hash="c")
     with pytest.raises(FileExistsError):
-        fwd_protocol.register_window(tmp_path / "x.db")            # registered once, never moved
+        fwd_protocol.register_window(tmp_path / "x.db", config_hash="c")   # registered once, never moved
+
+
+def test_registration_must_be_committed_to_the_log(tmp_path):
+    out = fwd_protocol.evaluate_fwd1(build(tmp_path / "l.db", selected_effect=0.8, record_in_log=False))
+    assert out["decision"] == "INCONCLUSIVE" and "LOG.md" in out["reason"]
+
+
+def test_config_differing_from_the_registration_invalidates_the_window(tmp_path):
+    out = fwd_protocol.evaluate_fwd1(build(tmp_path / "m.db", selected_effect=0.8, registered_config="intended"))
+    assert out["decision"] == "INCONCLUSIVE" and "invalid" in out["reason"]
 
 
 def test_cutoff_is_counted_from_decisions_and_waits_for_scoring(tmp_path):

@@ -4,7 +4,7 @@
 
     selector (regime, strategies, threshold / NO_TRADE)
     → side policy (shorts disabled unless explicitly allowed; executor refuses them too)
-    → optional research filters (replay only; runtime passes none)
+    → optional ``filters`` hook (unused today; research filters live in the replay runner)
     → PortfolioAllocator (risk % × volatility multiplier, notional cap, whole shares)
     → PortfolioAdmissionCoordinator (RiskManager, PortfolioBrain, CrossExposureGuard)
 

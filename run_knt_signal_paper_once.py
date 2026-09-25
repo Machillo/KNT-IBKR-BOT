@@ -12,7 +12,7 @@ from engine.shadow import ShadowTradingEngine
 from engine.supervisor import PaperSupervisor
 from execution.paper import PaperExecutionEngine, PaperExecutionRequest, PaperExecutionResult
 from market.intelligence import MarketIntelligenceService
-from market.session import USStockSessionPolicy
+from market.session import BrokerCalendarSessionPolicy
 from portfolio.state import PortfolioStateService
 from utils.logger import logger
 
@@ -85,7 +85,8 @@ async def main() -> None:
                 f"open_orders={before.open_order_count}"
             )
 
-        session_policy = USStockSessionPolicy()
+        session_policy = BrokerCalendarSessionPolicy()
+        await session_policy.refresh(ib)
         session = session_policy.state()
         if not session.market_open:
             raise RuntimeError(
@@ -125,6 +126,7 @@ async def main() -> None:
             research_budget=0,
             risk_manager=context.risk,
             paper_executor=executor,
+            session_policy=session_policy,
         )
 
         logger.warning(

@@ -44,7 +44,8 @@ class ShadowTradingEngine:
     def __init__(self, ib, market_intelligence, minimum_signal_score: float = 55.0,
                  max_candidates: int = 12, quote_budget: int = 40, research_budget: int = 2,
                  risk_manager: RiskManager | None = None,
-                 paper_executor: PaperExecutionEngine | None = None) -> None:
+                 paper_executor: PaperExecutionEngine | None = None,
+                 session_policy=None) -> None:
         self.ib = ib
         self.intelligence = market_intelligence
         self.history = HistoricalDataService(ib)
@@ -53,7 +54,7 @@ class ShadowTradingEngine:
         self.research = ContinuousResearchCoordinator(self.history, self.performance_store)
         self.research_scheduler = ContinuousResearchScheduler(self.research, self.performance_store,
                                                                max_attempts_per_cycle=research_budget)
-        self.session_policy = USStockSessionPolicy()
+        self.session_policy = session_policy or USStockSessionPolicy()
         self.risk_manager = risk_manager
         risk_pct = 0.01 if risk_manager is None else min(0.01, risk_manager.settings.max_trade_risk_pct)
         max_position_pct = 0.10 if risk_manager is None else risk_manager.settings.max_position_pct
@@ -156,6 +157,9 @@ class ShadowTradingEngine:
         history_by_symbol: dict[str, list[PriceBar]] = {}
         position_returns = {} if portfolio_state is None else await self._position_returns(portfolio_state)
 
+        refresh = getattr(self.session_policy, "refresh", None)
+        if refresh is not None:
+            await refresh(self.ib)  # read-only broker calendar; failure keeps the market CLOSED
         session = self.session_policy.state()
         logger.info("MARKET SESSION | asset=US_STOCKS session=%s market_open=%s local=%s",
                     session.session, session.market_open, session.local_time.isoformat())

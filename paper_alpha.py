@@ -13,7 +13,7 @@ from engine.supervisor import PaperSupervisor
 from core.paper_guard import mask_account
 from execution.paper import PaperExecutionEngine, autonomous_paper_armed
 from market.intelligence import MarketIntelligenceService
-from market.session import USStockSessionPolicy
+from market.session import BrokerCalendarSessionPolicy
 from portfolio.history import PortfolioHistoryStore
 from portfolio.state import PortfolioStateService
 from utils.logger import logger
@@ -87,6 +87,8 @@ async def main() -> None:
             raise RuntimeError(f"Risk supervisor locked: {context.risk.lock_reason}")
 
         intelligence = MarketIntelligenceService(ib, market_data)
+        # Regular-hours clock AND IBKR liquid-hours calendar (holidays/half days); closed until refreshed.
+        session_policy = BrokerCalendarSessionPolicy()
         # Orders need BOTH the config flag and the literal per-session ACK, plus a
         # session verified as PAPER by account prefix (not just by port).
         armed = autonomous_paper_armed(
@@ -101,7 +103,7 @@ async def main() -> None:
             enabled=armed,
             paper_guard=supervisor.paper_guard,
             risk_manager=context.risk,
-            session_policy=USStockSessionPolicy(),
+            session_policy=session_policy,
         )
         shadow = ShadowTradingEngine(
             ib,
@@ -110,6 +112,7 @@ async def main() -> None:
             quote_budget=config.runtime.universe_quote_budget,
             risk_manager=context.risk,
             paper_executor=paper_executor,
+            session_policy=session_policy,
         )
         portfolio_state = PortfolioStateService(ib)
         portfolio_history = PortfolioHistoryStore()

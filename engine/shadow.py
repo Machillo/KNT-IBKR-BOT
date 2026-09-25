@@ -16,6 +16,7 @@ from portfolio.state import PortfolioState
 from research.coordinator import ContinuousResearchCoordinator
 from research.performance import StrategyPerformanceStore
 from research.scheduler import ContinuousResearchScheduler
+from research.shadow_journal import ShadowJournal
 from risk.risk_manager import RiskManager
 from strategies.library import PairSignal, PairsTradingStrategy
 from utils.logger import logger
@@ -61,6 +62,7 @@ class ShadowTradingEngine:
         self.allocator = PortfolioAllocator(risk_pct=risk_pct, max_position_pct=max_position_pct)
         self.admission = None if risk_manager is None else PortfolioAdmissionCoordinator(risk_manager)
         self.risk_decisions = RiskDecisionStore()
+        self.journal = ShadowJournal()
         self.paper_executor = paper_executor
         self.pairs = PairsTradingStrategy()
         self.max_candidates = max_candidates
@@ -91,6 +93,25 @@ class ShadowTradingEngine:
         if bid and ask and 0 < bid <= ask:
             return (bid + ask) / 2.0, data_type
         return None, data_type
+
+    def _journal_decision(self, cycle_id, candidate, bars, selection, action, reason) -> None:
+        chosen = selection.selected
+        sig = None if chosen is None else chosen.signal
+        try:
+            self.journal.record_decision(
+                cycle_id, symbol=candidate.symbol,
+                con_id=int(getattr(candidate.contract, "conId", 0) or 0),
+                bar_time=bars[-1].time if bars else None, timeframe="1 hour",
+                regime=selection.regime.regime.value, action=action,
+                strategy=None if chosen is None else chosen.strategy,
+                side=None if sig is None else sig.side.value,
+                score=None if chosen is None else float(chosen.adjusted_score),
+                entry=None if sig is None else sig.entry, stop=None if sig is None else sig.stop,
+                target=None if sig is None else sig.target,
+                reason=reason or selection.reason,
+            )
+        except Exception as exc:
+            logger.warning("SHADOW JOURNAL decision write failed | symbol=%s error=%s", candidate.symbol, exc)
 
     @staticmethod
     def _return_series(bars: list[PriceBar], lookback: int = 60) -> tuple[float, ...]:
@@ -151,6 +172,11 @@ class ShadowTradingEngine:
         ranked = await self.intelligence.ranked_us_opportunity_universe(
             rows_per_plan=rows_per_scanner, quote_budget=self.quote_budget)
         candidates = [x for x in ranked if x.eligible][:self.max_candidates]
+        cycle_id = self.journal.new_cycle_id()
+        try:
+            self.journal.record_discovery(cycle_id, ranked)
+        except Exception as exc:  # journaling must never break the loop
+            logger.warning("SHADOW JOURNAL discovery write failed | error=%s", exc)
         logger.info("SHADOW FUNNEL | ranked=%s eligible=%s deep_analysis=%s",
                     len(ranked), sum(1 for x in ranked if x.eligible), len(candidates))
         decisions: list[ShadowDecision] = []
@@ -238,6 +264,7 @@ class ShadowTradingEngine:
                                         admission.reason, action)
 
                 decisions.append(ShadowDecision(candidate.symbol, candidate.score, selection, action, portfolio_reason))
+                self._journal_decision(cycle_id, candidate, bars, selection, action, portfolio_reason)
                 logger.info(
                     "SHADOW DECISION | symbol=%s liquidity=%.2f regime=%s adx=%.1f ema_slope=%.2f%% vol_stress=%.2f action=%s selected=%s top=%s reason=%s portfolio_reason=%s",
                     candidate.symbol, candidate.score, selection.regime.regime.value,

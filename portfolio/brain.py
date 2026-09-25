@@ -87,7 +87,9 @@ class PortfolioBrain:
                                      snapshot.remaining_daily_loss_budget)
 
         minimum_cash_reserve = snapshot.net_liquidation * self.cash_reserve_pct
-        projected_cash = snapshot.cash - opportunity.proposed_notional
+        # Working entry orders will consume cash when they fill (broker cash does not reserve
+        # it), so they count against the reserve exactly like gross exposure does.
+        projected_cash = snapshot.cash - snapshot.pending_order_notional - opportunity.proposed_notional
         if projected_cash < minimum_cash_reserve:
             return PortfolioDecision(False, "cash_reserve_limit", projected_exposure,
                                      snapshot.remaining_daily_loss_budget)

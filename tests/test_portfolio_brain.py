@@ -71,3 +71,16 @@ def test_portfolio_brain_rejects_cash_reserve_breach():
     )
     assert decision.approved is False
     assert decision.reason == "cash_reserve_limit"
+
+
+def test_pending_entries_count_against_the_cash_reserve():
+    """Two same-cycle entries must not each pass the reserve on the same (unreserved) cash."""
+    from portfolio.brain import PortfolioBrain, PortfolioOpportunity, PortfolioSnapshot
+
+    brain = PortfolioBrain(max_gross_exposure_pct=1.0, max_single_position_pct=1.0, cash_reserve_pct=0.05)
+    opp = PortfolioOpportunity("B", "STK", proposed_notional=50_000, proposed_risk=100)
+    free = PortfolioSnapshot(100_000, 100_000, 0, 0, 0, 0, 10_000)
+    assert brain.evaluate(free, opp).approved
+    with_pending = PortfolioSnapshot(100_000, 100_000, 0, 0, 50_000, 0, 10_000)
+    decision = brain.evaluate(with_pending, opp)
+    assert (decision.approved, decision.reason) == (False, "cash_reserve_limit")

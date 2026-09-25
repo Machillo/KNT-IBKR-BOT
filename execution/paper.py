@@ -13,6 +13,7 @@ import sqlite3
 from core.exceptions import RiskRejectedError
 from core.order_manager import OrderManager
 from core.paper_guard import PaperGuardError, PaperOrderGuard
+from execution import pretrade
 
 # Literal acknowledgement required, in addition to AUTONOMOUS_TRADING_ENABLED=true,
 # before the long-running loop may hand setups to the paper executor.
@@ -357,31 +358,34 @@ class PaperExecutionEngine:
             return self._reject(request, "BLOCKED", guard_reason)
         if not self._connected():
             return self._reject(request, "BLOCKED", "broker_disconnected")
-        if not self._session_allows(contract):
-            return self._reject(request, "BLOCKED", "market_session_closed")
         if self.risk_manager is None:
             return self._reject(request, "BLOCKED", "risk_manager_required")
-        if bool(getattr(self.risk_manager, "trading_locked", False)):
-            return self._reject(request, "BLOCKED", "risk_manager_locked")
-        if request.quantity <= 0 or request.entry_price <= 0 or request.stop_price <= 0 or request.target_price <= 0:
-            return self._reject(request, "REJECTED", "invalid_execution_request")
-        side = request.side.upper()
-        if side not in {"LONG", "SHORT"}:
-            return self._reject(request, "REJECTED", "unsupported_side")
-        if side == "SHORT" and not self.allow_short:
-            return self._reject(request, "REJECTED", "short_entries_disabled")
         today = datetime.now(timezone.utc).date().isoformat()
-        if self.journal.submitted_count_on(today) >= self.max_entries_per_day:
-            return self._reject(request, "BLOCKED", "daily_entry_limit_reached")
-
-        normalized = self._normalize_request(contract, request)
-        if normalized is None:
-            return self._reject(request, "REJECTED", "unsupported_instrument_or_quantity")
-        if not self._valid_geometry(normalized):
-            return self._reject(normalized, "REJECTED", "invalid_price_geometry")
-        reference_reason = self._reference_refusal(normalized)
-        if reference_reason is not None:
-            return self._reject(normalized, "REJECTED", reference_reason)
+        # Pure checks shared with order-free shadow and replay (execution/pretrade.py).
+        check = pretrade.evaluate(
+            pretrade.PreTradeRequest(
+                side=request.side, quantity=float(request.quantity), entry_price=float(request.entry_price),
+                stop_price=float(request.stop_price), target_price=float(request.target_price),
+                sec_type=str(getattr(contract, "secType", "") or ""), reference_price=request.reference_price,
+                market_data_type=request.market_data_type,
+            ),
+            pretrade.PreTradeContext(
+                session_open=self._session_allows(contract),
+                trading_locked=bool(getattr(self.risk_manager, "trading_locked", False)),
+                entries_today=self.journal.submitted_count_on(today),
+                max_entries_per_day=self.max_entries_per_day,
+                allow_short=self.allow_short,
+                max_reference_deviation_pct=self.max_reference_deviation_pct,
+                reference_available=True,
+            ),
+        )
+        normalized = replace(request, entry_price=check.request.entry_price, stop_price=check.request.stop_price,
+                             target_price=check.request.target_price)
+        if not check.passed:
+            reported = normalized if check.reason in ("invalid_price_geometry",) or check.reason.startswith(
+                ("reference_", "fresh_", "entry_far")) else request
+            return self._reject(reported, check.status, check.reason)
+        side = request.side.upper()
         risk_reason = self._hard_risk_refusal(normalized)
         if risk_reason is not None:
             return self._reject(normalized, "REJECTED", risk_reason)

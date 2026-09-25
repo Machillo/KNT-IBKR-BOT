@@ -150,10 +150,12 @@ def _corr(a: tuple[float, ...], b: tuple[float, ...]) -> float | None:
 
 
 def _key(value) -> datetime:
+    """Exchange wall-clock time without tzinfo, so calendar protocol boundaries compare
+    uniformly across profiles (cached intraday bars carry ET offsets; daily bars are dates)."""
     dt = as_datetime(value)
     if dt is None:
         raise ValueError(f"unparseable bar time: {value!r}")
-    return dt
+    return dt.replace(tzinfo=None)
 
 
 class PipelineBacktest:

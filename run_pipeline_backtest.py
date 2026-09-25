@@ -1,8 +1,10 @@
 """Offline pipeline backtest on reports/history_cache (no IBKR connection).
 
-Segments on the shared timeline: TRAIN (first 60 %), VALIDATION (next 20 %),
-DEVELOPMENT (TRAIN+VALIDATION), HOLDOUT (last 20 %). HOLDOUT is only evaluated with
---confirm-holdout, for a configuration frozen in docs/experiments BEFORE running it.
+Default segments follow the calendar protocol in research/protocol.py (TRAIN <
+2023-09-01 <= VALIDATION < 2025-03-01 <= HOLDOUT), shared by every cached profile.
+``--split fraction`` reproduces legacy per-profile 60/20/20 splits for diagnostics.
+HOLDOUT is only evaluated with --confirm-holdout, for a configuration frozen in
+docs/experiments BEFORE running it.
 """
 from __future__ import annotations
 
@@ -15,6 +17,7 @@ from backtest.costs import BASELINE, SEVERE, STRESSED
 from backtest.universes import VALIDATION_UNIVERSES, universe_symbols
 from research.pipeline_backtest import PipelineBacktest, PipelineConfig, time_split
 from research.pipeline_variants import VARIANTS
+from research.protocol import PROTOCOL, SEGMENTS
 from run_monthly_target_suite import PROFILES, _cache_path, _load_bars
 
 COSTS = {"baseline": BASELINE, "stressed": STRESSED, "severe": SEVERE}
@@ -30,7 +33,10 @@ def load(universe: str, profile: str, cache_dir: str) -> dict:
     return data
 
 
-def segment_bounds(bt: PipelineBacktest, segment: str):
+def segment_bounds(bt: PipelineBacktest, segment: str, split: str = "calendar"):
+    """Calendar protocol boundaries (default) or legacy per-profile fractions."""
+    if split == "calendar":
+        return SEGMENTS[segment]
     v, h = time_split(bt.timeline())
     return {"train": (None, v), "validation": (v, h), "development": (None, h), "holdout": (h, None)}[segment]
 
@@ -65,7 +71,7 @@ def summarize(result, *, detail: bool = True) -> str:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--profile", choices=list(PROFILES), default="intraday_1y")
+    ap.add_argument("--profile", choices=list(PROFILES), default="long_10y")
     ap.add_argument("--universe", choices=[*VALIDATION_UNIVERSES, "all"], default="all")
     ap.add_argument("--segment", choices=["train", "validation", "development", "holdout"], default="train")
     ap.add_argument("--variant", choices=list(VARIANTS), default="live_default")
@@ -73,14 +79,15 @@ def main() -> None:
     ap.add_argument("--equity", type=float, default=100_000.0)
     ap.add_argument("--cache-dir", default="reports/history_cache")
     ap.add_argument("--confirm-holdout", action="store_true")
+    ap.add_argument("--split", choices=["calendar", "fraction"], default="calendar")
     a = ap.parse_args()
     if a.segment == "holdout" and not a.confirm_holdout:
         ap.error("HOLDOUT is single-use. Freeze the configuration in docs/experiments first, then pass --confirm-holdout.")
     data = load(a.universe, a.profile, a.cache_dir)
     config: PipelineConfig = VARIANTS[a.variant].variant(cost_model=COSTS[a.cost], initial_equity=a.equity)
     bt = PipelineBacktest(data, config)
-    start, end = segment_bounds(bt, a.segment)
-    print(f"PIPELINE | profile={a.profile} universe={a.universe} symbols={len(data)} segment={a.segment.upper()} "
+    start, end = segment_bounds(bt, a.segment, a.split)
+    print(f"PIPELINE | protocol={PROTOCOL if a.split == 'calendar' else 'fraction'} profile={a.profile} universe={a.universe} symbols={len(data)} segment={a.segment.upper()} "
           f"cost={a.cost} equity={a.equity:.0f} window=[{start or 'begin'} .. {end or 'end'})")
     if a.segment == "holdout":
         print("*** HOLDOUT EVALUATION — record the result; do not tune against it. ***")

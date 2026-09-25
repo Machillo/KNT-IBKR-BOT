@@ -19,6 +19,13 @@ controls, omitting evidence, accepting weak statistics, or skipping a required r
   `git diff`, not by re-reading modules.
 - Dump large multi-file reads to a scratch file only when you truly need all of it.
 
+## Edit safely (cheap mistakes are the expensive ones)
+- Prefer the Edit/Write tools for code and docs. If a script must rewrite files on Windows,
+  always pass `encoding="utf-8"` to `read_text`/`write_text`: the default cp1252 codec can
+  fail mid-write and truncate the file.
+- Avoid backslash escapes (`\b`, `\n`, line continuations) inside heredoc patch scripts; they
+  are easily mangled. After any scripted edit, check `git diff --stat` and file sizes.
+
 ## Run less, escalate deliberately
 - Focused test → module tests → full suite (always full suite before commit).
 - Pipe long outputs through `tail`/`grep`; print summaries (counts, aggregates), never raw logs,

@@ -22,7 +22,10 @@ Gen4 selected on test; full-sample context promotions steering the live selector
 | 5 | Context promotions off in operational selector | done | 96329f4 |
 | — | Quant review fixes (Gen2 holdout ranking BLOCKER, borrow, MTM, overlap) | done | 15288fb |
 | 6 | Pipeline (selector) backtest + runner | done | 2521a8f |
-| 7 | Research protocol v1 (calendar split) + pre-registered H0–H6 | running | — |
+| 7 | Research protocol v1 (calendar split) + pre-registered H0–H6 | done: all REJECT | d4ef686, c87cb8c |
+| — | Broker-calendar session policy (holidays/half days, fail closed) | done | bfd47a4 |
+| — | Static order-path guard tests; README/.env.example | done | 616c67f, fc9f521 |
+| 8 | Round 2 H7–H9 (symbol/market trend filter, ATR brackets) | running | 4ce5014 |
 
 Independent reviews: execution-safety (no blockers; SHOULD-FIX all fixed), quant-methodology
 (1 blocker + should-fix all fixed). Tests: 258 → see latest commit.

@@ -47,6 +47,7 @@ async def main_async(args) -> None:
     from market.intelligence import MarketIntelligenceService
     from market.session import BrokerCalendarSessionPolicy
     from portfolio.state import PortfolioStateService
+    from risk.risk_manager import RiskManager
     from utils.logger import logger
 
     cfg = shadow_only_config(config)
@@ -58,9 +59,12 @@ async def main_async(args) -> None:
         supervisor = PaperSupervisor(ib, cfg, state_dir=STATE_DIR / "shadow_only")
         context, account = await supervisor.initialize()
         intelligence = MarketIntelligenceService(ib, MarketDataService(ib, cfg.market_data))
+        # Research copy of the hard risk manager: same limits, mirrors every real lock except the
+        # expected readonly-session lock (see research_lock).
+        research_risk = RiskManager(cfg.risk)
         shadow = ShadowTradingEngine(
             ib, intelligence, max_candidates=cfg.runtime.shadow_max_candidates,
-            quote_budget=cfg.runtime.universe_quote_budget, risk_manager=context.risk,
+            quote_budget=cfg.runtime.universe_quote_budget, risk_manager=research_risk,
             paper_executor=None, session_policy=BrokerCalendarSessionPolicy(),
         )
         states = PortfolioStateService(ib)
@@ -69,6 +73,10 @@ async def main_async(args) -> None:
         while args.cycles == 0 or cycle < args.cycles:
             try:
                 await supervisor.evaluate()
+                if research_lock(context.risk):
+                    research_risk.lock_trading(context.risk.lock_reason)
+                else:
+                    research_risk.trading_locked, research_risk.lock_reason = False, ""
                 snapshot = await supervisor.accounts.snapshot(context.account, log=False)
                 state = states.build(snapshot, starting_equity=context.starting_equity,
                                      daily_loss_limit_pct=cfg.risk.max_daily_loss_pct,

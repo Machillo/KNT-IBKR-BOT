@@ -24,7 +24,7 @@ def journal_with_decisions(path):
     j = ShadowJournal(path)
     c = j.new_cycle_id()
     trade = j.record_decision(c, symbol="AAA", con_id=1, bar_time=T0, timeframe="1 hour", regime="TRENDING",
-                              action="WOULD_LONG", strategy="breakout_v1", side="LONG", score=70.0,
+                              action="SHADOW_SUBMIT", strategy="breakout_v1", side="LONG", score=70.0,
                               entry=100.0, stop=95.0, target=110.0, reason="best",
                               context={"reference_close": 100.0}, created_at=DECIDED)
     no_trade = j.record_decision(c, symbol="BBB", con_id=2, bar_time=T0, timeframe="1 hour", regime="MIXED",
@@ -91,7 +91,7 @@ def test_scoring_is_idempotent_and_resumes_pending(tmp_path):
     journal_with_decisions(db)
     scorer = ShadowScorer(db, costs=ZERO)
     short = InMemoryBarsProvider({"AAA": bars([(100, 101, 99, 100)] * 3), "BBB": [], "CCC": bars(FLAT20[:3])})
-    first = asyncio.run(scorer.score_pending(short))
+    first = asyncio.run(scorer.score_pending(short, now=DECIDED + timedelta(days=1)))
     assert first["PENDING_DATA"] == 3 and first["FINAL"] == 0
     second = asyncio.run(scorer.score_pending(provider()))
     assert second["FINAL"] == 3
@@ -114,7 +114,7 @@ def test_repeated_decisions_on_the_same_bar_are_flagged_and_not_double_counted(t
     db = tmp_path / "s.db"
     j, trade, _, _ = journal_with_decisions(db)
     again = j.record_decision(j.new_cycle_id(), symbol="AAA", con_id=1, bar_time=T0, timeframe="1 hour",
-                              regime="TRENDING", action="WOULD_LONG", strategy="breakout_v1", side="LONG",
+                              regime="TRENDING", action="SHADOW_SUBMIT", strategy="breakout_v1", side="LONG",
                               score=70.0, entry=100.0, stop=95.0, target=110.0, reason="repeat",
                               context={"reference_close": 100.0}, created_at=DECIDED)
     scorer = ShadowScorer(db, costs=ZERO)
@@ -131,7 +131,7 @@ def test_series_without_the_decision_bar_is_not_scored(tmp_path):
     scorer = ShadowScorer(db, costs=ZERO)
     # Provider window starts weeks later (e.g. a fixed "last 30 days" request): must not freeze outcomes.
     late = {s: bars(FLAT20, start=500) for s in ("AAA", "BBB", "CCC")}
-    counts = asyncio.run(scorer.score_pending(InMemoryBarsProvider(late)))
+    counts = asyncio.run(scorer.score_pending(InMemoryBarsProvider(late), now=DECIDED + timedelta(days=1)))
     assert counts["FINAL"] == 0 and counts["PENDING_DATA"] == 3
 
 
@@ -153,7 +153,7 @@ def test_price_action_before_the_decision_is_not_tradable(tmp_path):
     j = ShadowJournal(db)
     # Decision recorded 2h after its bar: the next bar (which hit the target) started before it.
     j.record_decision(j.new_cycle_id(), symbol="AAA", con_id=1, bar_time=T0, timeframe="1 hour", regime="TRENDING",
-                      action="WOULD_LONG", strategy="s", side="LONG", score=70.0, entry=100.0, stop=95.0,
+                      action="SHADOW_SUBMIT", strategy="s", side="LONG", score=70.0, entry=100.0, stop=95.0,
                       target=110.0, reason="late", context={"reference_close": 100.0},
                       created_at=T0 + timedelta(hours=2))
     series = [PriceBar(T0, 100, 100, 100, 100, 1)] + bars([(100, 111, 99, 110)] + [(100, 101, 99, 100)] * 30)
@@ -175,7 +175,78 @@ def test_report_measures_selected_excess_versus_same_cycle(tmp_path):
     journal_with_decisions(db)
     scorer = ShadowScorer(db, costs=ZERO)
     asyncio.run(scorer.score_pending(provider()))
-    report = scorer.report()
-    # AAA (selected) +10 % over 5 bars; cycle mean of AAA, BBB (+10 %) and CCC (+2 %) = 7.33 %.
+    report = scorer.report(min_cycle_rows=3)
+    # AAA (selected) +10 % over 5 bars; LEAVE-ONE-OUT benchmark = mean of BBB (+10 %) and CCC (+2 %).
     sel = report["selected_vs_cycle_fwd5"]
-    assert sel["n"] == 1 and sel["mean_excess_pct"] == pytest.approx(10.0 - (10.0 + 10.0 + 2.0) / 3, abs=0.05)
+    assert sel["n"] == 1 and sel["mean_excess_pct"] == pytest.approx(10.0 - (10.0 + 2.0) / 2, abs=0.05)
+    # Default protocol minimum (5 rows per cycle): this 3-row cycle is excluded, not averaged.
+    default = scorer.report()["selected_vs_cycle_fwd5"]
+    assert (default["n"], default["cycles_excluded_small"]) == (0, 1)
+
+
+
+def _one(db, action, cycle_open=None):
+    j = ShadowJournal(db)
+    c = j.new_cycle_id()
+    if cycle_open is not None:
+        j.record_cycle(c, universe=None, scanners=[], rows_per_scanner=None, quote_budget=None,
+                       market_data_type=1, session=None, market_open=cycle_open)
+    j.record_decision(c, symbol="AAA", con_id=1, bar_time=T0, timeframe="1 hour", regime="TRENDING",
+                      action=action, strategy="breakout_v1", side="LONG", score=70.0, entry=100.0, stop=95.0,
+                      target=110.0, reason="x", context={"reference_close": 100.0}, created_at=DECIDED)
+    scorer = ShadowScorer(db, costs=ZERO)
+    asyncio.run(scorer.score_pending(provider()))
+    with sqlite3.connect(db) as conn:
+        return conn.execute("SELECT evaluated, filled, exit_reason, executable, fwd_5, provider "
+                            "FROM shadow_outcomes").fetchone()
+
+
+@pytest.mark.parametrize("action,cycle_open,credited", [
+    ("SHADOW_SUBMIT", None, True),
+    ("PAPER_SUBMITTED", None, True),
+    ("SHADOW_BLOCKED", 1, False),          # blocked by a pre-trade check: never a fill
+    ("PAPER_BLOCKED", 1, False),
+    ("PORTFOLIO_REJECTED", 1, False),
+    ("WOULD_LONG", 1, False),              # no portfolio state: never transmitted
+    ("APPROVED_LONG", 1, True),            # legacy v1 row, session open
+    ("APPROVED_LONG", 0, False),           # legacy v1 row decided after the close: executor refuses
+])
+def test_only_executable_decisions_are_credited_with_fills(tmp_path, action, cycle_open, credited):
+    evaluated, filled, reason, executable, fwd5, provider_name = _one(tmp_path / "s.db", action, cycle_open)
+    assert evaluated == "SELECTED" and fwd5 is not None and provider_name == "InMemoryBarsProvider"
+    assert bool(executable) is credited
+    if not credited:
+        assert (filled, reason) == (0, "not_executable")
+
+
+def test_unalignable_rows_expire_instead_of_staying_pending_forever(tmp_path):
+    db = tmp_path / "s.db"
+    journal_with_decisions(db)
+    scorer = ShadowScorer(db, costs=ZERO)
+    late = InMemoryBarsProvider({s: bars(FLAT20, start=500) for s in ("AAA", "BBB", "CCC")})
+    counts = asyncio.run(scorer.score_pending(late, now=DECIDED + timedelta(days=15)))
+    assert counts["NOT_EVALUABLE"] == 3
+
+
+def test_provider_error_skips_the_row_without_stopping_the_run(tmp_path):
+    db = tmp_path / "s.db"
+    journal_with_decisions(db)
+
+    class Flaky(InMemoryBarsProvider):
+        def bars_from(self, symbol, con_id, at, timeframe):
+            if symbol == "BBB":
+                raise ConnectionError("pacing")
+            return super().bars_from(symbol, con_id, at, timeframe)
+    scorer = ShadowScorer(db, costs=ZERO)
+    counts = asyncio.run(scorer.score_pending(Flaky(provider().data)))
+    assert counts["PROVIDER_ERROR"] == 1 and counts["FINAL"] == 2
+
+
+def test_candidate_error_rows_are_not_evaluable(tmp_path):
+    db = tmp_path / "s.db"
+    j = ShadowJournal(db)
+    j.record_decision(j.new_cycle_id(), symbol="AAA", con_id=1, bar_time=None, timeframe="1 hour",
+                      regime="UNKNOWN", action="CANDIDATE_ERROR", strategy=None, side=None, score=None,
+                      entry=None, stop=None, target=None, reason="TimeoutError")
+    counts = asyncio.run(ShadowScorer(db, costs=ZERO).score_pending(provider()))
+    assert counts["NOT_EVALUABLE"] == 1

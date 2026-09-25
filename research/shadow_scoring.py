@@ -32,9 +32,27 @@ from backtest.metrics import as_datetime
 from market.history import PriceBar
 from research.shadow_journal import ShadowJournal, score_decision
 
-SCORER_VERSION = "v1"
+# v2: bracket fills only for EXECUTABLE decisions (would really have been transmitted),
+# unalignable rows expire to NOT_EVALUABLE, provider recorded, leave-one-out cycle benchmark.
+SCORER_VERSION = "v2"
 FORWARD_HORIZONS = (1, 5, 20)
 MAX_BRACKET_BARS = 60
+UNALIGNED_EXPIRY_DAYS = 14          # ~10 trading days
+MIN_CYCLE_ROWS = 5                  # FWD protocol: cycles with fewer scored rows are excluded
+EXECUTABLE_ACTIONS = ("PAPER_SUBMITTED", "SHADOW_SUBMIT")
+
+
+def is_executable(action: str, market_open) -> bool:
+    """Would this decision really have been transmitted?
+
+    v2 rows say so explicitly (PAPER_SUBMITTED / SHADOW_SUBMIT). Legacy v1 rows only had
+    APPROVED_*; they count only if the cycle's session was open (a decision on the session's
+    last bar, taken after the close, is refused by the executor and must not be credited).
+    """
+    action = str(action or "")
+    if action in EXECUTABLE_ACTIONS:
+        return True
+    return action.startswith("APPROVED_") and market_open is not None and int(market_open) == 1
 
 
 def _naive(value) -> datetime | None:
@@ -96,9 +114,10 @@ class ScoredOutcome:
     mfe_pct: float | None
     bars_held: int
     forward: dict[int, float | None]
+    executable: bool = False
 
 
-TRADE_ACTION_PREFIXES = ("WOULD_", "APPROVED_", "PAPER_", "PORTFOLIO_REJECTED")
+TRADE_ACTION_PREFIXES = ("WOULD_", "APPROVED_", "PAPER_", "PORTFOLIO_REJECTED", "SHADOW_")
 
 
 def _tick(price: float) -> float:
@@ -158,12 +177,20 @@ def evaluate_row(row: sqlite3.Row, bars_after: list[PriceBar], costs: CostModel 
             status = "PENDING_DATA"
         return ScoredOutcome(int(row["id"]), status, None, None, None, False, None, None, None, None, 0, forward)
 
+    complete_forward = all(v is not None for v in forward.values())
+    market_open = row["market_open"] if "market_open" in keys else None
+    executable = kind == "SELECTED" and is_executable(action, market_open)
+    if kind == "SELECTED" and not executable:
+        # Selector output that would NOT have been transmitted (blocked, rejected, session
+        # closed): forward returns only — never a credited fill.
+        status = "FINAL" if complete_forward else "PENDING_DATA"
+        return ScoredOutcome(int(row["id"]), status, kind, strategy, side, False, "not_executable",
+                             None, None, None, 0, forward, False)
     out = score_decision(side, _tick(float(stop)), _tick(float(target)), bars_after, costs, MAX_BRACKET_BARS,
                          limit=None if limit is None else _tick(float(limit)))
-    complete_forward = all(v is not None for v in forward.values())
     status = "FINAL" if (bars_after and out.resolved and complete_forward) else "PENDING_DATA"
     return ScoredOutcome(int(row["id"]), status, kind, strategy, side, out.filled, out.exit_reason,
-                         out.return_pct, out.mae_pct, out.mfe_pct, out.bars_held, forward)
+                         out.return_pct, out.mae_pct, out.mfe_pct, out.bars_held, forward, executable)
 
 
 class ShadowScorer:
@@ -196,6 +223,10 @@ class ShadowScorer:
                 )
                 """
             )
+            existing = {r[1] for r in conn.execute("PRAGMA table_info(shadow_outcomes)")}
+            for name, ddl in (("executable", "INTEGER"), ("provider", "TEXT")):
+                if name not in existing:
+                    conn.execute("ALTER TABLE shadow_outcomes ADD COLUMN " + name + " " + ddl)
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path)
@@ -205,62 +236,80 @@ class ShadowScorer:
     def pending_rows(self) -> list[sqlite3.Row]:
         with self._connect() as conn:
             return conn.execute(
-                """SELECT d.* FROM shadow_decisions d
+                """SELECT d.*, c.market_open AS market_open FROM shadow_decisions d
+                   LEFT JOIN discovery_cycles c ON c.cycle_id=d.cycle_id
                    LEFT JOIN shadow_outcomes o ON o.decision_id=d.id AND o.scorer_version=?
                    WHERE o.decision_id IS NULL OR o.status='PENDING_DATA'
                    ORDER BY d.id""",
                 (SCORER_VERSION,),
             ).fetchall()
 
-    async def score_pending(self, provider, limit: int | None = None) -> dict[str, int]:
-        counts = {"FINAL": 0, "PENDING_DATA": 0, "NOT_EVALUABLE": 0, "DUPLICATE": 0}
+    async def score_pending(self, provider, limit: int | None = None, now: datetime | None = None) -> dict[str, int]:
+        counts = {"FINAL": 0, "PENDING_DATA": 0, "NOT_EVALUABLE": 0, "DUPLICATE": 0, "PROVIDER_ERROR": 0}
+        provider_name = getattr(provider, "name", None) or type(provider).__name__
+        now = _naive(now or datetime.now(timezone.utc))
         rows = self.pending_rows()
         if limit is not None:
             rows = rows[:limit]
         for row in rows:
             if "duplicate_of" in row.keys() and row["duplicate_of"] is not None:
                 self._upsert(ScoredOutcome(int(row["id"]), "DUPLICATE", None, None, None, False, None,
-                                           None, None, None, 0, {}))
+                                           None, None, None, 0, {}), provider_name)
                 counts["DUPLICATE"] += 1
                 continue
-            bars = provider.bars_from(row["symbol"], row["con_id"], row["bar_time"], row["timeframe"])
-            if inspect.isawaitable(bars):
-                bars = await bars
+            if str(row["action"] or "") == "CANDIDATE_ERROR" or row["bar_time"] is None:
+                self._upsert(ScoredOutcome(int(row["id"]), "NOT_EVALUABLE", None, None, None, False,
+                                           "no_decision_bar", None, None, None, 0, {}), provider_name)
+                counts["NOT_EVALUABLE"] += 1
+                continue
+            try:
+                bars = provider.bars_from(row["symbol"], row["con_id"], row["bar_time"], row["timeframe"])
+                if inspect.isawaitable(bars):
+                    bars = await bars
+            except Exception:
+                # One provider failure must not stop the run; the row stays pending.
+                counts["PROVIDER_ERROR"] += 1
+                continue
             usable = align(row, list(bars or []))
             if usable is None:
-                outcome = ScoredOutcome(int(row["id"]), "PENDING_DATA", None, None, None, False, "unaligned_series",
+                created = _naive(row["created_at"])
+                expired = created is not None and now is not None and (now - created).days >= UNALIGNED_EXPIRY_DAYS
+                outcome = ScoredOutcome(int(row["id"]), "NOT_EVALUABLE" if expired else "PENDING_DATA", None, None,
+                                        None, False, "unaligned_series_expired" if expired else "unaligned_series",
                                         None, None, None, 0, {})
             else:
                 outcome = evaluate_row(row, usable, self.costs)
-            self._upsert(outcome)
+            self._upsert(outcome, provider_name)
             counts[outcome.status] += 1
         return counts
 
-    def _upsert(self, o: ScoredOutcome) -> None:
+    def _upsert(self, o: ScoredOutcome, provider: str | None = None) -> None:
         with self._connect() as conn:
             conn.execute(
                 """INSERT INTO shadow_outcomes (decision_id, scorer_version, scored_at, status, evaluated,
                    strategy, side, filled, exit_reason, return_pct, mae_pct, mfe_pct, bars_held,
-                   fwd_1, fwd_5, fwd_20, cost_model)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   fwd_1, fwd_5, fwd_20, cost_model, executable, provider)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(decision_id, scorer_version) DO UPDATE SET
                      scored_at=excluded.scored_at, status=excluded.status, evaluated=excluded.evaluated,
                      strategy=excluded.strategy, side=excluded.side, filled=excluded.filled,
                      exit_reason=excluded.exit_reason, return_pct=excluded.return_pct,
                      mae_pct=excluded.mae_pct, mfe_pct=excluded.mfe_pct, bars_held=excluded.bars_held,
                      fwd_1=excluded.fwd_1, fwd_5=excluded.fwd_5, fwd_20=excluded.fwd_20,
-                     cost_model=excluded.cost_model
+                     cost_model=excluded.cost_model, executable=excluded.executable,
+                     provider=excluded.provider
                    WHERE shadow_outcomes.status != 'FINAL'""",
                 (o.decision_id, SCORER_VERSION, datetime.now(timezone.utc).isoformat(), o.status, o.evaluated,
                  o.strategy, o.side, int(o.filled), o.exit_reason, o.return_pct, o.mae_pct, o.mfe_pct,
-                 o.bars_held, o.forward.get(1), o.forward.get(5), o.forward.get(20), self.costs.name),
+                 o.bars_held, o.forward.get(1), o.forward.get(5), o.forward.get(20), self.costs.name,
+                 int(bool(o.executable)), provider),
             )
 
-    def report(self) -> dict:
+    def report(self, min_cycle_rows: int = MIN_CYCLE_ROWS) -> dict:
         """Aggregate FINAL outcomes: selected trades vs NO_TRADE counterfactuals, by regime/strategy."""
         with self._connect() as conn:
             rows = conn.execute(
-                """SELECT o.*, d.action, d.regime, d.symbol, d.cycle_id FROM shadow_outcomes o
+                """SELECT o.*, d.action, d.regime, d.symbol, d.cycle_id, d.side AS decision_side FROM shadow_outcomes o
                    JOIN shadow_decisions d ON d.id=o.decision_id
                    WHERE o.status='FINAL' AND o.scorer_version=?""",
                 (SCORER_VERSION,),
@@ -276,6 +325,7 @@ class ShadowScorer:
 
         def action_class(action: str) -> str:
             for prefix, name in (("PAPER_SUBMITTED", "paper_submitted"), ("PAPER_", "paper_blocked"),
+                                 ("SHADOW_SUBMIT", "shadow_submit"), ("SHADOW_BLOCKED", "shadow_blocked"),
                                  ("APPROVED_", "approved"), ("PORTFOLIO_REJECTED", "portfolio_rejected"),
                                  ("WOULD_", "would_trade")):
                 if action.startswith(prefix):
@@ -283,6 +333,7 @@ class ShadowScorer:
             return "other"
 
         selected = [r for r in rows if r["evaluated"] == "SELECTED"]
+        executable = [r for r in selected if r["executable"]]
         counterfactual = [r for r in rows if r["evaluated"] == "COUNTERFACTUAL"]
         rejected_good = [r for r in counterfactual if r["filled"] and (r["return_pct"] or 0) > 0]
         by_regime: dict[str, list] = {}
@@ -293,20 +344,28 @@ class ShadowScorer:
         return {
             "final_outcomes": len(rows),
             "selected": summary(selected),
+            # Only decisions that would really have been transmitted can carry fills/P&L.
+            "selected_executable": summary(executable),
+            "selected_not_executable": len(selected) - len(executable),
             "no_trade_counterfactual": summary(counterfactual),
             "no_trade_rejected_profitable": len(rejected_good),
             "selected_by_regime": {k: summary(v) for k, v in sorted(by_regime.items())},
             "selected_by_action": {k: summary(v) for k, v in sorted(by_action.items())},
-            "selected_vs_cycle_fwd5": _excess_vs_cycle(rows, "SELECTED"),
-            "counterfactual_vs_cycle_fwd5": _excess_vs_cycle(rows, "COUNTERFACTUAL"),
+            "selected_vs_cycle_fwd5": _excess_vs_cycle(rows, "SELECTED", min_cycle_rows=min_cycle_rows),
+            "counterfactual_vs_cycle_fwd5": _excess_vs_cycle(rows, "COUNTERFACTUAL", min_cycle_rows=min_cycle_rows),
+            "selected_long_vs_cycle_fwd5": _excess_vs_cycle(rows, "SELECTED", side="LONG",
+                                                            min_cycle_rows=min_cycle_rows),
         }
 
 
-def _excess_vs_cycle(rows, evaluated: str) -> dict:
-    """FWD1/FWD2 measure: side-adjusted GROSS 5-bar forward return minus the mean 5-bar forward
-    return of every scored decision in the same discovery cycle (point-in-time cohort
-    benchmark). Costs (~9 bps round trip) are NOT subtracted here. The t-stat is computed over
-    per-cycle means (decisions in a cycle share market moves and overlap in time)."""
+def _excess_vs_cycle(rows, evaluated: str, side: str | None = None, min_cycle_rows: int = MIN_CYCLE_ROWS) -> dict:
+    """FWD1/FWD2 measure: side-adjusted GROSS 5-bar forward return minus the LEAVE-ONE-OUT mean
+    5-bar forward return of the other scored decisions in the same discovery cycle
+    (point-in-time cohort benchmark; the pick is never part of its own benchmark). Cycles with
+    fewer than ``min_cycle_rows`` scored rows are excluded (reported). Costs (~9 bps round
+    trip) are NOT subtracted here. The t-stat is over per-cycle means; consecutive hourly
+    cycles overlap in their 5-bar windows, so this t is OPTIMISTIC — the FWD protocol
+    clusters by trading day with Newey-West (docs/FWD_PROTOCOL.md)."""
     from math import sqrt
 
     by_cycle: dict[str, list] = {}
@@ -315,18 +374,27 @@ def _excess_vs_cycle(rows, evaluated: str) -> dict:
             by_cycle.setdefault(r["cycle_id"], []).append(r)
     cycle_means = []
     n_events = 0
+    excluded = 0
     for cycle_rows in by_cycle.values():
-        bench = sum(r["fwd_5"] for r in cycle_rows) / len(cycle_rows)
-        picked = [(-1.0 if r["side"] == "SHORT" else 1.0) * (r["fwd_5"] - bench)
-                  for r in cycle_rows if r["evaluated"] == evaluated]
+        if len(cycle_rows) < max(2, int(min_cycle_rows)):
+            excluded += 1
+            continue
+        total = sum(r["fwd_5"] for r in cycle_rows)
+        picked = []
+        for r in cycle_rows:
+            if r["evaluated"] != evaluated or (side is not None and r["side"] != side):
+                continue
+            bench = (total - r["fwd_5"]) / (len(cycle_rows) - 1)
+            picked.append((-1.0 if r["side"] == "SHORT" else 1.0) * (r["fwd_5"] - bench))
         if picked:
             n_events += len(picked)
             cycle_means.append(sum(picked) / len(picked))
     n = len(cycle_means)
+    base = {"n": n_events, "cycles": n, "cycles_excluded_small": excluded}
     if n == 0:
-        return {"n": 0, "cycles": 0, "mean_excess_pct": None, "t": None}
+        return {**base, "mean_excess_pct": None, "t": None}
     m = sum(cycle_means) / n
     if n < 2:
-        return {"n": n_events, "cycles": n, "mean_excess_pct": m, "t": None}
+        return {**base, "mean_excess_pct": m, "t": None}
     var = sum((x - m) ** 2 for x in cycle_means) / (n - 1)
-    return {"n": n_events, "cycles": n, "mean_excess_pct": m, "t": (m / sqrt(var / n)) if var > 0 else None}
+    return {**base, "mean_excess_pct": m, "t": (m / sqrt(var / n)) if var > 0 else None}

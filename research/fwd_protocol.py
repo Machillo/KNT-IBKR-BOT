@@ -453,8 +453,7 @@ def _persist_binding(path: Path, result: dict) -> dict:
     target = window_file(path)
     record = json.loads(target.read_text(encoding="utf-8"))
     stored = record.setdefault("binding_results", {})
-    if result["test"] in stored:
-        return stored[result["test"]]
+    # Only reached when no result is stored yet (_finish returns a stored one first).
     stored[result["test"]] = json.loads(json.dumps(result, default=str))
     target.write_text(json.dumps(record, indent=2), encoding="utf-8")
     return stored[result["test"]]

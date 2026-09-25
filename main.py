@@ -64,8 +64,11 @@ async def is_in_liquid_hours(ib, contract) -> bool:
 
 
 async def run_broker_smoke_tests(ib, market_data: MarketDataService, equity: float,
-                                 risk: RiskManager, account: str) -> None:
+                                 risk: RiskManager, account: str, guard=None) -> None:
     """Paper-only end-to-end execution test. Must be explicitly enabled."""
+    if guard is None or not guard.verification.verified or guard.account != account:
+        logger.critical("BROKER SMOKE TEST refused | session not verified as PAPER")
+        return
     if config.ibkr.readonly:
         logger.warning("BROKER SMOKE TEST skipped because IBKR_READONLY=true")
         return
@@ -81,7 +84,7 @@ async def run_broker_smoke_tests(ib, market_data: MarketDataService, equity: flo
         logger.warning("BROKER SMOKE TEST skipped: no usable SPY reference price")
         return
 
-    orders = OrderManager(ib, account)
+    orders = OrderManager(ib, account, guard=guard)
     gated = RiskGatedOrderManager(orders, risk)
     stop_price = round(reference * 0.95, 2)
 
@@ -166,6 +169,7 @@ async def main() -> None:
                     account.net_liquidation,
                     context.risk,
                     account.account,
+                    guard=supervisor.paper_guard,
                 )
 
         if config.runtime.autonomous_trading_enabled:

@@ -5,6 +5,7 @@ from pathlib import Path
 import csv
 import json
 
+from backtest.costs import BASELINE, SEVERE, STRESSED, CostModel
 from backtest.engine import BacktestEngine, BacktestResult
 from market.history import PriceBar
 
@@ -13,9 +14,16 @@ from market.history import PriceBar
 class ValidationScenario:
     name: str
     risk_pct: float
-    commission_bps: float
-    slippage_bps: float
+    cost_model: CostModel
     max_position_pct: float
+
+    def engine(self, initial_equity: float) -> BacktestEngine:
+        return BacktestEngine(
+            initial_equity=initial_equity,
+            risk_pct=self.risk_pct,
+            max_position_pct=self.max_position_pct,
+            cost_model=self.cost_model,
+        )
 
 
 @dataclass(frozen=True)
@@ -39,13 +47,14 @@ class ValidationRow:
 
 
 DEFAULT_SCENARIOS = (
-    ValidationScenario("baseline", 0.01, 1.0, 2.0, 0.25),
-    ValidationScenario("cost_stress_8bps", 0.01, 3.0, 5.0, 0.25),
-    ValidationScenario("cost_stress_15bps", 0.01, 5.0, 10.0, 0.25),
-    ValidationScenario("risk_half_pct", 0.005, 1.0, 2.0, 0.25),
-    ValidationScenario("risk_two_pct", 0.02, 1.0, 2.0, 0.25),
-    ValidationScenario("position_cap_10pct", 0.01, 1.0, 2.0, 0.10),
+    ValidationScenario("baseline", 0.01, BASELINE, 0.25),
+    ValidationScenario("cost_stressed", 0.01, STRESSED, 0.25),
+    ValidationScenario("cost_severe", 0.01, SEVERE, 0.25),
+    ValidationScenario("risk_half_pct", 0.005, BASELINE, 0.25),
+    ValidationScenario("risk_two_pct", 0.02, BASELINE, 0.25),
+    ValidationScenario("position_cap_10pct", 0.01, BASELINE, 0.10),
 )
+STRESS_SCENARIO_NAMES = frozenset({"cost_stressed", "cost_severe", "cost_stress_8bps", "cost_stress_15bps"})
 
 
 def buy_hold_return_pct(bars: list[PriceBar]) -> float:
@@ -68,14 +77,7 @@ def run_validation_matrix(
     rows: list[ValidationRow] = []
     for strategy in strategies:
         for scenario in scenarios:
-            engine = BacktestEngine(
-                initial_equity=initial_equity,
-                risk_pct=scenario.risk_pct,
-                commission_bps=scenario.commission_bps,
-                slippage_bps=scenario.slippage_bps,
-                max_position_pct=scenario.max_position_pct,
-            )
-            result: BacktestResult = engine.run(bars, strategy)
+            result: BacktestResult = scenario.engine(initial_equity).run(bars, strategy)
             rows.append(ValidationRow(
                 symbol=symbol,
                 timeframe=timeframe,

@@ -17,11 +17,11 @@ def run(universe:str,profile:str,cache_dir:str,output_dir:str)->None:
             result=select_and_test(symbol,p.name,_load_bars(path))
             if result is None: print(f"{symbol:6s} {p.name:12s} NO_SURVIVOR"); continue
             results.append(result); print(f"{symbol:6s} {p.name:12s} winner={result.strategy:42s} train={result.train_monthly_pct:7.2f}% val={result.validation_monthly_pct:7.2f}% TEST={result.test_monthly_pct:7.2f}% testDD={result.test_dd_pct:6.2f}% testPos={result.test_positive_month_rate_pct:5.1f}% trades={result.test_trades}")
-    ranked=sorted(results,key=lambda r:(r.test_monthly_pct,-r.test_dd_pct),reverse=True); csv_path=out/"CONFLUENCE_GEN3_UNTOUCHED_TEST.csv"
+    ranked=sorted(results,key=lambda r:(r.validation_monthly_pct,-r.validation_dd_pct),reverse=True)  # never sort by TEST; csv_path=out/"CONFLUENCE_GEN3_UNTOUCHED_TEST.csv"
     if ranked:
         with csv_path.open("w",newline="",encoding="utf-8") as fh:
             w=csv.DictWriter(fh,fieldnames=list(asdict(ranked[0]))); w.writeheader(); [w.writerow(asdict(r)) for r in ranked]
-    print("\n=== GEN3 UNTOUCHED TEST TOP 20 ===")
+    print("\n=== GEN3 TOP 20 (sorted by VALIDATION; TEST is reported once, never for picking) ===")
     for i,r in enumerate(ranked[:20],1): print(f"{i:2d}. {r.symbol:6s} {r.profile:12s} {r.strategy:42s} train={r.train_monthly_pct:7.2f}% val={r.validation_monthly_pct:7.2f}% TEST={r.test_monthly_pct:7.2f}% DD={r.test_dd_pct:6.2f}% positive={r.test_positive_month_rate_pct:5.1f}% trades={r.test_trades}")
     print(f"\nSUMMARY | datasets={len(symbols)*len(profiles)} survivors={len(ranked)} positive_test={sum(r.test_monthly_pct>0 for r in ranked)} cache_missing={missing}"); print(f"Report: {csv_path.resolve()}")
 

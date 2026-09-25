@@ -7,6 +7,7 @@ from ib_async import IB, MarketOrder
 
 from config.config import RiskConfig
 from core.broker_state import BrokerStateService
+from core.paper_guard import PaperGuardError, PaperOrderGuard, mask_account
 from utils.logger import logger
 
 
@@ -21,12 +22,19 @@ class KillSwitchResult:
 
 
 class KillSwitch:
-    """Emergency broker action: block entries elsewhere, cancel working orders, flatten, verify."""
+    """Emergency broker action: block entries elsewhere, cancel working orders, flatten, verify.
 
-    def __init__(self, ib: IB, settings: RiskConfig, account: str) -> None:
+    The ARMED path only acts on a session verified as PAPER by ``PaperOrderGuard``.
+    On an unverified session it touches nothing: cancelling or liquidating a
+    possibly-live account the bot never traded would destroy human positions.
+    """
+
+    def __init__(self, ib: IB, settings: RiskConfig, account: str,
+                 guard: PaperOrderGuard | None = None) -> None:
         self.ib = ib
         self.settings = settings
         self.account = account
+        self.guard = guard
         self.triggered = False
         self.reason = ""
         self.state = BrokerStateService(ib)
@@ -49,6 +57,18 @@ class KillSwitch:
             if p.account == self.account and float(p.position) != 0
         ]
 
+    def _guard_refusal(self) -> str | None:
+        if self.guard is None:
+            return "no_paper_guard"
+        if self.guard.account != self.account:
+            return "guard_account_mismatch"
+        probe = type("_Probe", (), {"account": self.account})()
+        try:
+            self.guard.assert_can_transmit(probe)
+        except PaperGuardError as exc:
+            return str(exc)
+        return None
+
     async def execute(self, reason: str, *, dry_run: bool | None = None) -> KillSwitchResult:
         dry_run = self.settings.kill_switch_dry_run if dry_run is None else dry_run
         if self.triggered and self._last_result is not None:
@@ -68,7 +88,7 @@ class KillSwitch:
         if dry_run:
             logger.critical(
                 "KILL SWITCH DRY-RUN | account=%s reason=%s would_cancel=%s would_flatten=%s",
-                self.account,
+                mask_account(self.account),
                 reason,
                 len(working),
                 len(positions),
@@ -77,7 +97,16 @@ class KillSwitch:
             self._last_result = KillSwitchResult(True, True, 0, 0, flat_now, reason)
             return self._last_result
 
-        logger.critical("KILL SWITCH ARMED | account=%s reason=%s", self.account, reason)
+        guard_reason = self._guard_refusal()
+        if guard_reason is not None:
+            logger.critical(
+                "KILL SWITCH ARMED but session not verified as PAPER (%s) | no broker action taken; "
+                "manual intervention required", guard_reason,
+            )
+            self._last_result = KillSwitchResult(True, False, 0, 0, False, reason)
+            return self._last_result
+
+        logger.critical("KILL SWITCH ARMED | account=%s reason=%s", mask_account(self.account), reason)
 
         cancelled = 0
         for trade in working:
@@ -94,6 +123,11 @@ class KillSwitch:
             action = "SELL" if qty > 0 else "BUY"
             order = MarketOrder(action, abs(qty), tif="DAY")
             order.account = self.account
+            try:
+                self.guard.assert_can_transmit(order)
+            except PaperGuardError as exc:
+                logger.critical("KILL SWITCH FLATTEN refused by paper guard | %s", exc)
+                continue
             trade = self.ib.placeOrder(position.contract, order)
             liquidation_trades.append(trade)
             logger.critical(
@@ -114,7 +148,7 @@ class KillSwitch:
         if not final_state.is_flat:
             logger.critical("KILL SWITCH INCOMPLETE | manual intervention required")
         else:
-            logger.critical("KILL SWITCH COMPLETE | account=%s broker confirmed flat", self.account)
+            logger.critical("KILL SWITCH COMPLETE | account=%s broker confirmed flat", mask_account(self.account))
 
         self._last_result = KillSwitchResult(
             triggered=True,

@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 from ib_async import IB
 
+from core.paper_guard import mask_account
 from utils.logger import logger
 
 
@@ -60,11 +61,11 @@ class BrokerStateService:
             last = self.snapshot(account)
 
         if last.is_flat:
-            logger.info("BROKER RECONCILIATION | account=%s state=FLAT open_orders=0", account)
+            logger.info("BROKER RECONCILIATION | account=%s state=FLAT open_orders=0", mask_account(account))
         else:
             logger.error(
                 "BROKER RECONCILIATION | account=%s state=NOT_FLAT positions=%s open_orders=%s details=%s",
-                account,
+                mask_account(account),
                 last.position_count,
                 last.open_order_count,
                 last.nonzero_positions,

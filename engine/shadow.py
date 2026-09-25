@@ -16,6 +16,7 @@ from portfolio.state import PortfolioState
 from research.coordinator import ContinuousResearchCoordinator
 from research.performance import StrategyPerformanceStore
 from research.scheduler import ContinuousResearchScheduler
+from research.shadow_journal import ShadowJournal
 from risk.risk_manager import RiskManager
 from strategies.library import PairSignal, PairsTradingStrategy
 from utils.logger import logger
@@ -44,7 +45,8 @@ class ShadowTradingEngine:
     def __init__(self, ib, market_intelligence, minimum_signal_score: float = 55.0,
                  max_candidates: int = 12, quote_budget: int = 40, research_budget: int = 2,
                  risk_manager: RiskManager | None = None,
-                 paper_executor: PaperExecutionEngine | None = None) -> None:
+                 paper_executor: PaperExecutionEngine | None = None,
+                 session_policy=None) -> None:
         self.ib = ib
         self.intelligence = market_intelligence
         self.history = HistoricalDataService(ib)
@@ -53,18 +55,69 @@ class ShadowTradingEngine:
         self.research = ContinuousResearchCoordinator(self.history, self.performance_store)
         self.research_scheduler = ContinuousResearchScheduler(self.research, self.performance_store,
                                                                max_attempts_per_cycle=research_budget)
-        self.session_policy = USStockSessionPolicy()
+        self.session_policy = session_policy or USStockSessionPolicy()
         self.risk_manager = risk_manager
         risk_pct = 0.01 if risk_manager is None else min(0.01, risk_manager.settings.max_trade_risk_pct)
         max_position_pct = 0.10 if risk_manager is None else risk_manager.settings.max_position_pct
         self.allocator = PortfolioAllocator(risk_pct=risk_pct, max_position_pct=max_position_pct)
         self.admission = None if risk_manager is None else PortfolioAdmissionCoordinator(risk_manager)
         self.risk_decisions = RiskDecisionStore()
+        try:
+            self.journal: ShadowJournal | None = ShadowJournal()
+        except Exception as exc:  # research journaling must never stop the shadow engine
+            logger.warning("SHADOW JOURNAL unavailable | error=%s", exc)
+            self.journal = None
         self.paper_executor = paper_executor
         self.pairs = PairsTradingStrategy()
         self.max_candidates = max_candidates
         self.quote_budget = quote_budget
         self.research_budget = max(0, min(research_budget, max_candidates))
+
+    async def _fresh_reference(self, candidate) -> tuple[float | None, int | None]:
+        """Read-only two-sided quote taken right before a paper submission.
+
+        Returns (mid price, effective IBKR market-data type). The type is the
+        WORSE of the configured type and the one the ticker itself reports, so a
+        silent fallback to frozen/delayed data is caught. Without a two-sided
+        quote the price is None and the executor refuses.
+        """
+        market_data = getattr(self.intelligence, "market_data", None)
+        if market_data is None:
+            return None, None
+        configured = getattr(getattr(market_data, "settings", None), "market_data_type", None)
+        try:
+            snapshot = await market_data.snapshot_contract(candidate.contract, candidate.symbol, timeout=3.0)
+        except Exception as exc:
+            logger.warning("FRESH REFERENCE unavailable | symbol=%s error=%s", candidate.symbol, exc)
+            return None, configured
+        reported = getattr(snapshot, "market_data_type", None)
+        types = [t for t in (configured, reported) if t is not None]
+        data_type = max(types) if types else None
+        bid, ask = snapshot.bid, snapshot.ask
+        if bid and ask and 0 < bid <= ask:
+            return (bid + ask) / 2.0, data_type
+        return None, data_type
+
+    def _journal_decision(self, cycle_id, candidate, bars, selection, action, reason) -> None:
+        if self.journal is None:
+            return
+        chosen = selection.selected
+        sig = None if chosen is None else chosen.signal
+        try:
+            self.journal.record_decision(
+                cycle_id, symbol=candidate.symbol,
+                con_id=int(getattr(candidate.contract, "conId", 0) or 0),
+                bar_time=bars[-1].time if bars else None, timeframe="1 hour",
+                regime=selection.regime.regime.value, action=action,
+                strategy=None if chosen is None else chosen.strategy,
+                side=None if sig is None else sig.side.value,
+                score=None if chosen is None else float(chosen.adjusted_score),
+                entry=None if sig is None else sig.entry, stop=None if sig is None else sig.stop,
+                target=None if sig is None else sig.target,
+                reason=reason or selection.reason,
+            )
+        except Exception as exc:
+            logger.warning("SHADOW JOURNAL decision write failed | symbol=%s error=%s", candidate.symbol, exc)
 
     @staticmethod
     def _return_series(bars: list[PriceBar], lookback: int = 60) -> tuple[float, ...]:
@@ -125,12 +178,21 @@ class ShadowTradingEngine:
         ranked = await self.intelligence.ranked_us_opportunity_universe(
             rows_per_plan=rows_per_scanner, quote_budget=self.quote_budget)
         candidates = [x for x in ranked if x.eligible][:self.max_candidates]
+        cycle_id = ShadowJournal.new_cycle_id()
+        try:
+            if self.journal is not None:
+                self.journal.record_discovery(cycle_id, ranked)
+        except Exception as exc:  # journaling must never break the loop
+            logger.warning("SHADOW JOURNAL discovery write failed | error=%s", exc)
         logger.info("SHADOW FUNNEL | ranked=%s eligible=%s deep_analysis=%s",
                     len(ranked), sum(1 for x in ranked if x.eligible), len(candidates))
         decisions: list[ShadowDecision] = []
         history_by_symbol: dict[str, list[PriceBar]] = {}
         position_returns = {} if portfolio_state is None else await self._position_returns(portfolio_state)
 
+        refresh = getattr(self.session_policy, "refresh", None)
+        if refresh is not None:
+            await refresh(self.ib)  # read-only broker calendar; failure keeps the market CLOSED
         session = self.session_policy.state()
         logger.info("MARKET SESSION | asset=US_STOCKS session=%s market_open=%s local=%s",
                     session.session, session.market_open, session.local_time.isoformat())
@@ -138,7 +200,7 @@ class ShadowTradingEngine:
 
         for candidate in candidates:
             try:
-                bars = await self.history.bars(candidate.contract)
+                bars = await self.history.bars(candidate.contract, complete_only=True)
                 history_by_symbol[candidate.symbol] = bars
                 candidate_returns = self._return_series(bars)
                 asset_class = candidate.contract.secType or "STK"
@@ -182,13 +244,17 @@ class ShadowTradingEngine:
                                     if target is None or target <= 0:
                                         action, portfolio_reason = "PAPER_REJECTED", "invalid_target_price"
                                     else:
+                                        reference_price, data_type = await self._fresh_reference(candidate)
                                         result = await self.paper_executor.submit(
                                             candidate.contract,
                                             PaperExecutionRequest(
                                                 symbol=candidate.symbol, strategy=selected.strategy,
                                                 side=signal.side.value, quantity=proposal.quantity,
                                                 entry_price=proposal.entry_price, stop_price=proposal.stop_price,
-                                                target_price=float(target), regime=selection.regime.regime.value))
+                                                target_price=float(target), regime=selection.regime.regime.value,
+                                                account_equity=float(portfolio_state.snapshot.net_liquidation),
+                                                reference_price=reference_price, market_data_type=data_type,
+                                                con_id=int(getattr(candidate.contract, "conId", 0) or 0)))
                                         action = "PAPER_SUBMITTED" if result.submitted else "PAPER_BLOCKED"
                                         portfolio_reason = result.reason
                             self.risk_decisions.record(
@@ -205,6 +271,7 @@ class ShadowTradingEngine:
                                         admission.reason, action)
 
                 decisions.append(ShadowDecision(candidate.symbol, candidate.score, selection, action, portfolio_reason))
+                self._journal_decision(cycle_id, candidate, bars, selection, action, portfolio_reason)
                 logger.info(
                     "SHADOW DECISION | symbol=%s liquidity=%.2f regime=%s adx=%.1f ema_slope=%.2f%% vol_stress=%.2f action=%s selected=%s top=%s reason=%s portfolio_reason=%s",
                     candidate.symbol, candidate.score, selection.regime.regime.value,

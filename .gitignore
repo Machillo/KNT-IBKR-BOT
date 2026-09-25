@@ -1,4 +1,9 @@
+# Secrets / local configuration. Never version real credentials or account IDs.
 .env
+.env.*
+!.env.example
+
+# Python / tooling
 .venv/
 venv/
 __pycache__/
@@ -6,8 +11,23 @@ __pycache__/
 .pytest_cache/
 .idea/
 .vscode/
-logs/*.log
 .DS_Store
 
-state/*.json
-state/*.tmp
+# Logs may contain account IDs, balances and positions.
+logs/*
+!logs/.gitkeep
+*.log
+
+# Runtime state: account IDs, daily risk baselines, paper journal, portfolio snapshots.
+state/
+
+# Research outputs and cached IBKR market data (derived, large, may not be redistributable).
+reports/
+
+# Local databases anywhere in the tree.
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+*.db-wal
+*.db-shm

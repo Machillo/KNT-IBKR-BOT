@@ -1,80 +1,59 @@
 # KNT IBKR Bot — Paper Alpha
 
-Safety-first autonomous trading research bot using Python, `ib_async`, TWS/IB Gateway and Interactive Brokers Paper Trading.
+Safety-first autonomous trading research bot using Python, `ib_async`, TWS/IB Gateway and
+Interactive Brokers **Paper** Trading. Live trading is not supported.
 
-## Current architecture
+Rules for contributors and Claude sessions: `CLAUDE.md`. Current checkpoint:
+`docs/OVERNIGHT_PROGRESS.md`. Research log: `docs/experiments/LOG.md`.
 
-`IBKR discovery -> market data/liquidity -> historical bars -> regime detection -> strategy library -> selector -> shadow decision -> risk -> execution`
+## Architecture
 
-The strategy layer never sends orders directly. Autonomous strategy execution remains disabled by default.
+`IBKR discovery (scanners) → liquidity ranking → completed historical bars → regime →
+strategy selector (or NO_TRADE) → allocator → portfolio admission → paper executor`
 
-## Strategy library
+Strategies never send orders. Every order goes through `core/paper_guard.py` and
+`OrderManager._transmit`.
 
-The initial selector evaluates seven single-asset families plus one two-asset family:
+## Paper safety model
 
-1. Breakout (`breakout_v1`)
-2. Momentum + Gap (`momentum_gap_v1`)
-3. Swing / Market Structure (`swing_structure_v1`)
-4. Trend Following (`trend_following_v1`)
-5. Mean Reversion (`mean_reversion_v1`)
-6. Range Trading (`range_v1`)
-7. Quantified SMC / Liquidity Sweeps (`smc_liquidity_v1`)
-8. Pairs / Market Neutral (`pairs_market_neutral_v1`)
+An order can only be transmitted when ALL of these hold (re-checked per order):
 
-`momentum_v1` remains in the repository as the original baseline used to validate the backtest engine; it is not part of the eight-family selector.
+- `ALLOW_LIVE_TRADING=false` and `IBKR_PORT` is a paper port (7497 TWS / 4002 Gateway);
+- the socket actually connected is that port;
+- every account in `managedAccounts()` has an IBKR paper prefix (`DU`/`DF`), and the
+  target account is unambiguous (set `IBKR_ACCOUNT` if the login has several);
+- the supervisor is not locked (daily loss, non-flat startup, monitoring error);
+- the executor's own checks pass: session open per IBKR's liquid-hours calendar, live
+  (type 1) two-sided quote within 1.5 % of the entry, `RiskManager` limits using the
+  broker's NetLiquidation, whole shares, long only, daily entry cap, no duplicate.
 
-## Market universe
+The autonomous loop (`paper_alpha.py`) submits only with `AUTONOMOUS_TRADING_ENABLED=true`
+**and** `AUTONOMOUS_PAPER_ACK=I_UNDERSTAND_KNT_WILL_SUBMIT_AUTONOMOUS_PAPER_ORDERS` exported in
+the shell for that session (an ACK stored in `.env` is refused).
 
-KNT does **not** use a permanent ticker whitelist. Discovery is scanner-plan driven through IBKR. A scanner plan describes a broker market segment (`instrument`, `locationCode`, `scanCode`); strategies do not know or care which ticker list produced the candidate.
+## Configuration
 
-The currently validated runtime adapter is `STK / STK.US.MAJOR / MOST_ACTIVE`. Additional IBKR scanner segments can plug into the same discovery service via `ScannerPlan`/`scan_many` without changing strategy code. Asset-specific risk/execution models must be added before autonomous order execution is allowed for derivatives/FX.
+See `.env.example`. Never commit `.env`, `state/`, `reports/`, logs or databases — the
+repository is public and `.gitignore` enforces this.
 
-## Safe Paper configuration
-
-```env
-IBKR_HOST=127.0.0.1
-IBKR_PORT=7497
-IBKR_CLIENT_ID=901
-IBKR_READONLY=false
-ALLOW_LIVE_TRADING=false
-MAX_TRADE_RISK_PCT=0.10
-MAX_DAILY_LOSS_PCT=0.10
-MAX_POSITION_PCT=0.10
-KILL_SWITCH_ENABLED=true
-KILL_SWITCH_DRY_RUN=true
-MARKET_DATA_TYPE=3
-SUPERVISOR_POLL_SECONDS=15
-REQUIRE_FLAT_STARTUP=true
-RUN_BROKER_SMOKE_TESTS=false
-RUN_DISCOVERY_PROBE=false
-DISCOVERY_ROWS=10
-AUTONOMOUS_TRADING_ENABLED=false
-SHADOW_TRADING_ENABLED=true
-SHADOW_INTERVAL_SECONDS=900
-```
-
-## Local validation
+## Validation
 
 ```bash
-git fetch origin
-git checkout feature/paper-alpha
-git pull
-pytest -q
-python run_strategy_suite.py SPY --duration "180 D" --bar-size "1 hour"
-python paper_alpha.py
+python -m pytest -q
 ```
 
-The suite runner prints return, max drawdown, trades, win rate, profit factor and Sharpe for every single-asset family plus the original momentum baseline.
+Offline research on cached history (`reports/history_cache`, no IBKR connection):
 
-The shadow process discovers candidates dynamically, detects regime, evaluates all applicable strategies, selects the strongest setup or `NO_TRADE`, evaluates pair opportunities and sends no strategy orders.
+```bash
+python run_experiments.py --yearly                 # pre-registered pipeline variants, TRAIN+VALIDATION
+python run_pipeline_backtest.py --profile long_10y --segment validation
+```
 
-Look for `SHADOW DECISION`, `SHADOW SETUP` and `SHADOW PAIR` in the log.
+Research protocol v1 (`research/protocol.py`): TRAIN < 2023-09-01 ≤ VALIDATION < 2025-03-01 ≤
+HOLDOUT. The holdout is single-use per frozen candidate and requires `--confirm-holdout`.
 
-## Risk / production status
+## Status
 
-- Paper only during this phase.
-- `ALLOW_LIVE_TRADING=false` blocks standard live ports.
-- Persistent daily-loss state and sticky kill switch are retained.
-- Kill-switch liquidation remains dry-run by default until explicitly Paper-tested.
-- Cross-asset discovery is scanner-plan ready, but autonomous execution must use the correct contract multiplier/currency/options risk model for each asset class.
-- No strategy currently has a claim of durable edge. The next stages are broad backtesting, out-of-sample/walk-forward validation, persistent strategy performance evidence, portfolio risk and controlled Paper execution.
+- Paper only. No live path exists.
+- Kill-switch liquidation remains dry-run by default until its armed flow is paper-tested.
+- No strategy has demonstrated durable edge; see `docs/experiments/LOG.md` for evidence.

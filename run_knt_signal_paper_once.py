@@ -12,7 +12,7 @@ from engine.shadow import ShadowTradingEngine
 from engine.supervisor import PaperSupervisor
 from execution.paper import PaperExecutionEngine, PaperExecutionRequest, PaperExecutionResult
 from market.intelligence import MarketIntelligenceService
-from market.session import USStockSessionPolicy
+from market.session import BrokerCalendarSessionPolicy
 from portfolio.state import PortfolioStateService
 from utils.logger import logger
 
@@ -85,7 +85,8 @@ async def main() -> None:
                 f"open_orders={before.open_order_count}"
             )
 
-        session_policy = USStockSessionPolicy()
+        session_policy = BrokerCalendarSessionPolicy()
+        await session_policy.refresh(ib)
         session = session_policy.state()
         if not session.market_open:
             raise RuntimeError(
@@ -102,13 +103,18 @@ async def main() -> None:
             trading_locked=context.risk.trading_locked,
         )
 
+        guard = supervisor.paper_guard
+        if guard is None or not guard.verification.verified:
+            reason = "missing" if guard is None else guard.verification.reason
+            raise RuntimeError(f"KNT signal probe requires a verified PAPER account; reason={reason}")
         raw_executor = PaperExecutionEngine(
             ib,
             account=account.account,
             enabled=True,
-            paper_authorized=True,
+            paper_guard=guard,
             risk_manager=context.risk,
             session_policy=session_policy,
+            max_entries_per_day=1,
         )
         executor = OneShotCappedPaperExecutor(raw_executor, max_quantity=max_qty)
         shadow = ShadowTradingEngine(
@@ -120,6 +126,7 @@ async def main() -> None:
             research_budget=0,
             risk_manager=context.risk,
             paper_executor=executor,
+            session_policy=session_policy,
         )
 
         logger.warning(

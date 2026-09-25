@@ -14,7 +14,7 @@ def test_symbol_promotion_can_only_develop_without_exact_research(tmp_path):
         avg_drawdown_pct=14.19, avg_profit_factor=1.12,
     ))
 
-    assessment = LearningEngine(store).assess(
+    assessment = LearningEngine(store, use_context_promotions=True).assess(
         symbol="COIN", asset_class="STK", timeframe="1 hour",
         regime="TRENDING", strategy="momentum_gap_v1",
     )
@@ -37,7 +37,7 @@ def test_symbol_avoid_context_is_bounded_without_exact_research(tmp_path):
         avg_drawdown_pct=18.0, avg_profit_factor=0.70,
     ))
 
-    assessment = LearningEngine(store).assess(
+    assessment = LearningEngine(store, use_context_promotions=True).assess(
         symbol="XYZ", asset_class="STK", timeframe="1 hour",
         regime="RANGE", strategy="range_v1",
     )
@@ -55,3 +55,28 @@ def test_unknown_context_remains_unknown(tmp_path):
     )
     assert assessment.status == LearningStatus.UNKNOWN
     assert assessment.selector_bonus == 0.0
+
+
+def test_operational_learning_ignores_full_sample_promotions_by_default(tmp_path):
+    db = tmp_path / "learning.db"
+    store = StrategyPerformanceStore(db)
+    ContextPromotionStore(db).record(ContextPromotion(
+        scope="symbol", context="COIN", strategy="momentum_gap_v1",
+        status="PROMOTE", score=81.3, datasets=3, profitable_pct=100.0,
+        stress_survival_pct=83.3, avg_return_pct=13.55,
+        avg_drawdown_pct=14.19, avg_profit_factor=1.12,
+    ))
+    assessment = LearningEngine(store).assess(
+        symbol="COIN", asset_class="STK", timeframe="1 hour",
+        regime="TRENDING", strategy="momentum_gap_v1",
+    )
+    assert assessment.status == LearningStatus.UNKNOWN
+    assert assessment.selector_bonus == 0.0
+    assert assessment.contextual_scope is None
+
+
+def test_strategy_selector_never_enables_promotions(tmp_path):
+    from engine.strategy_selector import StrategySelector
+
+    selector = StrategySelector(performance_store=StrategyPerformanceStore(tmp_path / "s.db"))
+    assert selector.learning_engine.context_promotions is None

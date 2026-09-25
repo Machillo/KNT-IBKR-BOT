@@ -75,7 +75,10 @@ class StrategySelector:
         self.regime_detector = RegimeDetector()
         self.strategies = [factory() for factory in SINGLE_ASSET_STRATEGIES]
         self.performance_store = performance_store
-        self.learning_engine = LearningEngine(performance_store) if performance_store else None
+        # Operational selector: admissible OOS evidence only, never full-sample promotions.
+        self.learning_engine = (
+            LearningEngine(performance_store, use_context_promotions=False) if performance_store else None
+        )
         self.pause_directional_high_volatility = bool(pause_directional_high_volatility)
 
     def evaluate(

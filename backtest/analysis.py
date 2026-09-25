@@ -7,6 +7,7 @@ from pathlib import Path
 from statistics import mean
 
 from backtest.universes import VALIDATION_UNIVERSES
+from backtest.validation import STRESS_SCENARIO_NAMES
 
 
 @dataclass(frozen=True)
@@ -49,7 +50,7 @@ def _f(value, default=0.0) -> float:
 
 def _score_group(items: list[dict[str, str]]) -> tuple[int, float, float, float, float, float, float, float, str]:
     baseline = [row for row in items if row["scenario"] == "baseline"]
-    stress = [row for row in items if row["scenario"] in {"cost_stress_8bps", "cost_stress_15bps"}]
+    stress = [row for row in items if row["scenario"] in STRESS_SCENARIO_NAMES]
     if not baseline:
         return 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, "AVOID"
 

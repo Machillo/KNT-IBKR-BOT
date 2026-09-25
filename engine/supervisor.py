@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 from config.config import BotConfig
 from core.account import AccountService, AccountSnapshot
 from core.broker_state import BrokerStateService
+from core.paper_guard import PaperOrderGuard, build_paper_guard, mask_account
 from risk.daily_guard import DailyLossGuard
 from risk.kill_switch import KillSwitch, KillSwitchResult
 from risk.risk_manager import RiskManager
@@ -35,6 +36,7 @@ class PaperSupervisor:
         self.store = DailyRiskStateStore()
         self.context: SupervisorContext | None = None
         self.kill_switch: KillSwitch | None = None
+        self.paper_guard: PaperOrderGuard | None = None
         self._kill_persisted = False
 
     async def initialize(self) -> tuple[SupervisorContext, AccountSnapshot]:
@@ -53,6 +55,21 @@ class PaperSupervisor:
         if persisted.kill_switch_triggered:
             risk.lock_trading(persisted.trigger_reason or "sticky daily Kill Switch")
 
+        # Fail closed: without a verified PAPER session no entry may ever be admitted.
+        # Pass only the CONFIGURED account so multiple paper accounts without
+        # IBKR_ACCOUNT are refused as ambiguous instead of defaulting to the first.
+        self.paper_guard = build_paper_guard(self.ib, self.config.ibkr, self.config.ibkr.account)
+        verification = self.paper_guard.verification
+        if verification.verified and verification.account != account.account:
+            risk.lock_trading("paper_guard_account_differs_from_supervised_account")
+        logger.info(
+            "PAPER VERIFICATION | verified=%s reason=%s account=%s port=%s connected_port=%s",
+            verification.verified, verification.reason, verification.masked_account,
+            verification.configured_port, verification.connected_port,
+        )
+        if not verification.verified and not risk.trading_locked:
+            risk.lock_trading(f"paper_account_unverified:{verification.reason}")
+
         guard = DailyLossGuard(risk, persisted.starting_equity)
         self.context = SupervisorContext(
             account=account.account,
@@ -61,12 +78,12 @@ class PaperSupervisor:
             risk=risk,
             guard=guard,
         )
-        self.kill_switch = KillSwitch(self.ib, self.config.risk, account.account)
+        self.kill_switch = KillSwitch(self.ib, self.config.risk, account.account, guard=self.paper_guard)
         self._kill_persisted = persisted.kill_switch_triggered
 
         logger.info(
             "SUPERVISOR INIT | account=%s date=%s baseline=%.2f source=%s sticky_kill=%s",
-            account.account,
+            mask_account(account.account),
             trading_date,
             persisted.starting_equity,
             "CREATED" if created else "RESTORED",
@@ -120,7 +137,7 @@ class PaperSupervisor:
             self._kill_persisted = True
             logger.critical(
                 "SUPERVISOR STICKY KILL persisted | account=%s date=%s",
-                self.context.account,
+                mask_account(self.context.account),
                 self.context.trading_date,
             )
         return await self.kill_switch.execute(reason)

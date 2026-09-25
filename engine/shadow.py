@@ -54,7 +54,7 @@ class ShadowTradingEngine:
                  risk_manager: RiskManager | None = None,
                  paper_executor: PaperExecutionEngine | None = None,
                  session_policy=None, state_dir: Path | None = None, *,
-                 learning_enabled: bool = True, research_execution: bool = False,
+                 learning_enabled: bool = False, research_execution: bool = False,
                  run_mode: str = "runtime", max_entries_per_day: int = 3,
                  config_hash: str | None = None) -> None:
         db = None if state_dir is None else Path(state_dir) / "strategy_performance.db"
@@ -64,8 +64,12 @@ class ShadowTradingEngine:
         self.intelligence = market_intelligence
         self.history = HistoricalDataService(ib)
         self.performance_store = StrategyPerformanceStore(db)
-        # Forward evidence needs a FROZEN selector: with learning disabled the selector gets no
-        # performance store (no evidence bonus, no AVOID) and the research scheduler never runs.
+        # Learning is OFF by default in every mode (runtime, paper, shadow). Its evidence is not
+        # yet valid for selection: regime labels come from a different context length, recent
+        # research windows overlap the protocol HOLDOUT, and the status/bonus thresholds have
+        # no statistical justification (docs/ARCHITECTURE_TARGET.md §Evidence). With learning
+        # disabled the selector gets no performance store (no bonus, no AVOID) and the research
+        # scheduler never runs. Enabling it requires its own pre-registered forward test.
         self.learning_enabled = bool(learning_enabled)
         self.selector = StrategySelector(minimum_signal_score,
                                          self.performance_store if self.learning_enabled else None)

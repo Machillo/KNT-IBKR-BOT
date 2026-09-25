@@ -210,3 +210,17 @@ def test_journal_universe_exposes_the_runtime_liquidity_order(tmp_path):
             conn.execute("INSERT INTO discovery_funnel (cycle_id, created_at, symbol, status, liquidity_score) "
                          "VALUES ('c', '', ?, 'ranked_eligible', ?)", (sym, score))
     assert JournalUniverse(db).rank_at(datetime(2026, 3, 2, 11)) == {"HIGH": 0, "LOW": 1}
+
+
+def test_learning_is_off_by_default_for_every_runtime_mode(tmp_path):
+    """Online learning must never steer paper/runtime selection by default (unvalidated
+    evidence, holdout-overlapping research windows, mismatched regime labels)."""
+    from pathlib import Path
+
+    from engine.shadow import ShadowTradingEngine
+
+    engine_default = ShadowTradingEngine(SimpleNamespace(), SimpleNamespace(), state_dir=tmp_path / "s")
+    assert engine_default.learning_enabled is False and engine_default.selector.learning_engine is None
+    root = Path(__file__).resolve().parents[1]
+    for runner in ("paper_alpha.py", "run_knt_signal_paper_once.py", "run_shadow_only.py"):
+        assert "learning_enabled=True" not in (root / runner).read_text(encoding="utf-8"), runner

@@ -310,3 +310,34 @@ def test_journal_universe_does_not_see_later_snapshots_through_utc_bars(tmp_path
     # A 14:30Z (09:30 ET) bar is BEFORE the snapshot: nobody is a member yet.
     assert u.members_at(_key("2026-03-02T14:30:00+00:00")) == frozenset()
     assert u.members_at(_key("2026-03-02T17:30:00+00:00")) == {"AAA"}
+
+
+def test_fetch_keeps_older_history_and_separates_reused_tickers(tmp_path):
+    from run_fetch_journal_bars import cache_file, merge_bars
+
+    old = [{"time": "2026-01-02T15:00:00+00:00", "close": 1}, {"time": "2026-01-02T16:00:00+00:00", "close": 2}]
+    new = [{"time": "2026-01-02T16:00:00+00:00", "close": 2.5}, {"time": "2026-06-01T15:00:00+00:00", "close": 3}]
+    merged = merge_bars(old, new)
+    assert [r["close"] for r in merged] == [1, 2.5, 3]           # oldest bar kept, overlap refreshed
+    contracts = [("ABC", 1), ("ABC", 2), ("XYZ", 3)]
+    assert cache_file(tmp_path, "ABC", 2, contracts).name == "ABC.2_intraday_1y.json"
+    assert cache_file(tmp_path, "XYZ", 3, contracts).name == "XYZ_intraday_1y.json"
+
+
+def test_ibkr_score_provider_requests_each_contract_once():
+    import asyncio
+    from types import SimpleNamespace
+
+    from run_score_shadow import IBKRHistoryBarsProvider
+
+    calls = []
+
+    async def bars(contract, **kw):
+        calls.append(contract.conId)
+        return [SimpleNamespace(time=datetime(2026, 1, 5, 15 + i)) for i in range(5)]
+
+    provider = IBKRHistoryBarsProvider(SimpleNamespace(), min_interval_seconds=0)
+    provider.history = SimpleNamespace(bars=bars)
+    for at in ("2026-01-05T15:00:00", "2026-01-05T16:00:00", "2026-01-05T17:00:00"):
+        asyncio.run(provider.bars_from("A", 1, at, "1 hour"))
+    assert calls == [1]

@@ -14,14 +14,34 @@ from research.shadow_scoring import CacheBarsProvider, ShadowScorer
 
 
 class IBKRHistoryBarsProvider:
-    """Read-only: completed bars after the decision via reqHistoricalData."""
+    """Read-only: completed bars after the decision via reqHistoricalData.
 
-    def __init__(self, ib) -> None:
+    One request per (conId, timeframe) — later rows reuse the cached series unless they need
+    an OLDER start — and at least ``min_interval_seconds`` between requests (IBKR pacing:
+    60 historical requests per 10 minutes).
+    """
+
+    name = "IBKR"
+
+    def __init__(self, ib, min_interval_seconds: float = 10.5) -> None:
         from market.history import HistoricalDataService
         from ib_async import Contract
 
         self.history = HistoricalDataService(ib)
         self.contract_cls = Contract
+        self.min_interval = max(0.0, float(min_interval_seconds))
+        self._cache: dict[tuple[int, str], tuple[object, list]] = {}
+        self._last_request: float | None = None
+
+    async def _paced(self, coro_factory):
+        import time
+
+        if self._last_request is not None:
+            wait = self.min_interval - (time.monotonic() - self._last_request)
+            if wait > 0:
+                await asyncio.sleep(wait)
+        self._last_request = time.monotonic()
+        return await coro_factory()
 
     async def bars_from(self, symbol, con_id, at, timeframe):
         """Bars from the decision bar onward; the request span covers the decision's age so the
@@ -35,12 +55,18 @@ class IBKRHistoryBarsProvider:
         start = _naive(at)
         if start is None:
             return []
-        age_days = (datetime.utcnow() - start).days
-        days = min(365, max(2, age_days + 3))
-        contract = self.contract_cls(conId=int(con_id), exchange="SMART")
-        bars = await self.history.bars(contract, duration=f"{days} D", bar_size=timeframe or "1 hour",
-                                       complete_only=True)
-        return [b for b in bars if _naive(b.time) >= start]
+        key = (int(con_id), timeframe or "1 hour")
+        cached = self._cache.get(key)
+        if cached is None or cached[0] > start:
+            age_days = (datetime.utcnow() - start).days
+            days = min(365, max(2, age_days + 3))
+            contract = self.contract_cls(conId=int(con_id), exchange="SMART")
+            bars = await self._paced(lambda: self.history.bars(contract, duration=f"{days} D",
+                                                               bar_size=key[1], complete_only=True))
+            first = _naive(bars[0].time) if bars else start
+            self._cache[key] = (first if first is not None else start, list(bars))
+            cached = self._cache[key]
+        return [b for b in cached[1] if _naive(b.time) >= start]
 
 
 async def main_async(args) -> None:

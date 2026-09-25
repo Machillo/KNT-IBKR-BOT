@@ -160,3 +160,36 @@ def test_state_dirs_can_be_shared_across_checkouts_but_never_relative(monkeypatc
     absolute = str(Path.cwd().resolve() / "shared_state")
     monkeypatch.setenv("KNT_STATE_DIR", absolute)
     assert cfg._state_dir_from_env("KNT_STATE_DIR", cfg.STATE_DIR) == Path(absolute)
+
+
+def test_registration_refuses_until_every_pre_registration_condition_holds(tmp_path, monkeypatch):
+    import run_shadow_only
+    from research import fwd_protocol
+    from research.shadow_journal import ShadowJournal
+    from run_shadow_only import registration_refusal
+
+    cfg = shadow_only_config(BotConfig(ibkr=IBKRConfig(port=7497, client_id=901),
+                                       risk=RiskConfig(max_trade_risk_pct=0.01), runtime=RuntimeConfig()))
+    from dataclasses import replace
+    from config.config import MarketDataConfig
+    cfg = replace(cfg, market_data=MarketDataConfig(market_data_type=1))
+    db = tmp_path / "state" / "strategy_performance.db"
+    monkeypatch.delenv("KNT_STATE_DIR", raising=False)
+    monkeypatch.delenv("KNT_BOT_STATE_DIR", raising=False)
+    assert "risk-limits-reviewed" in registration_refusal(cfg, db, False)
+    assert "KNT_STATE_DIR" in registration_refusal(cfg, db, True)
+    monkeypatch.setenv("KNT_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("KNT_BOT_STATE_DIR", str(tmp_path / "bot"))
+    monkeypatch.setattr(run_shadow_only, "BOT_STATE_DIR", tmp_path / "bot")
+    assert "does not exist" in registration_refusal(cfg, db, True)
+    (tmp_path / "bot").mkdir()
+    assert registration_refusal(cfg, db, True) is None
+    # A journal that already ran this code is a pre-registration look: a fresh state dir is required.
+    j = ShadowJournal(db)
+    j.record_cycle("c", universe=None, scanners=[], rows_per_scanner=1, quote_budget=1, market_data_type=1,
+                   session="REGULAR", market_open=True, run_mode="shadow_only")
+    j.record_cycle_end("c", eligible=0, attempted=0, errors=0, max_candidates=12, run_mode="shadow_only",
+                       learning_mode="frozen", scanner_rows={}, scanner_errors={}, config_hash="x")
+    assert "FRESH" in registration_refusal(cfg, db, True)
+    fwd_protocol.register_window(db, config_hash="x")
+    assert "already registered" in registration_refusal(cfg, db, True)

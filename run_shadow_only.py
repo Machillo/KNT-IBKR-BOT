@@ -99,6 +99,38 @@ def fwd_window_guard(journal_path: Path, cfg: BotConfig, *, end_window: bool = F
     return None
 
 
+def registration_refusal(cfg: BotConfig, journal_path: Path, risk_limits_reviewed: bool) -> str | None:
+    """Everything that must hold BEFORE a window is pinned (it cannot be changed afterwards)."""
+    import os
+    import sqlite3
+
+    from research.fwd_protocol import window_file
+    from research.shadow_journal import decision_fingerprint
+
+    if window_file(journal_path).exists():
+        return "a window is already registered in this state directory (a new window needs a new id)"
+    if cfg.risk.max_trade_risk_pct > 0.01 or cfg.market_data.market_data_type != 1:
+        return "set MAX_TRADE_RISK_PCT<=0.01 and MARKET_DATA_TYPE=1"
+    if not risk_limits_reviewed:
+        return (f"confirm the risk limits with --risk-limits-reviewed (daily loss {cfg.risk.max_daily_loss_pct}, "
+                f"drawdown {cfg.risk.max_drawdown_pct}, position {cfg.risk.max_position_pct}); they are pinned")
+    for name in ("KNT_STATE_DIR", "KNT_BOT_STATE_DIR"):
+        if not os.environ.get(name):
+            return f"{name} must be set (docs/FWD_PROTOCOL.md §Pinned deployment)"
+    if not BOT_STATE_DIR.is_dir():
+        return f"KNT_BOT_STATE_DIR does not exist: {BOT_STATE_DIR}"
+    if journal_path.exists():
+        with sqlite3.connect(journal_path) as conn:
+            tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if "discovery_cycles" in tables:
+                columns = {r[1] for r in conn.execute("PRAGMA table_info(discovery_cycles)")}
+                if "decision_fingerprint" in columns and conn.execute(
+                        "SELECT COUNT(*) FROM discovery_cycles WHERE decision_fingerprint=?",
+                        (decision_fingerprint(),)).fetchone()[0]:
+                    return "this journal already holds cycles of this code: use a FRESH KNT_STATE_DIR"
+    return None
+
+
 def shadow_only_config(base: BotConfig) -> BotConfig:
     """Same runtime settings, but a read-only session, own clientId, dry-run kill switch,
     autonomous trading disabled and live trading refused — nothing in this process can send an
@@ -142,13 +174,9 @@ async def main_async(args) -> None:
         logger.critical("FWD WINDOW ENDED at %s: report its interim state in docs/experiments/LOG.md; "
                         "a new window needs a new protocol id", record.get("ended_at_utc"))
     if getattr(args, "register_fwd_window", False):
-        # Registered by THIS process: the fingerprint and config hash are the ones actually running.
-        if cfg.risk.max_trade_risk_pct > 0.01 or cfg.market_data.market_data_type != 1:
-            raise SystemExit("Refusing to register: set MAX_TRADE_RISK_PCT<=0.01 and MARKET_DATA_TYPE=1 first")
-        record = register_window(journal_path, config_hash=decision_config_hash(cfg))
-        print("FWD WINDOW REGISTERED. Commit this exact line to docs/experiments/LOG.md (any branch of this "
-              "repository) within 3 days, or the evaluator refuses the window:")
-        print(registration_line(record))
+        refusal = registration_refusal(cfg, journal_path, getattr(args, "risk_limits_reviewed", False))
+        if refusal:
+            raise SystemExit(f"Refusing to register the FWD window: {refusal}")
     cfg.validate()
     connection = IBKRConnection(cfg.ibkr)
     try:
@@ -156,6 +184,13 @@ async def main_async(args) -> None:
         # Own state directory: shadow-only never races the trading bot's persisted locks.
         supervisor = PaperSupervisor(ib, cfg, state_dir=STATE_DIR / "shadow_only")
         context, account = await supervisor.initialize()
+        if getattr(args, "register_fwd_window", False):
+            # Registered only after a successful connection, by THIS process: the fingerprint and
+            # config hash are the ones actually running.
+            record = register_window(journal_path, config_hash=decision_config_hash(cfg))
+            print("FWD WINDOW REGISTERED. Commit this exact line to docs/experiments/LOG.md directly on main "
+                  "and push it within 3 days (never squash or re-wrap it):")
+            print(registration_line(record))
         intelligence = MarketIntelligenceService(ib, MarketDataService(ib, cfg.market_data))
         # Research copy of the hard risk manager: same limits, mirrors every real lock except the
         # expected readonly-session lock (see research_lock).
@@ -201,6 +236,8 @@ def main() -> None:
     ap.add_argument("--cycles", type=int, default=0)
     ap.add_argument("--register-fwd-window", action="store_true",
                     help="register the FWD-v1 window from this very process (once), then run")
+    ap.add_argument("--risk-limits-reviewed", action="store_true",
+                    help="explicit acknowledgement that the pinned risk limits were reviewed")
     ap.add_argument("--end-fwd-window", action="store_true",
                     help="start on changed decision code/config, knowingly ENDING the registered FWD window")
     asyncio.run(main_async(ap.parse_args()))

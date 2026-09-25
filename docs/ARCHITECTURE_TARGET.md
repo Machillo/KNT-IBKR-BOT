@@ -40,7 +40,7 @@ NO TRADE is a first-class outcome at every arrow.
 | Transaction-cost awareness | Partial | Costs only in replay and scoring. Decisions ignore cost; now recorded as `cost_in_r`. |
 | Position sizing | Exists, STK-only | Size = min(1 % risk, 10 % notional), floored to whole shares; sized on tick-rounded prices. No multiplier, no margin. |
 | Capital allocation | Partial | Independent per trade. No feasible set, no ranking, no minimum-capital logic. |
-| Portfolio risk | Exists (single-opportunity checks) | Gross 80 %, cash reserve net of pending orders, daily loss, drawdown, sector 30 %, correlated cluster 40 %, \|corr\| > 0.85. No total open-risk ("heat") limit, no margin, no issuer map. |
+| Portfolio risk | Exists (single-opportunity checks) | Gross 80 %, cash reserve net of pending orders, daily loss, drawdown, sector 30 %, correlated cluster 40 % (pairwise 0.80, ≥ 20 returns), \|corr\| > 0.85 (≥ 40 returns). GTC exits count as pending exposure across days (effective cap ≈ 3 positions). No total open-risk ("heat") limit, no margin, no issuer map. |
 | Risk veto | Exists and correct | RiskManager sits on every approval path, and nothing overrides it. |
 | Learning / performance tracking | Exists, **not valid** | Thresholds unjustified. Research windows overlap the holdout. Regime labels mismatched. **Now OFF by default everywhere.** |
 | Shadow learning / evidence | Exists | Journal v2 + opportunities, scorer v3, quality gates, FWD-v1. |
@@ -51,18 +51,25 @@ NO TRADE is a first-class outcome at every arrow.
 | Session / calendar | STK-coupled | One global US-equity session from SPY `liquidHours`; ET dates hardcoded; 1 h timeframe hardcoded. |
 
 ### Selector census (descriptive, TRAIN only, no returns looked at)
-`tools/selector_census.py` (run 2026-09-25 on the 38-name cache, bars < 2023-09-01, 140-bar context,
-learning off):
+`tools/selector_census.py`, run 2026-09-25:
+- **Data:** the 38-name cache, bars before 2023-09-01, 140-bar context, learning off.
+- **Sampling:** every 5th bar per symbol, so evaluations are autocorrelated.
+- **Timeframe:** 4h and daily bars only. The runtime uses 1-hour bars, but the 1h cache lies in
+  VALIDATION/HOLDOUT and was deliberately not used, so **the 1h rates are unknown**.
+- **Bias:** the cohort was chosen with hindsight and over-represents trending names, which
+  inflates momentum_gap's share.
+
+Findings:
 - The selector chooses a trade in **86 % (4h) / 76 % (daily)** of evaluations.
-- NO_TRADE comes almost only from the high-volatility pause. The threshold of 55 binds in
-  ~1 % of evaluations.
-- **momentum_gap_v1 is selected 51 % / 57 % of the time, even in RANGE (28–34 %)**.
+- NO_TRADE comes mostly from the high-volatility pause: 71 % of NO_TRADE on 4h (20 %
+  "all strategies flat"), 87 % on daily. The threshold of 55 binds in ~1 % of evaluations.
+- **momentum_gap_v1 is selected 51 % / 57 % of the time, including 28–34 % in RANGE.**
   momentum_gap + trend_following + swing_structure together take ~93 %. swing_structure's score
   is the constant 70.
 
-It is effectively a trend/momentum basket behind a selector, not evidence-based multi-strategy
-selection. This is not changed now: FWD1 is testing exactly this selector. Changing it would
-change the object under test. Replacing it is PR-B below.
+On these data it behaves as a trend/momentum basket behind a selector, not evidence-based
+multi-strategy selection. It is not changed now: FWD1 is testing exactly this selector, and
+changing it would change the object under test. Replacing it is PR-E below.
 
 ## 3. Quantitative defects in the requested architecture, and the alternative
 1. **"Compare opportunity A+X with B+Y" needs a common currency.** Heuristic scores have
@@ -110,26 +117,41 @@ change the object under test. Replacing it is PR-B below.
 **Research → Selection is a human-reviewed commit** (a lifecycle change, a calibration table),
 triggered by a registered test's binding result. Nothing else crosses that boundary.
 
-## 5. Evidence per strategy × context (design; not implemented)
+## 5. Evidence per strategy × context (design; not implemented; corrected after review)
 - **Unit:** per-opportunity forward R net of cost. Store it with the versions of the strategy,
   the regime detector and the context length. Aggregate at read time.
-- **Model:** empirical-Bayes hierarchy μ_strategy + δ_regime (+ δ_asset_class). Standard errors
-  are clustered by trading day. The shrinkage weight is n / (n + σ²/τ²), with σ and τ
-  **estimated from data**. If τ̂ ≈ 0, use global evidence only.
-  - Symbol-level cells are not modelled: they would essentially never get weight.
-- **Minimum samples:** derived from power, n ≈ ((z_α/K + z_β)·σ/δ)², at a registered minimum
-  detectable effect δ and cell count K. They are not chosen by hand. Where σ is unknown, a
-  registered pilot estimates it first.
+- **Clustering:** by trading day, and by (symbol, bar), because all strategy evaluations of one
+  decision share the same price path.
+- **Model:** empirical-Bayes hierarchy μ_strategy + δ_regime (+ δ_asset_class).
+  - The shrinkage weight is τ² / (τ² + SE²_clustered), not a raw-count formula. σ and τ are
+    **estimated from data**.
+  - Shrinkage is continuous. There is no "τ̂ > 0" pre-test, which would be model selection;
+    with only 4 regimes τ is barely identified.
+  - Symbol-level cells are not modelled.
+  - HIGH_VOLATILITY has no selected trades (the pause), so no evidence exists there.
+- **Minimum samples:** derived from power:
+  n ≈ ((z_{1−α/(2K)} + z_β)·σ/δ)² × design effect,
+  at a registered minimum detectable effect δ and cell count K. With σ ≈ 1–1.3R, δ = 0.2R and
+  K = 40, that is **≈ 410–700 trades per cell before the design effect**. None of these are
+  chosen by hand; where σ is unknown, a registered pilot estimates it first.
 - **Selector use:**
-  1. First a calibration: score → expected forward R (isotonic regression, on forward data only).
-  2. Then rank by a lower bound (e.g. the 25th percentile of the posterior) of expected R net of
-     cost per unit of risk.
+  1. First a calibration score → expected forward R. A method that yields uncertainty is
+     required (e.g. Bayesian monotone regression, or isotonic regression with bootstrap
+     intervals).
+     - It is **fitted on one registered window and evaluated on a later, disjoint one**, to
+       avoid winner's curse.
+     - It is degenerate for constant-score strategies (swing_structure = 70).
+     - Selected-only data are range-restricted (scores ≥ 55); the calibration must use all
+       opportunities (`shadow_opportunities`) after the embargo.
+  2. Then rank by the calibrated lower bound of expected R net of FULL cost (commission at the
+     proposed size included) per unit of risk.
   3. Each calibration is a registered test.
 - **New strategies:** start from the pooled prior of peer strategies (probably ≤ 0 after costs),
   not a neutral "unknown", and stay SHADOW.
-- **Degradation, demotion, retirement:** a pre-registered sequential test on forward R (CUSUM
-  or SPRT with fixed α/β). Demote when P(μ < 0) exceeds a registered level; retire when the
-  upper bound stays below cost for a registered number of trades. Hysteresis is required.
+- **Degradation, demotion, retirement:** ONE pre-registered sequential procedure on forward R,
+  a group-sequential test or SPRT with fixed α/β. There is no continuously monitored posterior
+  threshold. Repeated demote/re-promote cycles count in K. Retiring a strategy during an open
+  FWD window ends that window (a decision-path change).
 - **Cannot be set without data:** σ, τ, the half-life for freshness, the score → R mapping.
   Each is fixed by a registered estimation step, never by choice.
 
@@ -142,11 +164,13 @@ any state. Each arrow is a committed change after:
 | RESEARCH → SHADOW | Written hypothesis (mechanism, universe, horizon); passes TRAIN checks; registered in LOG.md. |
 | SHADOW → FORWARD_VALIDATED | A pre-registered forward test (FWD-style, own α/K, binding cutoff) returns KEEP on post-registration data. |
 | FORWARD_VALIDATED → PAPER | Calibration of score → R exists (registered); human review; paper plumbing proven. |
-| PAPER → LIVE_ELIGIBLE | Paper-to-live gate: realized-vs-shadow reconciliation, one-time HOLDOUT test of the frozen implementation, human sign-off. LIVE itself stays a separate human decision. |
+| PAPER → LIVE_ELIGIBLE | Paper-to-live gate: realized-vs-shadow reconciliation, a forward test on post-registration data (the v1 HOLDOUT is single-use for the WHOLE family, on a biased cohort, and cannot be reused per strategy), human sign-off. LIVE itself stays a separate human decision. |
 | Any → RETIRED | Registered degradation test, or a human decision recorded in LOG.md. |
 
 Exploration happens only in RESEARCH and SHADOW, without capital. Today every strategy is
-SHADOW.
+SHADOW. FWD1 KEEP would validate the AGGREGATE selector, not any single strategy: per-strategy
+promotion needs its own registered test. "Any → RETIRED" by human decision requires the reason
+to be logged in LOG.md.
 
 ## 7. Asset-class lifecycle (design: InstrumentSpec; nothing enabled)
 A class becomes tradable only when **all** items are implemented, tested and journaled.
@@ -181,33 +205,61 @@ with `supported=False` and lists what is missing.
 ## 8. Capital allocation (design; not implemented)
 ```
 available capital (NetLiquidation, cash, buying power, pending orders)
- → feasible set  (whole units under caps; full cost in R ≤ registered bound; PDT/settlement; spec supported)
+ → feasible set  (spec supported; whole units under caps; FULL cost incl. commission in R
+                  ≤ registered bound; PDT and T+1 settlement; size ≤ registered share of ADV)
  → comparable set (only lifecycle ≥ PAPER with a registered calibration)
- → cycle-wide ranking by lower-bound expected R net of cost per unit of risk
- → greedy allocation under constraints: per-trade risk, portfolio heat, gross, cash reserve,
-   sector, correlated cluster, issuer/underlying map, max concurrent positions
+ → cycle-wide ranking by the calibrated lower bound of expected R net of cost per unit of risk
+ → greedy allocation under constraints: per-trade risk, portfolio heat (sum of open risk),
+   GAP budget (notional × registered gap assumption, beta/leverage-adjusted), gross, cash reserve,
+   sector, correlated cluster, issuer/underlying map, max concurrent positions,
+   earnings-date exclusion
  → RiskManager / PortfolioBrain / CrossExposureGuard veto (unchanged, always last)
 ```
-Missing pieces to add: portfolio heat (sum of open risk), margin and buying power, an issuer or
-underlying map (e.g. SPY/VOO, GOOG/GOOGL), an explicit maximum number of concurrent positions,
-and a minimum-capital statement per instrument class.
+Current limit composition (portfolio/risk review, round 4):
+- **Per-trade risk:** the 1 % budget rarely binds, because the 10 % position cap binds first.
+- **Gaps:** protective stops only trigger in regular hours (`outsideRth=False`), so gaps fill
+  at the open. At 80 % gross, a −10 % market gap costs about −9.6 % of equity, just under the
+  10 % daily limit. One −30 % earnings gap on a 10 % position is −3 % of equity.
+- **Daily loss vs drawdown:** 10 % daily loss against 15 % drawdown lets one day use two-thirds
+  of the drawdown budget.
+- **Recommendation (human decision, before registration, because it changes the config hash):**
+  daily loss 2–3 %, drawdown about 10 %, plus the gap budget above when PR-D lands.
+
+Other missing pieces:
+- margin and buying power;
+- an issuer or underlying map (SPY/VOO, GOOG/GOOGL; today only the 60-hour correlation
+  catches them);
+- a minimum-capital statement per instrument class;
+- a check that every position has a live stop (GTC orders can be cancelled by corporate
+  actions);
+- a reconciliation of child quantity after a partial fill of a DAY parent.
 
 ## 9. FWD impact of this round
-The decision-code fingerprint covers `engine/`, `execution/`, `market/`, `portfolio/`,
-`risk/`, `strategies/`, `core/`, `config/config.py`, `research/shadow_journal.py` and
-`run_shadow_only.py`. Every implemented change in §10 touches it, which is intended: they land
+The decision-code fingerprint covers:
+- `engine/`, `execution/`, `market/`, `portfolio/`, `risk/`, `strategies/`, `core/`;
+- `config/config.py`, `backtest/costs.py`, `research/shadow_journal.py`, `run_shadow_only.py`.
+
+The protocol fingerprint covers the evaluator, the scorer, the gates, `research/protocol.py`
+and the cost model. Every change below touches one of them, which is intended: they land
 **before** registration.
+
+The golden digest (`tests/test_decision_golden.py`) was recorded AFTER the 1 % default and
+tick-rounded sizing, so it certifies only the later recording-only changes. It covers the
+replay path (zero costs, no sectors), not the shadow-only path, admission with sectors or
+`top_*`.
 
 | Change | Changes decisions? | Why before FWD |
 |---|---|---|
-| Bracket children GTC | No (execution only) | Safety bug; also parity with the scorer's persistent bracket. |
-| Kill switch skips non-STK | No | Safety. |
-| Hard risk default 1 % | No for the default allocator (risk ≤ 1 % already); tighter ceiling | Hard layer enforces what the allocator assumes. |
+| Bracket children GTC | **Yes, indirectly:** GTC exits count as pending exposure across days, tightening capacity (≈ 3 positions) | Safety bug (exits expired at the close). |
+| Kill switch: non-STK skip, all-client orders, keeps manual positions' protection, no flatten under a live opposite order | No | Safety. |
+| Hard risk default 1 % (+ float tolerance) | Not certified by the digest; with the default allocator risk is ≤ 1 % already | Hard layer enforces what the allocator assumes. |
 | Size on tick-rounded prices | Slightly (quantity) | Avoids decisions the executor would refuse. |
 | Learning off by default | Paper only (shadow-only was already off) | Unvalidated evidence must not steer paper. |
-| Lifecycle statuses + executor gate | No for shadow (golden digest); blocks autonomous paper | Frozen definition of what is evaluated. |
-| Opportunity records + stock_type | No (golden digest) | Evidence must be recorded from the first window day. |
-| Restart guard on the registered window | No | Protects the window. |
+| Lifecycle statuses + executor gate | No for shadow (digest); blocks autonomous paper | Frozen definition of what is evaluated. |
+| Opportunity records + stock_type | No (digest); the recorder cannot break a decision | Evidence must be recorded from the first window day. |
+| Instrument-type universe (COMMON/ADR/REIT) | **Yes:** ETFs and unknown types are no longer analysed | The FWD universe must be fixed before registration. |
+| Daily-loss baseline rolls per day | Yes, for long-running processes (tighter) | Risk bug. |
+| Registration integrity, blinding, restart guard | No | Protects the window. |
 
 ## 10. Implemented in PR #3 (this round)
 See the PR body and `docs/OVERNIGHT_PROGRESS.md`: GTC protective children, kill-switch non-STK
@@ -220,14 +272,17 @@ golden decision digest.
 1. **PR-A (this, #3):** forward-evidence infrastructure + the pre-FWD items above. Then register
    FWD-v1 from a pinned worktree.
 2. **PR-B, evidence store (research only):** per-opportunity R, versioned regime labels with
-   the same context length, hierarchical pooling, power calculator. It runs offline on
-   TRAIN/VALIDATION replays and changes no decision.
-3. **PR-C, InstrumentSpec for STK/ETF:** multiplier/tick/increment/currency plumbing, ETF
-   classification (leveraged/inverse refused or leverage-adjusted), `sec_type` in the journal.
-   STK behavior identical (golden digest).
+   the same context length, hierarchical pooling, power calculator. Opportunity journaling in
+   the replay. It runs offline on TRAIN only and changes no decision. Adding journal columns or
+   versioning `market/regime.py` changes the fingerprint: merge to main, never deploy to the
+   pinned run.
+3. **PR-C, InstrumentSpec for STK (then ETF):** multiplier/tick/increment/currency plumbing,
+   `sec_type` in the journal, `stockType` in the funnel (REPLAY_PARITY N13). **Changes the
+   fingerprint and the universe path**: a new FWD version for anything evaluated after it.
 4. **PR-D, capital feasibility:** feasible-set filter (full cost in R, whole units, PDT),
-   portfolio heat, max concurrent positions, issuer map. Registered as a decision-path change,
-   so a NEW FWD version for anything evaluated after it.
+   portfolio heat, max concurrent positions, issuer map. It also covers gap budget, earnings exclusion
+   and ADV participation. Registered as a decision-path change, so a NEW FWD version for
+   anything evaluated after it.
 5. **PR-E, calibrated comparison:** score → R calibration per strategy (after FWD1/FWD2 bind),
    cycle-wide ranking and greedy allocation. Registered as a new forward test before any
    capital.
@@ -235,3 +290,9 @@ golden decision digest.
    paper-to-live evidence reconciliation.
 7. **PR-G+, other asset classes:** one class per PR (FX → FUT → OPT), each completing its full
    §7 column with tests. Paper only after its own shadow period.
+
+**Fingerprint rule for every PR:** anything touching the decision path (the §9 list) or the
+protocol files changes a fingerprint. Such PRs may merge to main during a window, but the
+pinned run keeps its checkout until the window binds (at the latest 2027-03-31) or is
+explicitly ended. That includes safety hotfixes: if a safety fix is urgent, end the window
+(recorded and reported) rather than patching the pinned run silently.

@@ -28,7 +28,11 @@ H1–H9 all REJECT, null model, shadow journal v1. Tests 124 → 275.
 
 Reviews this session: execution-safety ×3 (0 blockers; all should-fix fixed), quant-methodology ×2
 (3 + 2 blockers, all fixed), trading-architect (13 documented divergences; 2 runtime fixes).
-Tests: 275 → 351 passing; conftest fails the run if the real state/ directory changes.
+Tests: 275 → 352 passing (`python -m pytest -q`); conftest fails the run if the real state/
+directory changes. Mutation checks (fix removed → tests fail): readonly refusal in the paper guard
+(2 fail), drawdown failure no longer shielding the kill switch (2), research lock ignoring daily
+loss (1), correlation ignoring working orders (3); session 1: guard call, gap stop, OOS filter,
+approval gate.
 
 ## Research status
 - Tests on protocol-v1 VALIDATION: **15** (H1–H9, F1–F6) → stop searching this dataset.

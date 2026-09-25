@@ -72,6 +72,26 @@ def decision_config_hash(cfg: BotConfig) -> str:
     return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
 
 
+def fwd_window_guard(journal_path: Path, cfg: BotConfig, *, end_window: bool = False) -> str | None:
+    """Refuse to (re)start shadow-only on decision code or config that differs from a REGISTERED
+    FWD window: that would silently invalidate the forward evidence. Returns a refusal reason, or
+    None. ``end_window`` is the explicit, logged acknowledgement that the window ends here."""
+    import json
+
+    from research.fwd_protocol import window_file
+    from research.shadow_journal import decision_fingerprint
+
+    target = window_file(journal_path)
+    if not target.exists() or end_window:
+        return None
+    record = json.loads(target.read_text(encoding="utf-8"))
+    if record.get("decision_fingerprint") != decision_fingerprint():
+        return "decision code differs from the registered FWD window (deploy the pinned checkout)"
+    if record.get("config_hash") != decision_config_hash(cfg):
+        return "decision config differs from the registered FWD window (restore the registered .env)"
+    return None
+
+
 def shadow_only_config(base: BotConfig) -> BotConfig:
     """Same runtime settings, but a read-only session, own clientId, dry-run kill switch,
     autonomous trading disabled and live trading refused — nothing in this process can send an
@@ -101,6 +121,10 @@ async def main_async(args) -> None:
     from utils.logger import logger
 
     cfg = shadow_only_config(config)
+    refusal = fwd_window_guard(STATE_DIR / "shadow_only" / "strategy_performance.db", cfg,
+                               end_window=getattr(args, "end_fwd_window", False))
+    if refusal:
+        raise SystemExit(f"SHADOW-ONLY refused: {refusal}. Pass --end-fwd-window only to END the window.")
     cfg.validate()
     connection = IBKRConnection(cfg.ibkr)
     try:
@@ -151,6 +175,8 @@ async def main_async(args) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--cycles", type=int, default=0)
+    ap.add_argument("--end-fwd-window", action="store_true",
+                    help="start on changed decision code/config, knowingly ENDING the registered FWD window")
     asyncio.run(main_async(ap.parse_args()))
 
 

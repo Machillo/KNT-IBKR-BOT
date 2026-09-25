@@ -109,3 +109,22 @@ def test_research_lock_mirrors_the_trading_bots_real_locks_read_only(isolated_st
     (real / "risk_state.json").unlink()
     (real / "drawdown_state.json").write_text("{corrupt", encoding="utf-8")
     assert research_locked(sup, 100_000, real_state_dir=real) == "bot_state_unreadable"
+
+
+def test_shadow_only_refuses_to_restart_on_code_or_config_that_breaks_a_registered_window(tmp_path, monkeypatch):
+    import pytest
+    from research import fwd_protocol
+    from run_shadow_only import decision_config_hash, fwd_window_guard
+
+    cfg = shadow_only_config(BotConfig(ibkr=IBKRConfig(port=7497, client_id=901), risk=RiskConfig(),
+                                       runtime=RuntimeConfig()))
+    db = tmp_path / "strategy_performance.db"
+    assert fwd_window_guard(db, cfg) is None                                  # nothing registered
+    fwd_protocol.register_window(db, config_hash=decision_config_hash(cfg))
+    assert fwd_window_guard(db, cfg) is None                                  # same code + config
+    other = shadow_only_config(BotConfig(ibkr=IBKRConfig(port=7497, client_id=901),
+                                         risk=RiskConfig(max_position_pct=0.05), runtime=RuntimeConfig()))
+    assert "config differs" in fwd_window_guard(db, other)
+    monkeypatch.setattr("research.shadow_journal.decision_fingerprint", lambda: "changed")
+    assert "code differs" in fwd_window_guard(db, cfg)
+    assert fwd_window_guard(db, cfg, end_window=True) is None                 # explicit acknowledgement

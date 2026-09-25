@@ -8,6 +8,7 @@ import csv
 import json
 
 from backtest.engine import BacktestEngine, BacktestResult
+from research.splits import Window, run_window
 from backtest.validation import DEFAULT_SCENARIOS, ValidationScenario
 from market.history import PriceBar
 
@@ -133,12 +134,12 @@ def summarize_months(result: BacktestResult, target_pct: float = 5.0) -> Monthly
     )
 
 
-def _oos_slice(bars: list[PriceBar], fraction: float = 0.30, minimum: int = 120) -> list[PriceBar]:
+def _holdout_start(bars: list[PriceBar], fraction: float = 0.30, minimum: int = 120) -> int:
+    """Index where the chronological holdout begins (final ``fraction`` of bars)."""
     if not bars:
-        return []
-    count = max(minimum, int(len(bars) * fraction))
-    count = min(len(bars), count)
-    return bars[-count:]
+        return 0
+    count = min(len(bars), max(minimum, int(len(bars) * fraction)))
+    return len(bars) - count
 
 
 def evaluate_monthly_target(
@@ -153,20 +154,30 @@ def evaluate_monthly_target(
     initial_equity: float = 10_000.0,
     target_pct: float = 5.0,
 ) -> list[MonthlyTargetRow]:
+    """Development/holdout evaluation of the monthly research target.
+
+    The un-prefixed metrics (months, compounded_monthly_pct, ...) describe the
+    DEVELOPMENT segment only (first 70 %). ``oos_*`` describe the chronological
+    HOLDOUT (last 30 %), evaluated with warmup context but counting only trades
+    entered inside it. ``candidate_5pct`` and ``robustness_rank`` use development
+    metrics only, so ranking/selection never reads the holdout.
+    """
     rows: list[MonthlyTargetRow] = []
-    oos_bars = _oos_slice(bars)
+    cut = _holdout_start(bars)
+    development = Window("DEVELOPMENT", 0, cut)
+    holdout = Window("HOLDOUT", cut, len(bars))
     for strategy in strategies:
         for scenario in scenarios:
             engine = scenario.engine(initial_equity)
-            full = engine.run(bars, strategy)
+            full = run_window(engine, bars, strategy, development)
             full_monthly = summarize_months(full, target_pct=target_pct)
-            oos = engine.run(oos_bars, strategy) if len(oos_bars) >= 2 else engine.run([], strategy)
+            oos = run_window(engine, bars, strategy, holdout)
             oos_monthly = summarize_months(oos, target_pct=target_pct)
             pf = full.profit_factor
             finite_pf = 0.0 if pf is None else (999.0 if pf == float("inf") else float(pf))
 
-            # A candidate label is deliberately hard to earn. It is evidence for further
-            # Paper validation, never a return promise or permission to increase hard risk.
+            # Candidate = development evidence only. The holdout columns are reported
+            # for a single later confirmation and must not be used to pick winners.
             candidate = bool(
                 full_monthly.months >= 12
                 and full_monthly.compounded_monthly_pct >= target_pct
@@ -175,9 +186,6 @@ def evaluate_monthly_target(
                 and full.max_drawdown_pct <= 20.0
                 and full.trades >= 20
                 and finite_pf >= 1.15
-                and oos_monthly.months >= 3
-                and oos_monthly.compounded_monthly_pct > 0
-                and oos.max_drawdown_pct <= 20.0
             )
             rows.append(MonthlyTargetRow(
                 symbol=symbol,
@@ -186,7 +194,7 @@ def evaluate_monthly_target(
                 duration=duration,
                 strategy=str(strategy.name),
                 scenario=scenario.name,
-                bars=len(bars),
+                bars=development.size,
                 months=full_monthly.months,
                 total_return_pct=full.total_return_pct,
                 compounded_monthly_pct=full_monthly.compounded_monthly_pct,
@@ -199,7 +207,7 @@ def evaluate_monthly_target(
                 max_drawdown_pct=full.max_drawdown_pct,
                 trades=full.trades,
                 profit_factor=full.profit_factor,
-                oos_bars=len(oos_bars),
+                oos_bars=holdout.size,
                 oos_months=oos_monthly.months,
                 oos_return_pct=oos.total_return_pct,
                 oos_compounded_monthly_pct=oos_monthly.compounded_monthly_pct,
@@ -211,14 +219,15 @@ def evaluate_monthly_target(
 
 
 def robustness_rank(row: MonthlyTargetRow) -> float:
-    """Rank consistency, not raw return, so extreme overfit results do not dominate."""
+    """Rank DEVELOPMENT consistency only; holdout (oos_*) columns are never read.
+
+    Ranking on holdout results would turn the holdout into a selection set.
+    """
     return (
         min(10.0, max(-10.0, row.compounded_monthly_pct)) * 3.0
         + min(100.0, row.positive_month_rate_pct) * 0.18
         + min(100.0, row.target_5pct_hit_rate_pct) * 0.10
-        + min(10.0, max(-10.0, row.oos_compounded_monthly_pct)) * 3.5
         - min(50.0, row.max_drawdown_pct) * 0.7
-        - min(50.0, row.oos_max_drawdown_pct) * 0.5
         + min(3.0, 0.0 if row.profit_factor is None else row.profit_factor) * 4.0
     )
 

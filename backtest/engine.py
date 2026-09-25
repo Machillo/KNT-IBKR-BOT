@@ -11,6 +11,12 @@ from backtest.metrics import (
 from market.history import PriceBar
 from strategies.momentum import SignalSide
 
+# Bumped whenever simulator semantics change materially. Research evidence produced
+# by older engines is kept for history but is not admissible for live decisions.
+# v1: stop filled at stop on gaps, bps-only costs, fractional qty, per-trade "Sharpe".
+# v2: gap-aware stops, IBKR cost model, integer shares, daily Sharpe, trade_start windows.
+ENGINE_VERSION = 2
+
 
 @dataclass(frozen=True)
 class BacktestTrade:

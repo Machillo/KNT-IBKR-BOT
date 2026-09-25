@@ -21,27 +21,40 @@ def _result(ret: float, dd: float, trades: int, pf: float, sharpe: float) -> Bac
     )
 
 
-def test_store_records_and_builds_oos_evidence(tmp_path: Path):
+def test_evidence_uses_oos_rows_only_never_train(tmp_path: Path):
     store = StrategyPerformanceStore(tmp_path / "perf.db")
+    run = store.begin_research_run(symbol="SPY", asset_class="STK", timeframe="1 hour", bars=1000)
     store.record_result(
         symbol="SPY", asset_class="STK", timeframe="1 hour", regime="TRENDING",
         strategy="momentum_v1", split="TRAIN", bars=120,
-        result=_result(8.0, 5.0, 50, 1.4, 1.0),
+        result=_result(80.0, 5.0, 50, 3.0, 3.0), run_id=run,
     )
     store.record_result(
         symbol="SPY", asset_class="STK", timeframe="1 hour", regime="TRENDING",
         strategy="momentum_v1", split="OOS", bars=40,
-        result=_result(3.0, 3.0, 30, 1.2, 0.6),
+        result=_result(3.0, 3.0, 30, 1.2, 0.6), run_id=run,
     )
+    store.finish_research_run(run)
     evidence = store.evidence(
         symbol="SPY", asset_class="STK", timeframe="1 hour",
         regime="TRENDING", strategy="momentum_v1",
     )
     assert evidence is not None
-    assert evidence.samples == 2
-    assert evidence.trades == 80
+    assert evidence.samples == 1
+    assert evidence.trades == 30
     assert evidence.oos_samples == 1
+    assert evidence.mean_return_pct == 3.0
     assert evidence.evidence_score > 0
+
+
+def test_evidence_without_completed_research_run_is_not_admissible(tmp_path: Path):
+    store = StrategyPerformanceStore(tmp_path / "perf.db")
+    store.record_result(
+        symbol="SPY", asset_class="STK", timeframe="1 hour", regime="TRENDING",
+        strategy="momentum_v1", split="OOS", bars=40, result=_result(3.0, 3.0, 30, 1.2, 0.6),
+    )
+    assert store.evidence(symbol="SPY", asset_class="STK", timeframe="1 hour",
+                          regime="TRENDING", strategy="momentum_v1") is None
 
 
 def test_store_persists_learning_assessment_history(tmp_path: Path):
@@ -136,12 +149,14 @@ def test_existing_v1_database_is_migrated_in_place(tmp_path: Path):
         run_tables = conn.execute(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='research_runs'"
         ).fetchone()[0]
-    assert {"run_id", "source", "strategy_version"}.issubset(columns)
+    assert {"run_id", "source", "strategy_version", "engine_version"}.issubset(columns)
     assert legacy_rows == 1
     assert run_tables == 1
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("SELECT engine_version FROM strategy_performance").fetchone()[0] == 1
+    # Legacy (v1 simulator) evidence is kept as history but never drives decisions.
     evidence = store.evidence(
         symbol="SPY", asset_class="STK", timeframe="1 hour",
         regime="TRENDING", strategy="momentum_v1",
     )
-    assert evidence is not None
-    assert evidence.trades == 25
+    assert evidence is None

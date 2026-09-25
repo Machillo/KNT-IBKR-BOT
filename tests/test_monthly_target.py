@@ -39,3 +39,26 @@ def test_monthly_summary_measures_target_hit_rate_and_compounding():
     assert stats.positive_month_rate_pct == 100.0
     assert stats.target_hit_rate_pct == 100.0
     assert stats.worst_month_pct > 9.99
+
+
+def test_ranking_and_candidate_never_read_holdout_columns():
+    from dataclasses import replace
+    from datetime import timedelta
+
+    from backtest.monthly_target import evaluate_monthly_target, robustness_rank
+    from backtest.validation import DEFAULT_SCENARIOS
+    from market.history import PriceBar
+    from strategies.library import TrendFollowingStrategy
+
+    start = datetime(2022, 1, 3)
+    bars, price = [], 100.0
+    for i in range(700):
+        price *= 1.002 if (i // 40) % 3 else 0.997
+        bars.append(PriceBar(start + timedelta(days=i), price, price * 1.01, price * 0.99, price, 1e6))
+    rows = evaluate_monthly_target(symbol="T", profile="p", timeframe="1 day", duration="2 Y", bars=bars,
+                                   strategies=[TrendFollowingStrategy()], scenarios=DEFAULT_SCENARIOS[:1])
+    row = rows[0]
+    assert row.bars + row.oos_bars == len(bars)
+    tampered = replace(row, oos_compounded_monthly_pct=99.0, oos_max_drawdown_pct=0.0,
+                       oos_target_5pct_hit_rate_pct=100.0, oos_return_pct=500.0)
+    assert robustness_rank(tampered) == robustness_rank(row)

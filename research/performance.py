@@ -6,7 +6,10 @@ from math import isfinite
 from pathlib import Path
 import sqlite3
 
-from backtest.engine import BacktestResult
+from backtest.engine import ENGINE_VERSION, BacktestResult
+
+# Only OOS rows produced by a corrected engine may drive operational decisions.
+MIN_ADMISSIBLE_ENGINE_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -27,6 +30,7 @@ class PerformanceRecord:
     run_id: int | None = None
     source: str = "RESEARCH"
     strategy_version: str = "v1"
+    engine_version: int = ENGINE_VERSION
 
 
 @dataclass(frozen=True)
@@ -99,6 +103,8 @@ class StrategyPerformanceStore:
             self._add_column_if_missing(conn, "strategy_performance", "run_id", "INTEGER")
             self._add_column_if_missing(conn, "strategy_performance", "source", "TEXT NOT NULL DEFAULT 'RESEARCH'")
             self._add_column_if_missing(conn, "strategy_performance", "strategy_version", "TEXT NOT NULL DEFAULT 'v1'")
+            # Pre-existing rows came from the v1 simulator; they stay as history.
+            self._add_column_if_missing(conn, "strategy_performance", "engine_version", "INTEGER NOT NULL DEFAULT 1")
             conn.execute(
                 """CREATE INDEX IF NOT EXISTS idx_strategy_context
                 ON strategy_performance(symbol, asset_class, timeframe, regime, strategy, split)"""
@@ -283,14 +289,14 @@ class StrategyPerformanceStore:
                 INSERT INTO strategy_performance (
                     symbol, asset_class, timeframe, regime, strategy, split, bars, trades,
                     total_return_pct, max_drawdown_pct, win_rate_pct, profit_factor, sharpe,
-                    run_id, source, strategy_version
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    run_id, source, strategy_version, engine_version
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     item.symbol.upper(), item.asset_class.upper(), item.timeframe, item.regime,
                     item.strategy, item.split.upper(), item.bars, item.trades,
                     item.total_return_pct, item.max_drawdown_pct, item.win_rate_pct, pf, sharpe,
-                    item.run_id, item.source.upper(), item.strategy_version,
+                    item.run_id, item.source.upper(), item.strategy_version, int(item.engine_version),
                 ),
             )
 
@@ -310,6 +316,11 @@ class StrategyPerformanceStore:
     def _evidence_rows(
         self, *, symbol: str, asset_class: str, timeframe: str, regime: str, strategy: str,
     ) -> list[sqlite3.Row]:
+        """Admissible evidence only: OOS rows from a corrected engine, latest completed run.
+
+        TRAIN rows are diagnostic and never count. Rows from older engines and rows
+        without a research run are retained in the table but ignored here.
+        """
         with self._connect() as conn:
             latest = conn.execute(
                 """
@@ -318,27 +329,23 @@ class StrategyPerformanceStore:
                 JOIN research_runs rr ON rr.id=sp.run_id
                 WHERE sp.symbol=? AND sp.asset_class=? AND sp.timeframe=?
                   AND sp.regime=? AND sp.strategy=? AND rr.status='COMPLETED'
+                  AND sp.split='OOS' AND sp.engine_version>=?
                 """,
-                (symbol.upper(), asset_class.upper(), timeframe, regime, strategy),
+                (symbol.upper(), asset_class.upper(), timeframe, regime, strategy,
+                 MIN_ADMISSIBLE_ENGINE_VERSION),
             ).fetchone()
             run_id = None if latest is None else latest["run_id"]
-            if run_id is not None:
-                return conn.execute(
-                    """
-                    SELECT * FROM strategy_performance
-                    WHERE symbol=? AND asset_class=? AND timeframe=? AND regime=?
-                      AND strategy=? AND run_id=? ORDER BY id
-                    """,
-                    (symbol.upper(), asset_class.upper(), timeframe, regime, strategy, run_id),
-                ).fetchall()
-            # Compatibility fallback for pre-V2 databases until that context is researched again.
+            if run_id is None:
+                return []
             return conn.execute(
                 """
                 SELECT * FROM strategy_performance
-                WHERE symbol=? AND asset_class=? AND timeframe=? AND regime=? AND strategy=?
-                  AND run_id IS NULL ORDER BY id DESC LIMIT 100
+                WHERE symbol=? AND asset_class=? AND timeframe=? AND regime=?
+                  AND strategy=? AND run_id=? AND split='OOS' AND engine_version>=?
+                ORDER BY id
                 """,
-                (symbol.upper(), asset_class.upper(), timeframe, regime, strategy),
+                (symbol.upper(), asset_class.upper(), timeframe, regime, strategy, run_id,
+                 MIN_ADMISSIBLE_ENGINE_VERSION),
             ).fetchall()
 
     def evidence(
@@ -380,9 +387,13 @@ class StrategyPerformanceStore:
 
     def leaderboard(
         self, *, asset_class: str | None = None, timeframe: str | None = None, limit: int = 50,
+        admissible_only: bool = True,
     ) -> list[sqlite3.Row]:
         clauses: list[str] = []
         params: list[object] = []
+        if admissible_only:
+            clauses.append("split='OOS' AND engine_version>=?")
+            params.append(MIN_ADMISSIBLE_ENGINE_VERSION)
         if asset_class:
             clauses.append("asset_class=?")
             params.append(asset_class.upper())

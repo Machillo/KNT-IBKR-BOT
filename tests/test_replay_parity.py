@@ -500,3 +500,11 @@ def test_every_decision_knob_breaks_runtime_equivalence():
     for change in (dict(min_score=70.0), dict(strategies=("x",)), dict(max_entries_per_day=5),
                    dict(max_correlation=0.9), dict(pause_high_volatility=False)):
         assert PipelineConfig(**change).runtime_equivalent is False, change
+
+
+
+def test_merge_bars_dedupes_the_same_instant_written_differently():
+    from run_fetch_journal_bars import merge_bars
+    merged = merge_bars([{"time": "2026-01-02T15:00:00+00:00", "close": 1}],
+                        [{"time": "2026-01-02T10:00:00-05:00", "close": 2}])
+    assert [r["close"] for r in merged] == [2]

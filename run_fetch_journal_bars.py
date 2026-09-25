@@ -29,8 +29,20 @@ def journal_contracts(db: str) -> list[tuple[str, int]]:
 def merge_bars(existing: list[dict], fresh: list[dict]) -> list[dict]:
     """Union by bar time; fresh bars win on overlap. Older history is never discarded (FWD3
     needs months of it and IBKR only serves a rolling window)."""
-    by_time = {str(r["time"]): r for r in existing}
-    by_time.update({str(r["time"]): r for r in fresh})
+    from backtest.metrics import as_datetime
+
+    def key(row):
+        # Same instant written with different offsets/formats must merge into ONE bar.
+        dt = as_datetime(row["time"])
+        if dt is None:
+            return (1, str(row["time"]))
+        if dt.tzinfo is not None:
+            from datetime import timezone
+            dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+        return (0, dt.isoformat())
+
+    by_time = {key(r): r for r in existing}
+    by_time.update({key(r): r for r in fresh})
     return [by_time[k] for k in sorted(by_time)]
 
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -125,6 +125,7 @@ class PaperSupervisor:
         account = account or await self.accounts.snapshot(self.context.account, log=False)
         if account.net_liquidation is None:
             raise RuntimeError("Account snapshot missing NetLiquidation")
+        self._roll_trading_day(account.net_liquidation)
 
         self._check_drawdown(self.context.risk, account.net_liquidation)
         result = self.context.guard.evaluate(account.net_liquidation)
@@ -160,6 +161,26 @@ class PaperSupervisor:
                 # Entries are already locked by the daily guard; retried on the next poll.
                 logger.critical("SUPERVISOR STICKY KILL NOT PERSISTED | kill switch still runs | %s", exc)
         return await self.kill_switch.execute(reason)
+
+    def _roll_trading_day(self, equity: float, now: datetime | None = None) -> None:
+        """A long-running process must measure the DAILY loss from today's baseline, not from the
+        day it started. On a new exchange date: new persisted baseline (or the restored one) and a
+        new daily guard. Locks already set in memory are NOT released (fail closed: a new day
+        never unlocks by itself; a human restarts after reviewing)."""
+        today = (now or datetime.now(ZoneInfo("America/New_York"))).date().isoformat()
+        if self.context is None or today == self.context.trading_date:
+            return
+        persisted, created = self.store.load_or_create(
+            account=self.context.account, trading_date=today, starting_equity=equity)
+        risk = self.context.risk
+        if persisted.kill_switch_triggered and not risk.trading_locked:
+            risk.lock_trading(persisted.trigger_reason or "sticky daily Kill Switch")
+        self.context = replace(self.context, trading_date=today, starting_equity=persisted.starting_equity,
+                               guard=DailyLossGuard(risk, persisted.starting_equity))
+        self._kill_persisted = persisted.kill_switch_triggered
+        self.kill_switch = KillSwitch(self.ib, self.config.risk, self.context.account, guard=self.paper_guard)
+        logger.info("SUPERVISOR NEW TRADING DAY | date=%s baseline=%s source=%s locked=%s",
+                    today, "set", "CREATED" if created else "RESTORED", risk.trading_locked)
 
     def _check_drawdown(self, risk: RiskManager, equity: float) -> None:
         """Multi-day drawdown lock. Any failure locks new entries but NEVER prevents the daily

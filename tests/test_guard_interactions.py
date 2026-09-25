@@ -61,3 +61,26 @@ def test_drawdown_and_state_failures_together_still_reach_the_kill_switch(isolat
     ib.net_liq = 90_000
     asyncio.run(sup.evaluate())
     assert calls
+
+
+def test_long_running_supervisor_measures_daily_loss_from_each_new_day(isolated_state_dir):
+    """Day 1 +4 %: day 2 must lock at -10 % from DAY-2 equity, not from the day-1 baseline."""
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+
+    sup, ib = _supervisor(isolated_state_dir, net_liq=100_000)
+    tomorrow = datetime.now(ZoneInfo("America/New_York")) + timedelta(days=1)
+    sup._roll_trading_day(104_000, now=tomorrow)
+    assert sup.context.trading_date == tomorrow.date().isoformat() and sup.context.starting_equity == 104_000
+    result = sup.context.guard.evaluate(93_000)          # -10.6 % from 104k (only -7 % from the old 100k)
+    assert result.action_required and sup.context.risk.trading_locked
+
+
+def test_a_new_day_never_unlocks_an_existing_lock(isolated_state_dir):
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+
+    sup, ib = _supervisor(isolated_state_dir, net_liq=100_000)
+    sup.context.risk.lock_trading("multi-day drawdown lock")
+    sup._roll_trading_day(100_000, now=datetime.now(ZoneInfo("America/New_York")) + timedelta(days=1))
+    assert sup.context.risk.trading_locked and "drawdown" in sup.context.risk.lock_reason

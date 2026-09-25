@@ -182,7 +182,7 @@ async def main_async(args) -> None:
                     research_risk.lock_trading(reason)
                 else:
                     research_risk.trading_locked, research_risk.lock_reason = False, ""
-                state = states.build(snapshot, starting_equity=context.starting_equity,
+                state = states.build(snapshot, starting_equity=supervisor.context.starting_equity,
                                      daily_loss_limit_pct=cfg.risk.max_daily_loss_pct,
                                      trading_locked=research_risk.trading_locked)
                 await shadow.run_once(cfg.runtime.discovery_rows, portfolio_state=state)

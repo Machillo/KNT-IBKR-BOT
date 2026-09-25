@@ -80,6 +80,7 @@ Durable state lives in Git, tests and `docs/`. The current checkpoint and next a
 | `strategy-validation` | Backtests, walk-forward, metrics, costs, research claims, learning |
 | `paper-to-live-gate` | Deciding readiness for shadow/paper/live; promotion criteria |
 | `context-efficiency` | Long sessions, audits, research loops — save context without losing rigor |
+| `market-discovery` | Scanners, universe, liquidity ranking, point-in-time journaling, research universes without hindsight |
 
 ## 8. Agents (`.claude/agents/`)
 

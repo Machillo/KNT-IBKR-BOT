@@ -1,4 +1,5 @@
 import asyncio
+import sqlite3
 from types import SimpleNamespace
 
 import pytest
@@ -412,3 +413,37 @@ def test_transmission_error_counts_toward_cap_and_locks(tmp_path):
     assert risk.trading_locked is True
     from datetime import datetime, timezone
     assert e.journal.submitted_count_on(datetime.now(timezone.utc).date().isoformat()) == 1
+
+
+class PartialFillThenRejectIB(FakeIB):
+    """Parent fills, a child leg is rejected: the executor flattens the parent fill."""
+
+    def placeOrder(self, contract, order):
+        trade = super().placeOrder(contract, order)
+        if len(self.submitted) == 1:
+            trade.orderStatus.filled = 10
+        return trade
+
+
+def test_flattened_partial_bracket_locks_new_entries(tmp_path):
+    ib = PartialFillThenRejectIB(reject_index=1)
+    risk = RiskManager(RiskConfig())
+    result = run(engine(tmp_path, ib, enabled=True, risk_manager=risk).submit(stock(), request()))
+    assert result.submitted is False and result.reason.endswith("_flatten_requested")
+    assert risk.trading_locked is True
+
+
+def test_journal_failure_after_transmit_still_confirms_and_locks(tmp_path):
+    ib = FakeIB()
+    risk = RiskManager(RiskConfig())
+    e = engine(tmp_path, ib, enabled=True, risk_manager=risk)
+    original = e.journal.record
+
+    def flaky(req, *, status, reason, **kw):
+        if status in {"PENDING", "SUBMITTED"}:
+            raise sqlite3.OperationalError("database is locked")
+        return original(req, status=status, reason=reason, **kw)
+    e.journal.record = flaky
+    result = run(e.submit(stock(), request()))
+    assert result.submitted is True and result.reason == "bracket_confirmed"   # broker state is the truth
+    assert risk.trading_locked is True and "journal write failed" in risk.lock_reason

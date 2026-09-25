@@ -13,6 +13,7 @@ import sqlite3
 from core.order_manager import OrderManager
 from core.paper_guard import PaperGuardError, PaperOrderGuard
 from execution import pretrade
+from utils.logger import logger
 
 # Literal acknowledgement required, in addition to AUTONOMOUS_TRADING_ENABLED=true,
 # before the long-running loop may hand setups to the paper executor.
@@ -413,7 +414,7 @@ class PaperExecutionEngine:
                 lock("paper execution transmission error; broker state must be checked")
             return PaperExecutionResult(False, reason)
         parent_id = int(trades[0].order.orderId)
-        self.journal.record(normalized, status="PENDING", reason="bracket_sent", parent_order_id=parent_id)
+        self._record_after_transmit(normalized, "PENDING", "bracket_sent", parent_id)
 
         if self.acceptance_delay_seconds:
             await asyncio.sleep(self.acceptance_delay_seconds)
@@ -440,7 +441,8 @@ class PaperExecutionEngine:
             reason = rejected[0] or "bracket_leg_rejected"
             if flattened > 0:
                 reason = f"{reason}_flatten_requested"
-            self.journal.record(normalized, status="FAILED", reason=reason, parent_order_id=parent_id)
+                self._lock(f"paper bracket {parent_id} partially filled and flattened; broker state must be checked")
+            self._record_after_transmit(normalized, "FAILED", reason, parent_id)
             return PaperExecutionResult(False, reason, parent_id)
 
         accepted_statuses = {"PendingSubmit", "PreSubmitted", "Submitted", "Filled"}
@@ -454,8 +456,26 @@ class PaperExecutionEngine:
             reason = "bracket_acceptance_unconfirmed"
             if flattened > 0:
                 reason += "_flatten_requested"
-            self.journal.record(normalized, status="FAILED", reason=reason, parent_order_id=parent_id)
+                self._lock(f"paper bracket {parent_id} partially filled and flattened; broker state must be checked")
+            self._record_after_transmit(normalized, "FAILED", reason, parent_id)
             return PaperExecutionResult(False, reason, parent_id)
 
-        self.journal.record(normalized, status="SUBMITTED", reason="bracket_confirmed", parent_order_id=parent_id)
+        self._record_after_transmit(normalized, "SUBMITTED", "bracket_confirmed", parent_id)
         return PaperExecutionResult(True, "bracket_confirmed", parent_id)
+
+    def _lock(self, reason: str) -> None:
+        lock = getattr(self.risk_manager, "lock_trading", None)
+        if lock is not None:
+            lock(reason)
+
+    def _record_after_transmit(self, normalized: PaperExecutionRequest, status: str, reason: str,
+                               parent_id: int) -> None:
+        """Journal write AFTER orders reached the broker. A failure here (SQLite locked, disk)
+        must never skip confirmation/unwind; it locks new entries instead, because the daily
+        entry cap and the audit trail are no longer trustworthy."""
+        try:
+            self.journal.record(normalized, status=status, reason=reason, parent_order_id=parent_id)
+        except Exception as exc:
+            self._lock(f"paper trade journal write failed after transmission ({status}); entries locked")
+            logger.critical("TRADE JOURNAL WRITE FAILED after transmit | parent=%s status=%s error=%s",
+                            parent_id, status, type(exc).__name__)

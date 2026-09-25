@@ -1,48 +1,47 @@
-# Overnight progress — checkpoint
+# Overnight progress — checkpoint (end of session 1)
 
-Branch `claude/overnight-hardening` (pushed), based on `feature/paper-alpha` @ 0b9e191 (the real
-project; `main` is only an initial commit; PR #1 unmerged). Never merged to `main`. No IBKR
-connection and no orders during this session; local `.env` set `AUTONOMOUS_TRADING_ENABLED=false`.
+Branch `claude/overnight-hardening` (pushed; draft PR, base `feature/paper-alpha`), created from
+`feature/paper-alpha` @ 0b9e191 (the real project; `main` is only an initial commit; PR #1
+unmerged). Never merged. No IBKR connection and no orders during the session; local `.env` set
+`AUTONOMOUS_TRADING_ENABLED=false`.
 
-## Baseline (start)
-124 tests passing. Audit: port-only paper detection; autonomous flag alone sent paper brackets;
-public repo with unignored `state/*.db`; stop-gap optimism, bps-only costs, per-trade "Sharpe";
-walk-forward mixed TRAIN/OOS with OOS windows < warmup; monthly-target OOS inside full sample;
-Gen4 selected on test; full-sample context promotions steering the live selector; no edge
-(Gen3 holdout mean −0.03 %/mo).
+## Baseline → now
+Tests 124 → 275 passing. Mutation checks: removing the paper-guard call, the gap-stop fix or the
+OOS-only evidence filter each makes tests fail (3/2/1 failures).
 
-## Blocks
-| # | Block | Status | Commits |
-|---|---|---|---|
-| 0 | .gitignore + hygiene tests | done | a378276 |
-| 2 | Paper guard, executor gates, ACK, complete bars, masked logs | done + reviewed | 0fa8b3e, 0ee0d9b |
-| 1 | CLAUDE.md, 4 agents, 5 skills | done | 0b3072e |
-| 3 | Backtester: gap stops, IBKR costs, integer qty, daily Sharpe, trade_start | done | d356f0a |
-| 4 | Validation: splits, warm OOS, OOS-only evidence, holdouts, Gen4 leakage | done | 04c76b8 |
-| 5 | Context promotions off in operational selector | done | 96329f4 |
-| — | Quant review fixes (Gen2 holdout ranking BLOCKER, borrow, MTM, overlap) | done | 15288fb |
-| 6 | Pipeline (selector) backtest + runner | done | 2521a8f |
-| 7 | Research protocol v1 (calendar split) + pre-registered H0–H6 | done: all REJECT | d4ef686, c87cb8c |
-| — | Broker-calendar session policy (holidays/half days, fail closed) | done | bfd47a4 |
-| — | Static order-path guard tests; README/.env.example | done | 616c67f, fc9f521 |
-| 8 | Round 2 H7–H9 (symbol/market trend filter, ATR brackets) | running | 4ce5014 |
+## Blocks done
+| Block | Commits |
+|---|---|
+| .gitignore (state/, reports/, logs, *.db, .env*) + hygiene tests | a378276 |
+| Paper guard (DU/DF on every managed account + real socket port + config, per order), executor gates (broker equity risk re-check, live two-sided quote, no shorts, whole shares, daily cap, conId duplicates, INTENT journal, unwind→lock), ACK for autonomous loop, completed bars, masked/redacted account ids | 0fa8b3e, 0ee0d9b |
+| Broker-calendar session policy (holidays/half days, 5/15-min buffers, fail closed) | bfd47a4 |
+| Static order-path guards; README/.env.example | 616c67f, fc9f521 |
+| CLAUDE.md, 4 agents, 5 skills | 0b3072e, 4a199fe |
+| Backtester v2: gap stops, IBKR fixed commissions, spread/slippage, sell fee, borrow, integer qty, daily Sharpe, full-cost MTM, trade_start | d356f0a, 15288fb |
+| Validation: warm windows, OOS-only engine-v2 evidence, regime at signal time, monthly-target holdout, Gen2/Gen3/Gen4 leakage fixes | 04c76b8, 15288fb |
+| Full-sample context promotions removed from operational selector | 96329f4 |
+| Pipeline (selector) backtest, calendar protocol v1, experiments H1–H9, null model | 2521a8f, d4ef686, 4ce5014, 94e45d8 |
+| Shadow journal: point-in-time discovery + every decision + scorer | 6e5fa61 |
+| Release-gate fixes: journal non-fatal, paper run plan | (latest) |
 
-Independent reviews: execution-safety (no blockers; SHOULD-FIX all fixed), quant-methodology
-(1 blocker + should-fix all fixed). Tests: 258 → see latest commit.
+Independent reviews: execution-safety (0 blockers; should-fix fixed), quant-methodology
+(1 blocker — Gen2 ranked on holdout — fixed; should-fix fixed), release-gate (git/tests PASS).
 
-## Key decisions
-- Paper = every managed account DU/DF + real socket port == configured paper port + live disabled;
-  re-verified per order. API has no explicit paper flag.
-- Executor refuses: delayed/frozen quotes, shorts, fractional qty, missing broker equity.
-- Evidence for live learning: OOS rows, engine v2+, latest completed run only.
-- Calendar protocol v1: TRAIN < 2023-09-01 ≤ VALIDATION < 2025-03-01 ≤ HOLDOUT (all profiles).
-  `intraday_1y` is entirely holdout. `live_default` baseline was seen once on fraction splits
-  before the protocol (disclosed in research/protocol.py).
+## Quant result (protocol v1, details in docs/experiments/LOG.md)
+9 pre-registered variants + baseline on VALIDATION; all REJECT. Live selector ≈ zero expectancy
+after costs (PF 0.89–1.06). Null model: selector beats random entries on 4h (~1.8 sd, weak) but
+is worse than random longs on daily. HOLDOUT (≥ 2025-03-01) unused. No edge. Data (38-name
+hindsight cohort, no delisted names) is the main blocker.
 
-## Baseline pipeline (fraction splits, pre-protocol, for the record)
-live_default: 1h TRAIN −2.3 % / VAL −9.6 %; 4h TRAIN −11.2 % / VAL −2.5 %;
-1d TRAIN +1.3 % (PF 1.00) / VAL +24.9 % (PF 1.29). No consistent edge.
+## Readiness
+BACKTEST: engine ready, data not. VALIDATED CANDIDATE: none. SHADOW: partial (journal yes,
+scoring runner no). PAPER: ready only for a supervised 1-share plumbing test
+(docs/PAPER_RUN_PLAN.md). LIVE: NOT READY.
 
-## Next action
-Read results of `run_experiments.py --yearly` (H0–H6, TRAIN+VALIDATION, 4h & 1d), apply the
-pre-registered decision rule in docs/experiments/LOG.md, then continue the hypothesis loop.
+## Next actions
+1. Human: review draft PR; run docs/PAPER_RUN_PLAN.md (needs MARKET_DATA_TYPE=1 + live data).
+2. Code: runner that scores journaled shadow decisions against later bars (read-only history).
+3. Research: point-in-time universe (accumulate shadow discovery snapshots; or external
+   survivorship-free data) before any new strategy round; start protocol v2 on new data.
+4. Open issues: sector exposure unmodelled; kill-switch armed flow never paper-tested; no
+   multi-day drawdown lock; shortability not modelled (shorts disabled).

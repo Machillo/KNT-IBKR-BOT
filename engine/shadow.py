@@ -62,7 +62,11 @@ class ShadowTradingEngine:
         self.allocator = PortfolioAllocator(risk_pct=risk_pct, max_position_pct=max_position_pct)
         self.admission = None if risk_manager is None else PortfolioAdmissionCoordinator(risk_manager)
         self.risk_decisions = RiskDecisionStore()
-        self.journal = ShadowJournal()
+        try:
+            self.journal: ShadowJournal | None = ShadowJournal()
+        except Exception as exc:  # research journaling must never stop the shadow engine
+            logger.warning("SHADOW JOURNAL unavailable | error=%s", exc)
+            self.journal = None
         self.paper_executor = paper_executor
         self.pairs = PairsTradingStrategy()
         self.max_candidates = max_candidates
@@ -95,6 +99,8 @@ class ShadowTradingEngine:
         return None, data_type
 
     def _journal_decision(self, cycle_id, candidate, bars, selection, action, reason) -> None:
+        if self.journal is None:
+            return
         chosen = selection.selected
         sig = None if chosen is None else chosen.signal
         try:
@@ -172,9 +178,10 @@ class ShadowTradingEngine:
         ranked = await self.intelligence.ranked_us_opportunity_universe(
             rows_per_plan=rows_per_scanner, quote_budget=self.quote_budget)
         candidates = [x for x in ranked if x.eligible][:self.max_candidates]
-        cycle_id = self.journal.new_cycle_id()
+        cycle_id = ShadowJournal.new_cycle_id()
         try:
-            self.journal.record_discovery(cycle_id, ranked)
+            if self.journal is not None:
+                self.journal.record_discovery(cycle_id, ranked)
         except Exception as exc:  # journaling must never break the loop
             logger.warning("SHADOW JOURNAL discovery write failed | error=%s", exc)
         logger.info("SHADOW FUNNEL | ranked=%s eligible=%s deep_analysis=%s",

@@ -99,3 +99,39 @@ robust edge. The long-only daily "returns" are largely beta + survivorship, not 
   hindsight-selected cohort with no delisted names and no point-in-time universe. Long-biased
   results on it are not interpretable as edge. Next research cycle should start with a
   point-in-time universe (or scanner-snapshot history recorded going forward by shadow mode).
+
+## Round 3 pre-registration — new families, cohort-neutral event study (written before any run)
+
+Why a different instrument: rounds 1–2 measured absolute P&L of long-only trading on a cohort
+whose buy-and-hold gained 64 % in VALIDATION, so any long signal "earned" beta + survivorship.
+`research/event_study.py` measures each signal's forward return from the NEXT open minus the
+same-window equal-weight return of the other 37 names, minus round-trip costs (baseline: 2×3.5 bps
+marketable + 0.3 bps fee + 2 bps commission allowance ≈ 9.3 bps). This removes the common drift;
+it does NOT remove survivorship inside the cross-section (winners chosen with hindsight may look
+like "momentum"), which is disclosed per family.
+
+Data: `long_10y` (daily) is primary; `swing_5y` (4h, horizons in bars) is the robustness profile.
+Segments: protocol v1 calendar (TRAIN < 2023-09-01 ≤ VALIDATION < 2025-03-01); a window counts in a
+segment only if entry AND exit fall inside it. HOLDOUT untouched.
+
+| id | family | economic rationale | signal (sees bars ≤ t only) | side | horizon |
+|---|---|---|---|---|---|
+| F1 | Cross-sectional momentum 12-1 | under-reaction / slow diffusion of information (Jegadeesh–Titman) | first bar of each month: return from t−252 to t−21 in the top quintile of the cohort | long | 21 bars |
+| F2 | Short-term reversal | liquidity provision: short-horizon overshoots mean-revert | 5-bar return in the bottom quintile of the cohort (every bar) | long | 5 bars |
+| F3 | Volatility contraction breakout | volatility clusters; a breakout from compression with volume signals information arrival | ATR(5)/ATR(50) in its lowest 10 % of the last 250 bars within the last 5 bars, AND close > prior 20-bar high, AND volume > 1.5 × 20-bar average | long | 10 bars |
+| F4 | Gap-down reversal | overnight overreaction reverses over days | open ≤ −3 % vs prior close AND close < prior close | long | 5 bars |
+| F5 | Market-residual reversal | idiosyncratic (not market) overshoots revert | 5-bar return minus SPY 5-bar return in the bottom decile (SPY/QQQ/IWM/DIA excluded as events) | long | 5 bars |
+| F6 | Live selector signal (diagnostic) | does the current selector carry cross-sectional information at all? | `StrategySelector` (all strategies, threshold 55, no learning) selects LONG | long | 5 bars |
+
+**Multiple testing.** Tests on VALIDATION so far: 9 (rounds 1–2) + 6 here = K = 15. One-sided
+Bonferroni at α = 0.05 → VALIDATION requires Newey–West t ≥ 2.71.
+
+**KEEP rule (fixed in advance)** — all of:
+1. daily TRAIN: mean net excess > 0 and NW t ≥ 2.0;
+2. daily VALIDATION: mean net excess > 0 and NW t ≥ 2.71, ≥ 100 events (F1: ≥ 12 rebalance dates);
+3. 4h VALIDATION: same sign (F1: instead, both halves of daily TRAIN positive);
+4. survives destruction tests: cost × 3, entry delay 2 bars, horizon × 0.5 and × 1.5, removing the
+   best 5 % of events, removing the best symbol, both halves of VALIDATION positive.
+Otherwise REJECT; INCONCLUSIVE if steps 1–2 pass on fewer events than required. A KEEP here is
+"worth a pipeline implementation and forward shadow evidence", not an edge claim: the cohort is
+still hindsight-selected and the HOLDOUT stays unused until a frozen implementation exists.

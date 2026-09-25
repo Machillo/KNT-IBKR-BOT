@@ -442,7 +442,9 @@ def _window(path: Path, run_mode: str, test: str) -> tuple[list, dict]:
 
 def _arm_missing(rows, arms) -> dict[str, float | None]:
     """Missing forward returns PER ARM (a total can hide a selective hole in one arm)."""
-    return {arm: _missing_share(_arm(rows, arm)) for arm in arms}
+    shares = {arm: _missing_share(_arm(rows, arm)) for arm in arms}
+    shares["ALL"] = _missing_share(rows)           # the same-cycle benchmark uses every row
+    return shares
 
 
 def _persist_binding(path: Path, result: dict) -> dict:

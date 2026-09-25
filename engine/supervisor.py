@@ -94,10 +94,10 @@ class PaperSupervisor:
         self._kill_persisted = persisted.kill_switch_triggered
 
         logger.info(
-            "SUPERVISOR INIT | account=%s date=%s baseline=%.2f source=%s sticky_kill=%s",
+            "SUPERVISOR INIT | account=%s date=%s baseline=%s source=%s sticky_kill=%s",
             mask_account(account.account),
             trading_date,
-            persisted.starting_equity,
+            "set",
             "CREATED" if created else "RESTORED",
             persisted.kill_switch_triggered,
         )
@@ -129,10 +129,7 @@ class PaperSupervisor:
         self._check_drawdown(self.context.risk, account.net_liquidation)
         result = self.context.guard.evaluate(account.net_liquidation)
         logger.info(
-            "SUPERVISOR RISK | baseline=%.2f current=%.2f pnl=%.2f loss_pct=%.2f%% locked=%s",
-            result.state.starting_equity,
-            result.state.current_equity,
-            result.state.pnl,
+            "SUPERVISOR RISK | loss_pct=%.2f%% locked=%s",
             result.state.loss_pct * 100,
             result.trading_locked,
         )

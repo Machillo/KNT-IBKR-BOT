@@ -70,7 +70,9 @@ class IBKRHistoryBarsProvider:
 
 
 async def main_async(args) -> None:
-    scorer = ShadowScorer(args.db)
+    from config.config import shadow_journal_path
+
+    scorer = ShadowScorer(args.db or shadow_journal_path())
     if args.source == "ibkr":
         from config.config import config, read_only_ibkr_settings
         from core.connection import IBKRConnection
@@ -89,9 +91,9 @@ async def main_async(args) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--db", default=None, help="default: <repo>/state/strategy_performance.db")
+    ap.add_argument("--db", default=None, help="default: the shadow-only journal <repo>/state/shadow_only/strategy_performance.db")
     ap.add_argument("--source", choices=["cache", "ibkr"], default="cache")
-    ap.add_argument("--cache-dir", default="reports/history_cache")
+    ap.add_argument("--cache-dir", default=None, help="default: <repo>/reports/history_cache")
     ap.add_argument("--limit", type=int, default=None)
     asyncio.run(main_async(ap.parse_args()))
 

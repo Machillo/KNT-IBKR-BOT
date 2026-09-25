@@ -463,3 +463,44 @@ def test_paper_execution_refuses_stale_or_unknown_decision_bars(tmp_path, comple
     result = run(engine(tmp_path, ib, enabled=True).submit(stock(), request(bar_completed_at=completed)))
     assert (result.submitted, result.reason) == (False, reason)
     assert ib.submitted == []
+
+
+@pytest.mark.parametrize("ib_cls,prefix", [
+    ("ExplodingTransmitIB", "transmission_error_manual_check"),
+    ("ExplodingFlattenIB", "unwind_failed_manual_intervention"),
+])
+def test_failure_paths_lock_even_when_the_journal_is_down(tmp_path, ib_cls, prefix):
+    ib = globals()[ib_cls](reject_index=1) if ib_cls == "ExplodingFlattenIB" else globals()[ib_cls]()
+    risk = RiskManager(RiskConfig())
+    e = engine(tmp_path, ib, enabled=True, risk_manager=risk)
+    original = e.journal.record
+
+    def flaky(req, *, status, reason, **kw):
+        if status == "FAILED":
+            raise sqlite3.OperationalError("database is locked")
+        return original(req, status=status, reason=reason, **kw)
+    e.journal.record = flaky
+    result = run(e.submit(stock(), request()))
+    assert result.reason.startswith(prefix)
+    assert risk.trading_locked is True
+
+
+def test_ack_refusals_read_the_repo_env_from_any_directory(tmp_path, monkeypatch):
+    import config.config as cfg
+
+    env = tmp_path / "repo.env"
+    env.write_text("KNT_SIGNAL_PAPER_ACK=stored\n", encoding="utf-8")
+    monkeypatch.setattr(cfg, "ENV_FILE", env)
+    monkeypatch.chdir(tmp_path / ".." )  # a different working directory
+    assert cfg.persisted_env().get("KNT_SIGNAL_PAPER_ACK") == "stored"
+
+
+def test_unresolved_failure_blocks_entries_after_a_restart(tmp_path):
+    ib = ExplodingTransmitIB()
+    first = engine(tmp_path, ib, enabled=True, risk_manager=RiskManager(RiskConfig()), max_entries_per_day=5)
+    assert run(first.submit(stock(), request())).reason.startswith("transmission_error_manual_check")
+    # "Restart": fresh engine + fresh (unlocked) risk manager, same journal.
+    restarted = engine(tmp_path, FakeIB(), enabled=True, risk_manager=RiskManager(RiskConfig()),
+                       max_entries_per_day=5)
+    result = run(restarted.submit(stock("MSFT"), request(symbol="MSFT")))
+    assert (result.submitted, result.reason) == (False, "unresolved_execution_failure_today")

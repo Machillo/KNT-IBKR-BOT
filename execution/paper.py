@@ -117,6 +117,21 @@ class TradeJournalStore:
             )
             return int(cur.lastrowid)
 
+    def unresolved_failures_on(self, utc_date: str) -> int:
+        """FAILED rows of a UTC date that required a human (partial transmission, unwind failure,
+        flattened partial fill). They keep entries refused after a restart, where the in-memory
+        lock would be gone; the next UTC date starts clean after the human's check."""
+        with sqlite3.connect(self.path) as conn:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) FROM paper_trade_journal
+                WHERE substr(created_at, 1, 10)=? AND status='FAILED'
+                  AND (reason LIKE '%manual%' OR reason LIKE '%flatten_requested%')
+                """,
+                (utc_date,),
+            ).fetchone()
+        return int(row[0] or 0)
+
     def submitted_count_on(self, utc_date: str) -> int:
         """Transmission attempts on a UTC date.
 
@@ -350,6 +365,8 @@ class PaperExecutionEngine:
         if self.risk_manager is None:
             return self._reject(request, "BLOCKED", "risk_manager_required")
         today = datetime.now(timezone.utc).date().isoformat()
+        if self.journal.unresolved_failures_on(today):
+            return self._reject(request, "BLOCKED", "unresolved_execution_failure_today")
         # Pure checks shared with order-free shadow and replay (execution/pretrade.py).
         check = pretrade.evaluate(
             pretrade.PreTradeRequest(

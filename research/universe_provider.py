@@ -51,7 +51,8 @@ class JournalUniverse:
     survivorship_biased = False
 
     def __init__(self, db_path: str | Path, *, statuses: tuple[str, ...] = ("ranked_eligible",),
-                 max_age: timedelta = timedelta(days=1), top_n: int | None = None) -> None:
+                 max_age: timedelta = timedelta(days=1), top_n: int | None = None,
+                 run_mode: str | None = None) -> None:
         """``top_n`` = the runtime's deep-analysis cap (SHADOW_MAX_CANDIDATES): only the top_n
         eligible names by liquidity score (ties: best scanner rank) are members, exactly the
         names the runtime analysed in that cycle. None keeps every eligible name."""
@@ -60,9 +61,14 @@ class JournalUniverse:
         with sqlite3.connect(Path(db_path)) as conn:
             # LEFT JOIN: a cycle whose funnel is empty is a real (empty) snapshot and must
             # replace the previous membership instead of silently carrying it forward.
+            columns = {r[1] for r in conn.execute("PRAGMA table_info(discovery_cycles)")}
+            where, params = "", ()
+            if run_mode is not None and "run_mode" in columns:
+                # Only cycles of one process (e.g. shadow_only); legacy rows without a mode are excluded.
+                where, params = " WHERE c.run_mode=?", (run_mode,)
             rows = conn.execute(
                 "SELECT c.created_at, f.symbol, f.status, f.liquidity_score, f.best_rank FROM discovery_cycles c "
-                "LEFT JOIN discovery_funnel f ON f.cycle_id=c.cycle_id ORDER BY c.created_at"
+                "LEFT JOIN discovery_funnel f ON f.cycle_id=c.cycle_id" + where + " ORDER BY c.created_at", params
             ).fetchall()
         cycles: dict[datetime, dict[str, tuple[float, float]]] = {}
         for created, symbol, status, score, rank in rows:

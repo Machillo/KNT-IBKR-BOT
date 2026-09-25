@@ -45,3 +45,31 @@ def test_shadow_only_uses_its_own_state_dir(isolated_state_dir):
     text = (ROOT / "run_shadow_only.py").read_text(encoding="utf-8")
     assert 'state_dir=STATE_DIR / "shadow_only"' in text
     assert text.count('STATE_DIR / "shadow_only"') >= 2  # supervisor AND shadow engine stores
+
+
+def test_research_defaults_point_at_the_shadow_only_journal_and_anchored_reports(isolated_state_dir):
+    from config.config import REPORTS_DIR, shadow_journal_path
+    from research.shadow_scoring import CacheBarsProvider
+
+    assert shadow_journal_path() == isolated_state_dir / "shadow_only" / "strategy_performance.db"
+    assert CacheBarsProvider().cache_dir == ROOT / "reports" / "history_cache" == REPORTS_DIR / "history_cache"
+
+
+def test_journal_universe_can_be_restricted_to_one_run_mode(tmp_path):
+    import sqlite3
+    from datetime import datetime
+
+    from research.shadow_journal import ShadowJournal
+    from research.universe_provider import JournalUniverse
+
+    db = tmp_path / "j.db"
+    ShadowJournal(db)
+    with sqlite3.connect(db) as conn:
+        for cid, mode, sym in (("a", "shadow_only", "SHADOW"), ("b", "runtime", "RUNTIME")):
+            conn.execute("INSERT INTO discovery_cycles (cycle_id, created_at, run_mode) VALUES (?, ?, ?)",
+                         (cid, "2026-03-02T15:00:00+00:00" if cid == "a" else "2026-03-02T15:30:00+00:00", mode))
+            conn.execute("INSERT INTO discovery_funnel (cycle_id, created_at, symbol, status) VALUES (?, '', ?, 'ranked_eligible')",
+                         (cid, sym))
+    at = datetime(2026, 3, 2, 11, 0)
+    assert JournalUniverse(db).members_at(at) == {"RUNTIME"}
+    assert JournalUniverse(db, run_mode="shadow_only").members_at(at) == {"SHADOW"}

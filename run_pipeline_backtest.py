@@ -84,13 +84,14 @@ def main() -> None:
     ap.add_argument("--variant", choices=list(VARIANTS), default="live_default")
     ap.add_argument("--cost", choices=list(COSTS), default="baseline")
     ap.add_argument("--equity", type=float, default=100_000.0)
-    ap.add_argument("--cache-dir", default="reports/history_cache")
+    ap.add_argument("--cache-dir", default=None, help="default: <repo>/reports/history_cache")
     ap.add_argument("--confirm-holdout", action="store_true")
     ap.add_argument("--split", choices=["calendar", "fraction"], default="calendar")
     ap.add_argument("--universe-source", choices=["cohort", "journal", "csv"], default="cohort",
                     help="cohort = static cache cohort (survivorship-biased); journal = KNT shadow "
                          "discovery journal; csv = external point-in-time membership file")
-    ap.add_argument("--universe-path", default=None, help="default: <repo>/state/strategy_performance.db")
+    ap.add_argument("--universe-path", default=None,
+                    help="default: the shadow-only journal <repo>/state/shadow_only/strategy_performance.db")
     ap.add_argument("--journal-top-n", type=int, default=None,
                     help="journal universe: runtime deep-analysis cap (default SHADOW_MAX_CANDIDATES; 0 = no cap)")
     ap.add_argument("--config-from-env", action="store_true",
@@ -98,7 +99,8 @@ def main() -> None:
     a = ap.parse_args()
     if a.segment == "holdout" and not a.confirm_holdout:
         ap.error("HOLDOUT is single-use. Freeze the configuration in docs/experiments first, then pass --confirm-holdout.")
-    data = load(a.universe, a.profile, a.cache_dir)
+    from config.config import reports_path
+    data = load(a.universe, a.profile, a.cache_dir or str(reports_path("history_cache")))
     config: PipelineConfig = VARIANTS[a.variant].variant(cost_model=COSTS[a.cost], initial_equity=a.equity)
     if a.config_from_env:
         from config.config import config as bot_config
@@ -108,10 +110,10 @@ def main() -> None:
     universe = None
     if a.universe_source == "journal":
         from research.universe_provider import JournalUniverse
-        from config.config import state_path
         from config.config import config as bot_config
         top_n = bot_config.runtime.shadow_max_candidates if a.journal_top_n is None else (a.journal_top_n or None)
-        universe = JournalUniverse(a.universe_path or state_path("strategy_performance.db"), top_n=top_n)
+        from config.config import shadow_journal_path
+        universe = JournalUniverse(a.universe_path or shadow_journal_path(), top_n=top_n, run_mode="shadow_only")
     elif a.universe_source == "csv":
         from research.universe_provider import PointInTimeCsvUniverse
         universe = PointInTimeCsvUniverse(a.universe_path)

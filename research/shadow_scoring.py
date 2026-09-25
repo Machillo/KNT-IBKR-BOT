@@ -81,9 +81,11 @@ class CacheBarsProvider(InMemoryBarsProvider):
 
     PROFILE_BY_TIMEFRAME = {"1 hour": "intraday_1y", "4 hours": "swing_5y", "1 day": "long_10y"}
 
-    def __init__(self, cache_dir: str | Path = "reports/history_cache") -> None:
+    def __init__(self, cache_dir: str | Path | None = None) -> None:
+        from config.config import reports_path
+
         super().__init__({})
-        self.cache_dir = Path(cache_dir)
+        self.cache_dir = Path(cache_dir) if cache_dir is not None else reports_path("history_cache")
 
     def bars_from(self, symbol, con_id, at, timeframe):
         key = f"{symbol}|{timeframe}"

@@ -132,6 +132,19 @@ def read_only_ibkr_settings(settings: IBKRConfig, client_id_offset: int) -> IBKR
 STATE_DIR = Path(__file__).resolve().parents[1] / "state"
 
 
+REPORTS_DIR = Path(__file__).resolve().parents[1] / "reports"
+
+
+def reports_path(*parts: str) -> Path:
+    """Path inside the repo-anchored reports directory (never CWD-relative)."""
+    return REPORTS_DIR.joinpath(*parts)
+
+
+def shadow_journal_path() -> Path:
+    """The forward-evidence journal written by run_shadow_only.py."""
+    return state_path("shadow_only", "strategy_performance.db")
+
+
 def state_path(*parts: str) -> Path:
     """Path inside the runtime state directory, resolved at call time (never CWD-relative)."""
     import config.config as module  # late lookup so an override of STATE_DIR is honoured

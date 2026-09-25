@@ -48,10 +48,11 @@ async def main_async(args) -> None:
     from core.connection import IBKRConnection
     from market.history import HistoricalDataService
 
-    out = Path(args.out_dir)
+    from config.config import reports_path, shadow_journal_path
+
+    out = Path(args.out_dir) if args.out_dir else reports_path("pit_cache")
     out.mkdir(parents=True, exist_ok=True)
-    from config.config import state_path
-    contracts = journal_contracts(args.db or str(state_path("strategy_performance.db")))
+    contracts = journal_contracts(args.db or str(shadow_journal_path()))
     connection = IBKRConnection(read_only_ibkr_settings(config.ibkr, 52))
     try:
         ib = await connection.connect()
@@ -78,8 +79,8 @@ async def main_async(args) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--db", default=None, help="default: <repo>/state/strategy_performance.db")
-    ap.add_argument("--out-dir", default="reports/pit_cache")
+    ap.add_argument("--db", default=None, help="default: the shadow-only journal <repo>/state/shadow_only/strategy_performance.db")
+    ap.add_argument("--out-dir", default=None, help="default: <repo>/reports/pit_cache")
     ap.add_argument("--duration", default="1 Y")
     ap.add_argument("--pacing-seconds", type=float, default=10.5)
     asyncio.run(main_async(ap.parse_args()))

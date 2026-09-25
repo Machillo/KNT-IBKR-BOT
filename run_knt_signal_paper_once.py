@@ -196,10 +196,9 @@ async def main(args) -> None:
         await asyncio.sleep(1.0)
         after = broker.snapshot(account.account)
         logger.warning(
-            "KNT SIGNAL PAPER BROKER STATE | positions=%s open_orders=%s details=%s",
+            "KNT SIGNAL PAPER BROKER STATE | positions=%s open_orders=%s",
             after.position_count,
             after.open_order_count,
-            after.nonzero_positions,
         )
 
         if not submitted:

@@ -16,11 +16,12 @@ backtest" from drifting away from "the decision KNT would take".
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from math import sqrt
 from typing import Callable
 
 from engine.strategy_selector import StrategySelection
+from engine.opportunity import build_opportunities
 from execution.pretrade import tick
 from market.history import PriceBar
 from portfolio.admission import PortfolioAdmissionDecision
@@ -54,6 +55,9 @@ class TradeDecision:
     proposal: AllocationProposal | None = None
     admission: PortfolioAdmissionDecision | None = None
     correlation: float | None = None
+    # Every strategy evaluation of this decision as a comparable record (engine/opportunity.py).
+    # Recording only: the action above never depends on it.
+    opportunities: tuple = ()
 
     @property
     def approved(self) -> bool:
@@ -127,6 +131,16 @@ class DecisionPipeline:
                selection: StrategySelection | None = None,
                sector: str | None = None, sectors: dict[str, str] | None = None) -> TradeDecision:
         selection = selection or self.select(bars, symbol=symbol, asset_class=asset_class, timeframe=timeframe)
+        decision = self._decide(bars, symbol=symbol, asset_class=asset_class, portfolio_state=portfolio_state,
+                                position_returns=position_returns, selection=selection, sector=sector,
+                                sectors=sectors)
+        opportunities = build_opportunities(
+            selection, symbol=symbol, asset_class=asset_class,
+            minimum_score=float(getattr(self.selector, "minimum_score", 0.0)), context_bars=len(bars))
+        return replace(decision, opportunities=opportunities)
+
+    def _decide(self, bars, *, symbol, asset_class, portfolio_state, position_returns, selection,
+                sector, sectors) -> TradeDecision:
         chosen = selection.selected
         if chosen is None:
             return TradeDecision(symbol, "NO_TRADE", selection.reason, selection)

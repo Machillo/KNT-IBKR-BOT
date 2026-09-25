@@ -158,7 +158,8 @@ class ShadowTradingEngine:
         except Exception as exc:  # journaling must never break the loop
             logger.warning("SHADOW JOURNAL cycle write failed | error=%s", exc)
 
-    def _journal_decision(self, cycle_id, candidate, bars, selection, action, reason, extra=None) -> None:
+    def _journal_decision(self, cycle_id, candidate, bars, selection, action, reason, extra=None,
+                          opportunities=()) -> None:
         if self.journal is None:
             return
         try:
@@ -185,7 +186,7 @@ class ShadowTradingEngine:
                 "input_hash": self._input_hash(bars),
                 **(extra or {}),
             }
-            self.journal.record_decision(
+            decision_id = self.journal.record_decision(
                 cycle_id, symbol=candidate.symbol,
                 con_id=int(getattr(candidate.contract, "conId", 0) or 0),
                 bar_time=bars[-1].time if bars else None, timeframe="1 hour",
@@ -199,6 +200,12 @@ class ShadowTradingEngine:
             )
         except Exception as exc:
             logger.warning("SHADOW JOURNAL decision write failed | symbol=%s error=%s", candidate.symbol, exc)
+            return
+        try:
+            if opportunities:
+                self.journal.record_opportunities(decision_id, cycle_id, opportunities)
+        except Exception as exc:  # exploratory records must never affect the decision journal
+            logger.warning("SHADOW JOURNAL opportunity write failed | symbol=%s error=%s", candidate.symbol, exc)
 
     def _journal_error(self, cycle_id, candidate, exc) -> None:
         """A candidate that failed is recorded (it must not silently vanish from the funnel)."""
@@ -438,8 +445,14 @@ class ShadowTradingEngine:
                 action = decision.action
                 portfolio_reason = None if decision.reason == selection.reason else decision.reason
                 proposal, admission, corr = decision.proposal, decision.admission, decision.correlation
+                stock_type = None
+                try:
+                    meta = await self.metadata.get(candidate.contract)   # read-only, cached
+                    stock_type = None if meta is None else meta.stock_type
+                except Exception:
+                    stock_type = None
                 extra = {"session_open": getattr(session, "market_open", None), "sector": sector,
-                         "correlation": corr}
+                         "correlation": corr, "stock_type": stock_type}
                 if proposal is not None:
                     extra.update(quantity=proposal.quantity, notional=proposal.proposed_notional,
                                  risk_amount=proposal.proposed_risk,
@@ -502,7 +515,8 @@ class ShadowTradingEngine:
                                 admission.reason, action)
 
                 decisions.append(ShadowDecision(candidate.symbol, candidate.score, selection, action, portfolio_reason))
-                self._journal_decision(cycle_id, candidate, bars, selection, action, portfolio_reason, extra)
+                self._journal_decision(cycle_id, candidate, bars, selection, action, portfolio_reason, extra,
+                                       opportunities=decision.opportunities)
                 logger.info(
                     "SHADOW DECISION | symbol=%s liquidity=%.2f regime=%s adx=%.1f ema_slope=%.2f%% vol_stress=%.2f action=%s selected=%s top=%s reason=%s portfolio_reason=%s",
                     candidate.symbol, candidate.score, selection.regime.regime.value,

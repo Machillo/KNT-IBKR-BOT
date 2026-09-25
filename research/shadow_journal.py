@@ -42,6 +42,7 @@ _DECISION_EXTRA_COLUMNS = (
     ("sector", "TEXT"), ("correlation", "REAL"), ("quantity", "REAL"), ("notional", "REAL"),
     ("risk_amount", "REAL"), ("volatility_multiplier", "REAL"), ("reference_price", "REAL"),
     ("reference_data_type", "INTEGER"), ("conflict_with", "INTEGER"), ("input_hash", "TEXT"),
+    ("stock_type", "TEXT"),
 )
 _CYCLE_EXTRA_COLUMNS = (
     ("cycle_end", "TEXT"), ("eligible_count", "INTEGER"), ("candidates_attempted", "INTEGER"),
@@ -185,6 +186,40 @@ class ShadowJournal:
                 """
             )
             conn.execute("CREATE INDEX IF NOT EXISTS idx_discovery_funnel_cycle ON discovery_funnel(cycle_id)")
+            # EXPLORATORY, write-only: every strategy evaluation of a decision (engine/opportunity.py).
+            # Not FWD evidence; the FWD evaluator never reads it (docs/FWD_PROTOCOL.md §Exploratory).
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS shadow_opportunities (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    decision_id INTEGER NOT NULL,
+                    cycle_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    opportunity_version TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    asset_class TEXT,
+                    strategy TEXT NOT NULL,
+                    lifecycle TEXT,
+                    direction TEXT,
+                    regime TEXT,
+                    heuristic_score REAL,
+                    regime_adjustment REAL,
+                    evidence_adjustment REAL,
+                    adjusted_score REAL,
+                    eligibility TEXT,
+                    selected INTEGER,
+                    entry REAL,
+                    stop REAL,
+                    target REAL,
+                    risk_pct REAL,
+                    reward_risk REAL,
+                    cost_pct REAL,
+                    cost_in_r REAL,
+                    context_bars INTEGER
+                )
+                """
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_shadow_opportunities_decision ON shadow_opportunities(decision_id)")
             existing = {row[1] for row in conn.execute("PRAGMA table_info(shadow_decisions)")}
             for name, ddl in _DECISION_EXTRA_COLUMNS:
                 if name not in existing:
@@ -259,6 +294,27 @@ class ShadowJournal:
                 (run_mode, utc_date)).fetchall()
         return [dict(r) for r in rows]
 
+    def record_opportunities(self, decision_id: int, cycle_id: str, opportunities,
+                             created_at: datetime | None = None) -> int:
+        from engine.opportunity import OPPORTUNITY_VERSION
+
+        now = (created_at or datetime.now(timezone.utc)).isoformat()
+        rows = [(int(decision_id), cycle_id, now, OPPORTUNITY_VERSION, o.symbol, o.asset_class, o.strategy,
+                 o.lifecycle, o.direction, o.regime, o.heuristic_score, o.regime_adjustment,
+                 o.evidence_adjustment, o.adjusted_score, o.eligibility, int(bool(o.selected)), o.entry, o.stop,
+                 o.target, o.risk_pct, o.reward_risk, o.cost_pct, o.cost_in_r, o.context_bars)
+                for o in opportunities]
+        with sqlite3.connect(self.path) as conn:
+            conn.executemany(
+                """INSERT INTO shadow_opportunities (decision_id, cycle_id, created_at, opportunity_version, symbol,
+                   asset_class, strategy, lifecycle, direction, regime, heuristic_score, regime_adjustment,
+                   evidence_adjustment, adjusted_score, eligibility, selected, entry, stop, target, risk_pct,
+                   reward_risk, cost_pct, cost_in_r, context_bars)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                rows,
+            )
+        return len(rows)
+
     def record_funnel(self, cycle_id: str, funnel) -> int:
         now = datetime.now(timezone.utc).isoformat()
         rows = [
@@ -323,7 +379,8 @@ class ShadowJournal:
             for key in ("atr", "adx", "volatility_stress", "liquidity_score", "selector_threshold",
                         "reference_close", "run_mode", "learning_mode", "selector_bonus", "bar_count",
                         "first_bar_time", "sector", "correlation", "quantity", "notional", "risk_amount",
-                        "volatility_multiplier", "reference_price", "reference_data_type", "input_hash"):
+                        "volatility_multiplier", "reference_price", "reference_data_type", "input_hash",
+                        "stock_type"):
                 columns[key] = context.get(key)
             names = ", ".join(columns)
             marks = ", ".join("?" for _ in columns)

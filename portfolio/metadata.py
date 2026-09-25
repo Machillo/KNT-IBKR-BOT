@@ -17,6 +17,7 @@ CACHE_TTL_SECONDS = 24 * 3600  # sector classifications change rarely, but never
 class InstrumentMetadata:
     sector: str | None
     industry_category: str | None = None
+    stock_type: str | None = None      # IBKR ContractDetails.stockType (COMMON, ETF, ADR, REIT, ...)
 
     @property
     def known(self) -> bool:
@@ -50,6 +51,7 @@ class ContractMetadataService:
         meta = InstrumentMetadata(
             sector=(getattr(detail, "industry", "") or "").strip() or None,
             industry_category=(getattr(detail, "category", "") or "").strip() or None,
+            stock_type=(str(getattr(detail, "stockType", "") or "")).strip() or None,
         )
         if con_id and meta.known:
             self._cache[con_id] = (self._clock(), meta)

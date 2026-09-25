@@ -41,12 +41,13 @@ multiple-testing correction cannot tell skill from luck or from market drift.
     it):** registration prints one line. Commit it DIRECTLY to the **acceptance ref**, push it
     within **3 days**, and never squash, rebase or re-wrap it.
     - The acceptance ref is `origin/feature/paper-alpha` (this repository never merges to
-      `main`). It is written INTO the registration file, so it cannot be changed afterwards.
+      `main`). It is pinned in `research/fwd_protocol.py` (a protocol file), never read from the
+      local registration file, which is not under version control.
     - The evaluator reads the git history of every local ref and of the acceptance ref. Lines are
       parsed as records (markdown and extra spaces are tolerated) and deduplicated by
       `start_utc`.
-    - The first accepted commit time is stored in the registration file: a later rebase or
-      deleted branch cannot turn a valid window invalid.
+    - The commit delay is always measured on the git history, never on a stored time. A rebase
+      of the commit that added the line therefore invalidates the window: never rewrite it.
     It refuses:
     - a registration line that was never committed, is not reachable from the acceptance ref,
       or was committed outside that delay;

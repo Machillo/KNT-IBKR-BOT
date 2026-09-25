@@ -292,9 +292,10 @@ def test_a_stored_binding_result_cannot_be_re_evaluated_away(tmp_path):
     assert fwd_protocol.evaluate_fwd1(db)["decision"] == "KEEP"
 
 
-def test_the_acceptance_ref_is_the_integration_branch_and_is_recorded_in_the_registration(tmp_path, monkeypatch):
+def test_the_acceptance_ref_is_pinned_in_code_never_read_from_the_local_file(tmp_path, monkeypatch):
     record = fwd_protocol.register_window(tmp_path / "w.db", config_hash="c")
-    assert record["acceptance_ref"] == "origin/feature/paper-alpha"          # never main in this repository
+    assert fwd_protocol.ACCEPTANCE_REF == "origin/feature/paper-alpha"      # never main in this repository
+    assert "acceptance_ref" not in record
     seen = []
 
     def fake_history(repo=None, ref="--all"):
@@ -302,18 +303,20 @@ def test_the_acceptance_ref_is_the_integration_branch_and_is_recorded_in_the_reg
         return {record["start_utc"]: (record, datetime.now(timezone.utc))}
     monkeypatch.setattr(fwd_protocol, "committed_registrations", fake_history)
     assert REAL_IS_PUSHED(record) is True and seen == ["origin/feature/paper-alpha"]
-    assert REAL_IS_PUSHED({**record, "acceptance_ref": "origin/other"}) is True and seen[-1] == "origin/other"
+    REAL_IS_PUSHED({**record, "acceptance_ref": "origin/my-own-branch"})     # an edited local file
+    assert seen[-1] == "origin/feature/paper-alpha"
     monkeypatch.setattr(fwd_protocol, "committed_registrations", lambda repo=None, ref="--all": {})
     assert REAL_IS_PUSHED(record) is False
 
 
-def test_the_first_accepted_commit_time_is_stored_and_survives_a_later_rewrite(tmp_path):
+def test_the_commit_delay_is_always_checked_against_git_never_a_stored_time(tmp_path):
     import json
 
     db = build(tmp_path / "x.db", selected_effect=0.8)
-    fwd_protocol.evaluate_fwd1(db)
-    stored = json.loads(fwd_protocol.window_file(db).read_text(encoding="utf-8"))
-    assert stored.get("accepted_commit_time_utc")
-    line = next(iter(COMMITTED))                              # a later rebase moves the commit time
-    COMMITTED[line] = datetime.now(timezone.utc) + timedelta(days=10)
-    assert "outside the allowed delay" not in str(fwd_protocol.evaluate_fwd1(db).get("reason"))
+    target = fwd_protocol.window_file(db)
+    record = json.loads(target.read_text(encoding="utf-8"))
+    record["accepted_commit_time_utc"] = record["registered_at_utc"]           # edited to look prompt
+    target.write_text(json.dumps(record), encoding="utf-8")
+    line = next(iter(COMMITTED))
+    COMMITTED[line] = datetime.now(timezone.utc) + timedelta(days=10)       # git says: committed late
+    assert "outside the allowed delay" in str(fwd_protocol.evaluate_fwd1(db).get("reason"))

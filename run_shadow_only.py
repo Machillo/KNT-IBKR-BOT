@@ -159,7 +159,7 @@ async def main_async(args) -> None:
     from risk.risk_manager import RiskManager
     from utils.logger import logger
 
-    from research.fwd_protocol import end_window, register_window, registration_line, window_file
+    from research.fwd_protocol import ACCEPTANCE_REF, end_window, register_window, registration_line, window_file
 
     cfg = shadow_only_config(config)
     journal_path = STATE_DIR / "shadow_only" / "strategy_performance.db"
@@ -188,8 +188,9 @@ async def main_async(args) -> None:
             # Registered only after a successful connection, by THIS process: the fingerprint and
             # config hash are the ones actually running.
             record = register_window(journal_path, config_hash=decision_config_hash(cfg))
-            print("FWD WINDOW REGISTERED. Commit this exact line to docs/experiments/LOG.md directly on main "
-                  "and push it within 3 days (never squash or re-wrap it):")
+            print(f"FWD WINDOW REGISTERED. Commit this exact line to docs/experiments/LOG.md on "
+                  f"{ACCEPTANCE_REF.removeprefix('origin/')} (never main) and push it within 3 days "
+                  "(never squash, rebase or re-wrap it):")
             print(registration_line(record))
         intelligence = MarketIntelligenceService(ib, MarketDataService(ib, cfg.market_data))
         # Research copy of the hard risk manager: same limits, mirrors every real lock except the

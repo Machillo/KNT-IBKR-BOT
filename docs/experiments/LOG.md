@@ -243,7 +243,8 @@ shadow row looked at):**
 - **Binding results are stored** in the registration file, returned ever after, and copied to
   this log the day they bind.
 - **Acceptance ref:** the registration line must be reachable from `origin/feature/paper-alpha`.
-  The ref is recorded in the registration; this repository never merges to `main`.
+  The ref is pinned in the protocol code (not the editable local file); this repository never
+  merges to `main`. The commit delay is always measured on git history.
 - **Scoring:** outcome rows carry the scoring-rules fingerprint. The scorer refuses to write
   inside a registered window under other rules.
 - **Forward replays** are refused while a registered window is open and unbound.

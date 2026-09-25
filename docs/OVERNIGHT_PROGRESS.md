@@ -98,7 +98,7 @@ Second re-verification round (6 reviewers, 2 integrity blockers + ~15 should-fix
 - **Integrity:**
   - a binding result is stored and survives ending the window;
   - outcomes carry the scoring-protocol fingerprint;
-  - registration must be reachable from the recorded acceptance ref
+  - registration must be reachable from the acceptance ref pinned in code
     (`origin/feature/paper-alpha`), with tolerant parsing;
   - forward replays are refused while a window is open.
 - **Candidates:** failed type lookups are candidate errors (gated); excluded types do not use up
@@ -132,7 +132,7 @@ other asset classes.
    - a pinned worktree with a copied `.env`;
    - `KNT_STATE_DIR` / `KNT_BOT_STATE_DIR` set;
    - `python run_shadow_only.py --register-fwd-window --risk-limits-reviewed` during market hours, on a FRESH `KNT_STATE_DIR`;
-   - commit the printed line DIRECTLY to `feature/paper-alpha` (the recorded acceptance ref,
+   - commit the printed line DIRECTLY to `feature/paper-alpha` (the acceptance ref pinned in code,
      never main) and push within 3 days (never squash or re-wrap).
 5. Periodically, from the worktree: `run_fetch_journal_bars.py`, `run_score_shadow.py`
    (counts only), `run_shadow_report.py --persist`.

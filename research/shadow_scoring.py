@@ -258,7 +258,7 @@ class ShadowScorer:
         """Aggregate FINAL outcomes: selected trades vs NO_TRADE counterfactuals, by regime/strategy."""
         with self._connect() as conn:
             rows = conn.execute(
-                """SELECT o.*, d.action, d.regime, d.symbol FROM shadow_outcomes o
+                """SELECT o.*, d.action, d.regime, d.symbol, d.cycle_id FROM shadow_outcomes o
                    JOIN shadow_decisions d ON d.id=o.decision_id
                    WHERE o.status='FINAL' AND o.scorer_version=?""",
                 (SCORER_VERSION,),
@@ -295,4 +295,32 @@ class ShadowScorer:
             "no_trade_rejected_profitable": len(rejected_good),
             "selected_by_regime": {k: summary(v) for k, v in sorted(by_regime.items())},
             "selected_by_action": {k: summary(v) for k, v in sorted(by_action.items())},
+            "selected_vs_cycle_fwd5": _excess_vs_cycle(rows, "SELECTED"),
+            "counterfactual_vs_cycle_fwd5": _excess_vs_cycle(rows, "COUNTERFACTUAL"),
         }
+
+
+def _excess_vs_cycle(rows, evaluated: str) -> dict:
+    """FWD1/FWD2 measure: side-adjusted 5-bar forward return minus the mean 5-bar forward return
+    of every scored decision in the same discovery cycle (point-in-time cohort benchmark)."""
+    from math import sqrt
+
+    by_cycle: dict[str, list] = {}
+    for r in rows:
+        if r["fwd_5"] is not None:
+            by_cycle.setdefault(r["cycle_id"], []).append(r)
+    excess = []
+    for cycle_rows in by_cycle.values():
+        bench = sum(r["fwd_5"] for r in cycle_rows) / len(cycle_rows)
+        for r in cycle_rows:
+            if r["evaluated"] == evaluated:
+                sign = -1.0 if r["side"] == "SHORT" else 1.0
+                excess.append(sign * (r["fwd_5"] - bench))
+    n = len(excess)
+    if n == 0:
+        return {"n": 0, "mean_excess_pct": None, "t": None}
+    m = sum(excess) / n
+    if n < 2:
+        return {"n": n, "mean_excess_pct": m, "t": None}
+    var = sum((x - m) ** 2 for x in excess) / (n - 1)
+    return {"n": n, "mean_excess_pct": m, "t": (m / sqrt(var / n)) if var > 0 else None}

@@ -38,10 +38,10 @@ class IBKRHistoryBarsProvider:
 async def main_async(args) -> None:
     scorer = ShadowScorer(args.db)
     if args.source == "ibkr":
-        from config.config import config
+        from config.config import config, read_only_ibkr_settings
         from core.connection import IBKRConnection
 
-        connection = IBKRConnection(config.ibkr)
+        connection = IBKRConnection(read_only_ibkr_settings(config.ibkr, 50))
         try:
             ib = await connection.connect()
             counts = await scorer.score_pending(IBKRHistoryBarsProvider(ib), limit=args.limit)

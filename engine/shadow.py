@@ -129,23 +129,23 @@ class ShadowTradingEngine:
     def _journal_decision(self, cycle_id, candidate, bars, selection, action, reason) -> None:
         if self.journal is None:
             return
-        chosen = selection.selected
-        sig = None if chosen is None else chosen.signal
-        top_eval = next((e for e in selection.evaluations if e.signal.side.value != "FLAT"), None)
-        top = {} if top_eval is None else {
-            "strategy": top_eval.strategy, "side": top_eval.signal.side.value,
-            "score": float(top_eval.adjusted_score), "entry": top_eval.signal.entry,
-            "stop": top_eval.signal.stop, "target": top_eval.signal.target,
-        }
-        regime = selection.regime
-        context = {
-            "atr": (regime.atr_pct / 100 * bars[-1].close) if bars else None,
-            "adx": regime.adx, "volatility_stress": regime.volatility_stress,
-            "liquidity_score": getattr(candidate, "score", None),
-            "selector_threshold": getattr(self.selector, "minimum_score", None),
-            "reference_close": bars[-1].close if bars else None,
-        }
         try:
+            chosen = selection.selected
+            sig = None if chosen is None else chosen.signal
+            top_eval = next((e for e in selection.evaluations if e.signal.side.value != "FLAT"), None)
+            top = {} if top_eval is None else {
+                "strategy": top_eval.strategy, "side": top_eval.signal.side.value,
+                "score": float(top_eval.adjusted_score), "entry": top_eval.signal.entry,
+                "stop": top_eval.signal.stop, "target": top_eval.signal.target,
+            }
+            regime = selection.regime
+            context = {
+                "atr": (regime.atr_pct / 100 * bars[-1].close) if bars else None,
+                "adx": regime.adx, "volatility_stress": regime.volatility_stress,
+                "liquidity_score": getattr(candidate, "score", None),
+                "selector_threshold": getattr(self.selector, "minimum_score", None),
+                "reference_close": bars[-1].close if bars else None,
+            }
             self.journal.record_decision(
                 cycle_id, symbol=candidate.symbol,
                 con_id=int(getattr(candidate.contract, "conId", 0) or 0),

@@ -10,6 +10,7 @@ from core.account import AccountService, AccountSnapshot
 from core.broker_state import BrokerStateService
 from core.paper_guard import PaperOrderGuard, build_paper_guard, mask_account
 from risk.daily_guard import DailyLossGuard
+from risk.drawdown_guard import DrawdownGuard, DrawdownStateStore
 from risk.kill_switch import KillSwitch, KillSwitchResult
 from risk.risk_manager import RiskManager
 from risk.state_store import DailyRiskStateStore
@@ -37,6 +38,7 @@ class PaperSupervisor:
         self.context: SupervisorContext | None = None
         self.kill_switch: KillSwitch | None = None
         self.paper_guard: PaperOrderGuard | None = None
+        self.drawdown: DrawdownGuard | None = None
         self._kill_persisted = False
 
     async def initialize(self) -> tuple[SupervisorContext, AccountSnapshot]:
@@ -69,6 +71,12 @@ class PaperSupervisor:
         )
         if not verification.verified and not risk.trading_locked:
             risk.lock_trading(f"paper_account_unverified:{verification.reason}")
+
+        # Multi-day drawdown lock: sticky across days/restarts until a human resets it.
+        self.drawdown = DrawdownGuard(DrawdownStateStore(), account.account, self.config.risk.max_drawdown_pct)
+        drawdown = self.drawdown.evaluate(account.net_liquidation)
+        if drawdown.record.locked and not risk.trading_locked:
+            risk.lock_trading(drawdown.record.lock_reason or "multi-day drawdown lock")
 
         guard = DailyLossGuard(risk, persisted.starting_equity)
         self.context = SupervisorContext(
@@ -114,6 +122,12 @@ class PaperSupervisor:
         if account.net_liquidation is None:
             raise RuntimeError("Account snapshot missing NetLiquidation")
 
+        if self.drawdown is not None:
+            drawdown = self.drawdown.evaluate(account.net_liquidation)
+            if drawdown.record.locked and not self.context.risk.trading_locked:
+                self.context.risk.lock_trading(drawdown.record.lock_reason or "multi-day drawdown lock")
+                logger.critical("DRAWDOWN LOCK | drawdown=%.2f%% | new entries locked until human reset",
+                                drawdown.drawdown_pct * 100)
         result = self.context.guard.evaluate(account.net_liquidation)
         logger.info(
             "SUPERVISOR RISK | baseline=%.2f current=%.2f pnl=%.2f loss_pct=%.2f%% locked=%s",

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from os import getenv
 
 from dotenv import load_dotenv
@@ -45,9 +45,11 @@ class RiskConfig:
     max_position_pct: float = field(default_factory=lambda: float(getenv("MAX_POSITION_PCT", "0.10")))
     kill_switch_enabled: bool = field(default_factory=lambda: env_bool("KILL_SWITCH_ENABLED", True))
     kill_switch_dry_run: bool = field(default_factory=lambda: env_bool("KILL_SWITCH_DRY_RUN", True))
+    # Multi-day drawdown from the persisted high-water mark that locks new entries (sticky).
+    max_drawdown_pct: float = field(default_factory=lambda: float(getenv("MAX_DRAWDOWN_PCT", "0.15")))
 
     def validate(self) -> None:
-        for name, value in (("MAX_TRADE_RISK_PCT", self.max_trade_risk_pct), ("MAX_DAILY_LOSS_PCT", self.max_daily_loss_pct), ("MAX_POSITION_PCT", self.max_position_pct)):
+        for name, value in (("MAX_TRADE_RISK_PCT", self.max_trade_risk_pct), ("MAX_DAILY_LOSS_PCT", self.max_daily_loss_pct), ("MAX_POSITION_PCT", self.max_position_pct), ("MAX_DRAWDOWN_PCT", self.max_drawdown_pct)):
             if not 0 < value <= 1:
                 raise ValueError(f"{name} must be between 0 and 1")
 
@@ -99,3 +101,12 @@ class BotConfig:
 
 
 config = BotConfig()
+
+
+def read_only_ibkr_settings(settings: IBKRConfig, client_id_offset: int) -> IBKRConfig:
+    """Settings for research/maintenance runners that must never trade.
+
+    ``readonly=True`` asks TWS/Gateway for a read-only API session, and a separate
+    clientId avoids colliding with (or impersonating) the trading bot's session.
+    """
+    return replace(settings, readonly=True, client_id=settings.client_id + int(client_id_offset))

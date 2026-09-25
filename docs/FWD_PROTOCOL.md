@@ -99,8 +99,15 @@ sample.
 
 ## FWD2: "NO_TRADE passes on setups as good as the ones it takes"
 - **Measure:** per trading day, the mean excess of selected LONG events minus the mean excess
-  of LONG counterfactuals (the best sub-threshold LONG evaluation of NO_TRADE rows). Only days
-  with both are paired. SHORT counterfactuals are reported, never pooled.
+  of LONG counterfactuals. Only days with both are paired. SHORT counterfactuals are reported,
+  never pooled.
+- **Counterfactual (pinned before registration, matching the code):** a NO_TRADE decision
+  whose BEST non-flat evaluation — the highest adjusted score, i.e. the journal's `top_*`
+  columns — is LONG and has a stop and a target.
+  - A NO_TRADE row whose best evaluation is SHORT is **not** a LONG counterfactual, even if a
+    LONG evaluation ranks below it.
+  - The per-strategy records in `shadow_opportunities` are never used to redefine the
+    counterfactual.
 - **Minimums:** ≥ 300 events in each arm and ≥ 40 paired days.
 - **Decisions:**
   - **KEEP:** mean difference > 0 and t ≥ critical.
@@ -146,6 +153,31 @@ size its window.
 - **Timing:** not evaluable before the 12th month-end after the window start (≈ 2027-10).
   Its deadline is **2027-12-31**. The FWD3 evaluator must be written, reviewed and frozen
   before the 12th rebalance exists.
+
+## Exploratory records (`shadow_opportunities`) — governance
+Shadow-only also journals EVERY strategy evaluation of every decision (engine/opportunity.py).
+These records are **exploratory, not FWD evidence**:
+1. The FWD evaluator, the scorer and the quality gates never read them (enforced by a test).
+2. **Embargo.** No per-strategy or per-context analysis of forward data until both FWD1 and
+   FWD2 reach their binding cutoff (or 2027-03-31). Until then they are only recorded.
+3. After the embargo, every exploratory query is written down in `docs/experiments/LOG.md`,
+   so the number of looks K is counted. Any resulting hypothesis gets a NEW registration and is
+   tested only on data recorded after that registration.
+4. Nothing derived from them — a selector bonus, a lifecycle promotion, an admission filter —
+   may change the decision path while any FWD window is open.
+5. Strategy × context exploration should preferably use historical TRAIN/VALIDATION replays
+   (the same pipeline emits the same records offline), so forward data is not spent.
+
+## Pinned deployment
+The window's evidence comes from ONE immutable checkout.
+- Shadow-only runs from a separate worktree at the registered commit, for example:
+  ```bash
+  git worktree add ../knt-fwd <commit>
+  ```
+- Development continues elsewhere; later commits do not touch the running process.
+- `run_shadow_only.py` refuses to (re)start when a registered window exists and the running
+  decision code or decision config differs from the registration.
+- `--end-fwd-window` overrides this only as an explicit acknowledgement that the window ends.
 
 ## Forward replays
 `run_pipeline_backtest.py --segment forward` requires `--confirm-forward`. Comparing variants

@@ -41,9 +41,9 @@ def test_opportunity_fields_are_honest():
             assert o.expected_return_pct is None and o.horizon_bars is None     # unknown is not zero
             assert o.lifecycle == "SHADOW"
             if o.direction == "FLAT":
-                assert o.eligibility == "flat" and o.risk_pct is None and o.cost_in_r is None
+                assert o.eligibility == "flat" and o.risk_pct is None and o.spread_slip_fee_in_r is None
             elif o.risk_pct:
-                assert o.cost_in_r == o.cost_pct / o.risk_pct
+                assert o.spread_slip_fee_in_r == o.spread_slip_fee_pct / o.risk_pct
 
 
 def test_shadow_journals_every_opportunity_and_the_fwd_evaluator_never_reads_them(tmp_path):
@@ -85,3 +85,30 @@ def test_stock_type_is_journaled_from_contract_details(tmp_path):
     run(shadow)
     row = sqlite3.connect(shadow.journal.path).execute("SELECT stock_type FROM shadow_decisions").fetchone()
     assert row == ("ETF",)
+
+
+
+def test_a_recorder_failure_never_changes_the_decision(monkeypatch):
+    import engine.decision as decision_module
+
+    replay = PipelineBacktest({"S1": _walk(1)}, PipelineConfig(cost_model=CostModel.zero()))
+    bars = _walk(3)[:140]
+    expected = replay.pipeline.decide(bars, symbol="X", asset_class="STK")
+    monkeypatch.setattr(decision_module, "build_opportunities",
+                        lambda *a, **k: (_ for _ in ()).throw(TypeError("recorder bug")))
+    broken = replay.pipeline.decide(bars, symbol="X", asset_class="STK")
+    assert (broken.action, broken.reason) == (expected.action, expected.reason) and broken.opportunities == ()
+
+
+def test_short_evaluations_are_not_labelled_eligible_when_shorts_are_disabled():
+    from types import SimpleNamespace
+
+    from engine.opportunity import build_opportunities
+    from strategies.momentum import SignalSide, StrategySignal
+
+    e = SimpleNamespace(strategy="x", signal=StrategySignal(SignalSide.SHORT, 90, 100.004, 102.0, 96.0, "s"),
+                        adjusted_score=90.0, regime_bonus=0.0, evidence_bonus=0.0, learning=None)
+    sel = SimpleNamespace(regime=SimpleNamespace(regime=SimpleNamespace(value="TRENDING")), reason="ok",
+                          selected=e, evaluations=(e,))
+    (o,) = build_opportunities(sel, symbol="X", asset_class="STK", minimum_score=55, context_bars=140)
+    assert o.eligibility == "short_disabled" and o.entry == 100.0                # tick-rounded

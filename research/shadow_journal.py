@@ -57,7 +57,7 @@ DECISION_VERSION = "selector_v1+decision_pipeline_v2"
 
 
 DECISION_PATH = ("engine", "execution", "market", "portfolio", "risk", "strategies", "core",
-                 "config/config.py", "research/shadow_journal.py", "run_shadow_only.py")
+                 "config/config.py", "research/shadow_journal.py", "run_shadow_only.py", "backtest/costs.py")
 
 
 @lru_cache(maxsize=1)
@@ -213,8 +213,8 @@ class ShadowJournal:
                     target REAL,
                     risk_pct REAL,
                     reward_risk REAL,
-                    cost_pct REAL,
-                    cost_in_r REAL,
+                    spread_slip_fee_pct REAL,
+                    spread_slip_fee_in_r REAL,
                     context_bars INTEGER
                 )
                 """
@@ -302,14 +302,15 @@ class ShadowJournal:
         rows = [(int(decision_id), cycle_id, now, OPPORTUNITY_VERSION, o.symbol, o.asset_class, o.strategy,
                  o.lifecycle, o.direction, o.regime, o.heuristic_score, o.regime_adjustment,
                  o.evidence_adjustment, o.adjusted_score, o.eligibility, int(bool(o.selected)), o.entry, o.stop,
-                 o.target, o.risk_pct, o.reward_risk, o.cost_pct, o.cost_in_r, o.context_bars)
+                 o.target, o.risk_pct, o.reward_risk, o.spread_slip_fee_pct, o.spread_slip_fee_in_r,
+                 o.context_bars)
                 for o in opportunities]
         with sqlite3.connect(self.path) as conn:
             conn.executemany(
                 """INSERT INTO shadow_opportunities (decision_id, cycle_id, created_at, opportunity_version, symbol,
                    asset_class, strategy, lifecycle, direction, regime, heuristic_score, regime_adjustment,
                    evidence_adjustment, adjusted_score, eligibility, selected, entry, stop, target, risk_pct,
-                   reward_risk, cost_pct, cost_in_r, context_bars)
+                   reward_risk, spread_slip_fee_pct, spread_slip_fee_in_r, context_bars)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 rows,
             )

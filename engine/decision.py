@@ -134,9 +134,14 @@ class DecisionPipeline:
         decision = self._decide(bars, symbol=symbol, asset_class=asset_class, portfolio_state=portfolio_state,
                                 position_returns=position_returns, selection=selection, sector=sector,
                                 sectors=sectors)
-        opportunities = build_opportunities(
-            selection, symbol=symbol, asset_class=asset_class,
-            minimum_score=float(getattr(self.selector, "minimum_score", 0.0)), context_bars=len(bars))
+        try:
+            opportunities = build_opportunities(
+                selection, symbol=symbol, asset_class=asset_class,
+                minimum_score=float(getattr(self.selector, "minimum_score", 0.0)), context_bars=len(bars),
+                allow_short=self.allow_short)
+        except Exception:
+            # Recording only: a bug in the recorder can never change or erase a decision.
+            opportunities = ()
         return replace(decision, opportunities=opportunities)
 
     def _decide(self, bars, *, symbol, asset_class, portfolio_state, position_returns, selection,

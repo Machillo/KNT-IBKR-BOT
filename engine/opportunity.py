@@ -12,9 +12,11 @@ None, never a default:
 * ``expected_return_pct`` is always None: no calibrated, forward-validated mapping from a
   signal to an expected return exists (docs/ARCHITECTURE_TARGET.md §Evidence). Unknown != 0.
 * ``horizon_bars`` is None: no strategy declares a holding horizon; exits are stop/target only.
-* ``cost_pct`` is the round-trip spread + slippage + regulatory-fee estimate of the BASELINE
-  cost model, excluding commission (size-dependent: it depends on the allocation).
-  ``cost_in_r`` = cost_pct / risk_pct: the share of the stop distance eaten by costs.
+* ``spread_slip_fee_pct`` is the round-trip half-spread + slippage + regulatory-fee estimate of
+  the BASELINE cost model for MARKETABLE fills. It EXCLUDES commission (size-dependent; at small
+  accounts the IBKR minimum commission dominates) and short-borrow cost, and it overstates the
+  cost of a resting limit entry. ``spread_slip_fee_in_r`` = that / risk_pct.
+* Prices are the tick-rounded prices the executor would transmit.
 
 Exploratory by construction: these records are NOT FWD evidence (docs/FWD_PROTOCOL.md);
 the FWD evaluator never reads them.
@@ -41,15 +43,15 @@ class Opportunity:
     regime_adjustment: float
     evidence_adjustment: float
     adjusted_score: float
-    eligibility: str                # eligible | flat | avoided | below_threshold | regime_paused
+    eligibility: str                # eligible | flat | avoided | below_threshold | regime_paused | short_disabled
     selected: bool
     entry: float | None
     stop: float | None
     target: float | None
     risk_pct: float | None          # |entry - stop| / entry, %
     reward_risk: float | None       # |target - entry| / |entry - stop|
-    cost_pct: float | None          # round trip, commission excluded, %
-    cost_in_r: float | None
+    spread_slip_fee_pct: float | None   # round trip, marketable, commission/borrow EXCLUDED, %
+    spread_slip_fee_in_r: float | None
     expected_return_pct: None = None
     horizon_bars: int | None = None
     context_bars: int = 0
@@ -60,7 +62,10 @@ def _round_trip_cost_pct(costs: CostModel) -> float:
 
 
 def build_opportunities(selection, *, symbol: str, asset_class: str, minimum_score: float,
-                        context_bars: int, costs: CostModel = BASELINE) -> tuple[Opportunity, ...]:
+                        context_bars: int, costs: CostModel = BASELINE,
+                        allow_short: bool = False) -> tuple[Opportunity, ...]:
+    from execution.pretrade import tick
+
     regime = selection.regime.regime.value
     paused = selection.reason == "high_volatility_directional_pause"
     chosen = selection.selected
@@ -76,9 +81,11 @@ def build_opportunities(selection, *, symbol: str, asset_class: str, minimum_sco
             eligibility = "avoided"
         elif e.adjusted_score < minimum_score:
             eligibility = "below_threshold"
+        elif direction == "SHORT" and not allow_short:
+            eligibility = "short_disabled"
         else:
             eligibility = "eligible"
-        entry, stop, target = sig.entry, sig.stop, sig.target
+        entry, stop, target = (None if x is None else tick(float(x)) for x in (sig.entry, sig.stop, sig.target))
         risk_pct = reward_risk = cost_pct = cost_in_r = None
         if direction != "FLAT" and entry and stop and entry > 0 and entry != stop:
             risk_pct = abs(entry - stop) / entry * 100
@@ -93,6 +100,6 @@ def build_opportunities(selection, *, symbol: str, asset_class: str, minimum_sco
             adjusted_score=float(e.adjusted_score), eligibility=eligibility,
             selected=chosen is not None and e.strategy == chosen.strategy,
             entry=entry, stop=stop, target=target, risk_pct=risk_pct, reward_risk=reward_risk,
-            cost_pct=cost_pct, cost_in_r=cost_in_r, context_bars=int(context_bars),
+            spread_slip_fee_pct=cost_pct, spread_slip_fee_in_r=cost_in_r, context_bars=int(context_bars),
         ))
     return tuple(out)

@@ -116,7 +116,8 @@ def _population(path: Path, run_mode: str = "shadow_only"):
     with conn:
         rows = conn.execute(
             """SELECT d.id, d.cycle_id, d.symbol, d.created_at, d.bar_time, d.action, d.reason, d.strategy, d.side AS d_side,
-                      d.top_side, d.top_stop, d.top_target, o.status, o.evaluated, o.side, o.fwd_5, c.market_open,
+                      d.top_side, d.top_stop, d.top_target, o.status, o.evaluated, o.side, o.fwd_5, o.protocol_fingerprint,
+                      c.market_open,
                       c.created_at AS cycle_created, c.decision_fingerprint, c.config_hash
                FROM shadow_decisions d
                JOIN discovery_cycles c ON c.cycle_id = d.cycle_id
@@ -196,7 +197,9 @@ REGISTRATION_PREFIX = f"{PROTOCOL_ID} WINDOW REGISTERED:"
 MAX_COMMIT_DELAY = timedelta(days=3)          # the registration line must be committed promptly
 PRE_START_GRACE = timedelta(hours=1)          # shadow cycles of the registered code before start
 PROTOCOL_FILES = ("research/fwd_protocol.py", "research/shadow_scoring.py", "research/shadow_quality.py",
-                  "research/protocol.py", "backtest/costs.py")
+                  "research/protocol.py", "backtest/costs.py", "backtest/metrics.py", "run_score_shadow.py",
+                  "run_fetch_journal_bars.py")
+ACCEPTANCE_REF = "origin/main"   # the registration line must be reachable from the pushed main branch
 
 
 def protocol_fingerprint() -> str:
@@ -218,24 +221,51 @@ def registration_line(record: dict) -> str:
             f"protocol_fingerprint={record['protocol_fingerprint']}")
 
 
-def committed_registration_lines(repo: Path | None = None) -> dict[str, datetime]:
-    """Every distinct registration line EVER committed on any ref (git history is shared by all
-    worktrees), with the time of the first commit that added it. Uncommitted edits do not count;
-    a deleted line still counts (a re-registration is visible forever)."""
+_LINE_RE = None
+
+
+def _parse_registration(text: str) -> dict | None:
+    """The registration record inside any line (bullets, backticks, extra spaces tolerated)."""
+    import re
+
+    global _LINE_RE
+    if _LINE_RE is None:
+        _LINE_RE = re.compile(re.escape(REGISTRATION_PREFIX) + r"\s+start_utc=(\S+)\s+registered_at_utc=(\S+)\s+"
+                              r"decision_fingerprint=(\w+)\s+config_hash=(\w+)\s+protocol_fingerprint=(\w+)")
+    m = _LINE_RE.search(text)
+    if not m:
+        return None
+    keys = ("start_utc", "registered_at_utc", "decision_fingerprint", "config_hash", "protocol_fingerprint")
+    return dict(zip(keys, m.groups()))
+
+
+def committed_registrations(repo: Path | None = None, ref: str = "--all") -> dict[str, tuple[dict, datetime]]:
+    """Registrations ever ADDED to docs/experiments/LOG.md on ``ref`` (default: every local ref),
+    keyed by start_utc (a re-wrapped or reformatted line is the same registration), with the
+    committer time of the first commit that added it. A line removed by a later commit still
+    counts. Limits: history rewrites of unpushed commits and committer-date forgery are not
+    detectable here; acceptance therefore also requires the pushed ``ACCEPTANCE_REF``."""
     import subprocess
 
     out = subprocess.run(
-        ["git", "log", "--all", "--reverse", "--format=@@%cI", "-p", "-S", REGISTRATION_PREFIX, "--",
+        ["git", "log", ref, "--reverse", "--format=@@%cI", "-p", "-S", REGISTRATION_PREFIX, "--",
          "docs/experiments/LOG.md"],
         cwd=repo or REPO_ROOT, capture_output=True, text=True, timeout=30, check=False)
-    lines: dict[str, datetime] = {}
+    found: dict[str, tuple[dict, datetime]] = {}
     when = None
     for raw in (out.stdout or "").splitlines():
         if raw.startswith("@@") and not raw.startswith("@@ "):
             when = datetime.fromisoformat(raw[2:].strip())
-        elif raw.startswith("+" + REGISTRATION_PREFIX) and when is not None:
-            lines.setdefault(raw[1:].strip(), when)
-    return lines
+        elif raw.startswith("+") and when is not None:
+            record = _parse_registration(raw[1:])
+            if record is not None:
+                found.setdefault(record["start_utc"], (record, when))
+    return found
+
+
+def committed_registration_lines(repo: Path | None = None) -> dict[str, datetime]:
+    """Backward-compatible view: canonical registration line -> first commit time (all refs)."""
+    return {registration_line(rec): when for rec, when in committed_registrations(repo).values()}
 
 
 def register_window(path: str | Path, *, config_hash: str, start: datetime | None = None) -> dict:
@@ -273,6 +303,12 @@ def end_window(path: str | Path, reason: str) -> dict:
     return record
 
 
+def registration_is_pushed(registration: dict) -> bool:
+    pushed = committed_registrations(ref=ACCEPTANCE_REF)
+    entry = pushed.get(registration.get("start_utc", ""))
+    return entry is not None and registration_line(entry[0]) == registration_line(registration)
+
+
 def _registration(path: Path) -> dict | None:
     target = window_file(path)
     if not target.exists():
@@ -287,8 +323,6 @@ def _registration(path: Path) -> dict | None:
 def _registration_refusal(path: Path, registration: dict) -> str | None:
     if registration.get("corrupt"):
         return "registration file unreadable"
-    if "ended_at_utc" in registration:
-        return f"window ended at {registration['ended_at_utc']} ({registration.get('end_reason')}): report it, never bind"
     required = ("start_utc", "registered_at_utc", "decision_fingerprint", "config_hash", "protocol_fingerprint")
     if any(not registration.get(k) for k in required):
         return "registration incomplete"
@@ -299,6 +333,8 @@ def _registration_refusal(path: Path, registration: dict) -> str | None:
     if len(committed) > 1:
         return (f"{len(committed)} {PROTOCOL_ID} registrations were committed: a new window needs a new "
                 f"protocol id and counts in the family")
+    if not registration_is_pushed(registration):
+        return f"registration line not reachable from {ACCEPTANCE_REF} (push it to main)"
     registered_at = _utc(registration["registered_at_utc"])
     commit_time = committed[line].astimezone(timezone.utc)
     if not (registered_at - timedelta(minutes=1) <= commit_time <= registered_at + MAX_COMMIT_DELAY):
@@ -355,6 +391,11 @@ def _window(path: Path, run_mode: str, test: str) -> tuple[list, dict]:
         return [], {"binding": False, "reason": refusal}
     start = _utc(registration["start_utc"])
     deadline_end = datetime.combine(EVIDENCE_DEADLINE + timedelta(days=1), datetime.min.time(), tzinfo=_ET)
+    ended_at = _utc(registration["ended_at_utc"]) if registration.get("ended_at_utc") else None
+    if ended_at is not None:
+        # An ended window keeps whatever it had ALREADY earned: rows after the end never count,
+        # and it binds only if its cutoff was reached before the end (checked below).
+        deadline_end = min(deadline_end, ended_at)
     rows = [r for r in _population(path, run_mode)
             if _utc(r["cycle_created"]) is not None and start <= _utc(r["cycle_created"]) < deadline_end]
     if not rows:
@@ -369,14 +410,18 @@ def _window(path: Path, run_mode: str, test: str) -> tuple[list, dict]:
         if _decision_minimums([r for r in rows if _day(r) <= day], test):
             cutoff_day, reached = day, True
             break
-    deadline_passed = datetime.now(_ET).date() > EVIDENCE_DEADLINE
+    deadline_passed = datetime.now(_ET).date() > EVIDENCE_DEADLINE and ended_at is None
     if cutoff_day is None:
         cutoff_day = EVIDENCE_DEADLINE.isoformat() if deadline_passed else (days[-1] if days else None)
     rows = [r for r in rows if cutoff_day is not None and _day(r) <= cutoff_day]
     unscored = sum(1 for r in rows if r["status"] is None or (r["status"] == "PENDING_DATA" and r["fwd_5"] is None))
-    binding = (reached or deadline_passed) and unscored == 0
+    # Rows scored by other scoring rules than the registered ones are not valid scores.
+    foreign = sum(1 for r in rows if r["status"] is not None
+                  and r["protocol_fingerprint"] != registration["protocol_fingerprint"])
+    binding = (reached or deadline_passed) and unscored == 0 and foreign == 0
     window = {"window_start": start.isoformat(), "cutoff_day": cutoff_day, "minimums_reached": reached,
               "deadline_passed": deadline_passed, "unscored_rows_to_cutoff": unscored, "binding": binding,
+              "rows_scored_by_other_rules": foreign, "ended_at": None if ended_at is None else ended_at.isoformat(),
               "registered_fingerprint": registration.get("decision_fingerprint")}
     if rows:
         # Verdict over EVERY cycle from the registered start to the last cycle of the cutoff day
@@ -398,6 +443,30 @@ def _window(path: Path, run_mode: str, test: str) -> tuple[list, dict]:
 def _arm_missing(rows, arms) -> dict[str, float | None]:
     """Missing forward returns PER ARM (a total can hide a selective hole in one arm)."""
     return {arm: _missing_share(_arm(rows, arm)) for arm in arms}
+
+
+def _persist_binding(path: Path, result: dict) -> dict:
+    """The FIRST binding result of each test is written into the registration file and returned
+    ever after: a binding result can never be re-evaluated away (e.g. by ending the window)."""
+    target = window_file(path)
+    record = json.loads(target.read_text(encoding="utf-8"))
+    stored = record.setdefault("binding_results", {})
+    if result["test"] in stored:
+        return stored[result["test"]]
+    stored[result["test"]] = json.loads(json.dumps(result, default=str))
+    target.write_text(json.dumps(record, indent=2), encoding="utf-8")
+    return stored[result["test"]]
+
+
+def _finish(path: Path, result: dict) -> dict:
+    registration = _registration(path)
+    if registration and not registration.get("corrupt"):
+        stored = registration.get("binding_results", {}).get(result["test"])
+        if stored is not None:
+            return stored
+    if result["window"].get("binding"):
+        return _persist_binding(path, result)
+    return _blind(result)
 
 
 def _blind(result: dict) -> dict:
@@ -422,6 +491,10 @@ def _missing_share(rows) -> float | None:
 def _gate(window: dict, missing, enough: bool) -> str | None:
     if window.get("reason"):
         return window["reason"]
+    if not window.get("binding") and window.get("rows_scored_by_other_rules"):
+        return "rows scored by rules other than the registered protocol: rescore from the pinned checkout"
+    if not window.get("binding") and window.get("ended_at"):
+        return f"window ended at {window['ended_at']} before binding: report it, never bind"
     if not window.get("binding"):
         if window.get("unscored_rows_to_cutoff"):
             return "monitoring only: scoring incomplete up to the cutoff"
@@ -458,7 +531,7 @@ def evaluate_fwd1(path: str | Path, run_mode: str = "shadow_only") -> dict:
     elif reason is None:
         reason = "statistics not computable"
     sample["daily_sd_pct"] = _sd(list(daily.values()))
-    return _blind({"protocol": PROTOCOL_ID, "test": "FWD1", "decision": decision, "reason": reason,
+    return _finish(Path(path), {"protocol": PROTOCOL_ID, "test": "FWD1", "decision": decision, "reason": reason,
                    "sample": sample, "gross_excess": gross, "net_excess": net, "arm_missing_share": missing,
                    "window": window, "critical_t": critical_t(len(daily)) if daily else None})
 
@@ -488,7 +561,7 @@ def evaluate_fwd2(path: str | Path, run_mode: str = "shadow_only") -> dict:
     reasons: dict[str, int] = {}
     for r in _arm(rows, "COUNTERFACTUAL"):
         reasons[str(r["reason"])] = reasons.get(str(r["reason"]), 0) + 1
-    return _blind({"protocol": PROTOCOL_ID, "test": "FWD2", "decision": decision, "reason": reason,
+    return _finish(Path(path), {"protocol": PROTOCOL_ID, "test": "FWD2", "decision": decision, "reason": reason,
                    "sample": {"selected": len(sel_events), "counterfactual": len(cf_events),
                               "paired_days": len(paired), "daily_sd_pct": _sd(paired)},
                    "difference": diff, "arm_missing_share": missing, "no_trade_reasons": reasons,

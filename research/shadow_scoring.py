@@ -155,6 +155,15 @@ def align(row: sqlite3.Row, bars_from: list[PriceBar]) -> list[PriceBar] | None:
     return [b for b in later if _naive(b.time) >= decided_at]
 
 
+def _protocol_fingerprint() -> str | None:
+    """Fingerprint of the scoring rules that produced a row (research/fwd_protocol.py)."""
+    try:
+        from research.fwd_protocol import protocol_fingerprint
+        return protocol_fingerprint()
+    except Exception:
+        return None
+
+
 def _session_date(created_at):
     """Exchange (ET) date on which a decision was taken; None if unknown."""
     from zoneinfo import ZoneInfo
@@ -243,7 +252,7 @@ class ShadowScorer:
                 """
             )
             existing = {r[1] for r in conn.execute("PRAGMA table_info(shadow_outcomes)")}
-            for name, ddl in (("executable", "INTEGER"), ("provider", "TEXT")):
+            for name, ddl in (("executable", "INTEGER"), ("provider", "TEXT"), ("protocol_fingerprint", "TEXT")):
                 if name not in existing:
                     conn.execute("ALTER TABLE shadow_outcomes ADD COLUMN " + name + " " + ddl)
 
@@ -316,8 +325,8 @@ class ShadowScorer:
             conn.execute(
                 """INSERT INTO shadow_outcomes (decision_id, scorer_version, scored_at, status, evaluated,
                    strategy, side, filled, exit_reason, return_pct, mae_pct, mfe_pct, bars_held,
-                   fwd_1, fwd_5, fwd_20, cost_model, executable, provider)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   fwd_1, fwd_5, fwd_20, cost_model, executable, provider, protocol_fingerprint)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(decision_id, scorer_version) DO UPDATE SET
                      scored_at=excluded.scored_at, status=excluded.status, evaluated=excluded.evaluated,
                      strategy=excluded.strategy, side=excluded.side, filled=excluded.filled,
@@ -327,12 +336,13 @@ class ShadowScorer:
                      fwd_5=COALESCE(shadow_outcomes.fwd_5, excluded.fwd_5),
                      fwd_20=COALESCE(shadow_outcomes.fwd_20, excluded.fwd_20),
                      cost_model=excluded.cost_model, executable=excluded.executable,
-                     provider=excluded.provider
+                     provider=COALESCE(shadow_outcomes.provider, excluded.provider),
+                     protocol_fingerprint=COALESCE(shadow_outcomes.protocol_fingerprint, excluded.protocol_fingerprint)
                    WHERE shadow_outcomes.status != 'FINAL'""",
                 (o.decision_id, SCORER_VERSION, datetime.now(timezone.utc).isoformat(), o.status, o.evaluated,
                  o.strategy, o.side, int(o.filled), o.exit_reason, o.return_pct, o.mae_pct, o.mfe_pct,
                  o.bars_held, o.forward.get(1), o.forward.get(5), o.forward.get(20), self.costs.name,
-                 int(bool(o.executable)), provider),
+                 int(bool(o.executable)), provider, _protocol_fingerprint()),
             )
 
     def counts(self) -> dict:

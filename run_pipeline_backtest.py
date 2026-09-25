@@ -103,6 +103,17 @@ def main() -> None:
     if a.split == "fraction" and not a.confirm_holdout:
         ap.error("--split fraction mixes holdout-calendar data into every segment; it counts as a holdout use "
                  "(pass --confirm-holdout only for a frozen candidate).")
+    if a.segment == "forward":
+        import json
+
+        from config.config import shadow_journal_path
+        from research.fwd_protocol import window_file
+        target = window_file(shadow_journal_path())
+        if target.exists():
+            record = json.loads(target.read_text(encoding="utf-8"))
+            if "ended_at_utc" not in record and len(record.get("binding_results", {})) < 2:
+                ap.error("A registered FWD window is open: forward replays are interim looks. Wait until "
+                         "FWD1 and FWD2 bind (or the window ends).")
     if a.segment == "forward" and not a.confirm_forward:
         ap.error("FORWARD data is the evidence of FWD1-FWD3. Comparing variants on it is selection; run only a "
                  "variant registered in docs/experiments/LOG.md, then pass --confirm-forward.")

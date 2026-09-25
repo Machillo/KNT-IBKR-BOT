@@ -23,8 +23,15 @@ REAL_COMMITTED_LINES = fwd_protocol.committed_registration_lines   # captured be
 def committed_log(monkeypatch):
     """Stand-in for 'git log -S' over docs/experiments/LOG.md: lines 'committed' by the test."""
     COMMITTED.clear()
-    monkeypatch.setattr(fwd_protocol, "committed_registration_lines", lambda: dict(COMMITTED))
+    _patch_history(monkeypatch)
     return COMMITTED
+
+
+def _patch_history(monkeypatch):
+    monkeypatch.setattr(fwd_protocol, "committed_registration_lines", lambda: dict(COMMITTED))
+    # "Pushed to origin/main" = present in the stand-in history (the real check: see the git test).
+    monkeypatch.setattr(fwd_protocol, "registration_is_pushed",
+                        lambda reg: fwd_protocol.registration_line(reg) in COMMITTED)
 
 
 def _register(path, start, record_in_log=True, config_hash="cfg-test"):
@@ -77,7 +84,9 @@ def build(path, *, days=45, cycles_per_day=2, selected_effect=0.0, cf_effect=0.0
     with sqlite3.connect(path) as conn:
         conn.executemany(
             "INSERT INTO shadow_outcomes (decision_id, scorer_version, scored_at, status, evaluated, side, "
-            "filled, fwd_5, executable, provider) VALUES (?, ?, '', 'FINAL', ?, 'LONG', 0, ?, 1, 'IBKR')", outcomes)
+            "filled, fwd_5, executable, provider, protocol_fingerprint) "
+            "VALUES (?, ?, '', 'FINAL', ?, 'LONG', 0, ?, 1, 'IBKR', ?)",
+            [o + (fwd_protocol.protocol_fingerprint(),) for o in outcomes])
     return path
 
 
@@ -174,6 +183,12 @@ def test_interim_statistics_are_blinded_until_binding(tmp_path):
 def test_second_registration_or_protocol_change_or_ending_never_binds(tmp_path, monkeypatch):
     db = build(tmp_path / "p.db", selected_effect=0.8)
     assert fwd_protocol.evaluate_fwd1(db)["decision"] == "KEEP"
+    # The binding result is STORED in the registration: it can never be re-evaluated away.
+    import json
+    record = json.loads(fwd_protocol.window_file(db).read_text(encoding="utf-8"))
+    assert record["binding_results"]["FWD1"]["decision"] == "KEEP"
+    record.pop("binding_results")                     # (only to exercise the refusals below)
+    fwd_protocol.window_file(db).write_text(json.dumps(record), encoding="utf-8")
     # A second registration line ever committed (e.g. delete + re-register) -> never binds.
     COMMITTED["FWD-v1 WINDOW REGISTERED: start_utc=later ..."] = datetime.now(timezone.utc)
     assert "registrations were committed" in fwd_protocol.evaluate_fwd1(db)["reason"]
@@ -182,11 +197,33 @@ def test_second_registration_or_protocol_change_or_ending_never_binds(tmp_path, 
     monkeypatch.setattr(fwd_protocol, "protocol_fingerprint", lambda: "edited")
     assert "changed since registration" in fwd_protocol.evaluate_fwd1(db)["reason"]
     monkeypatch.undo()
-    monkeypatch.setattr(fwd_protocol, "committed_registration_lines", lambda: dict(COMMITTED))
-    # Ending the window is recorded, never silent, and never binding.
+    _patch_history(monkeypatch)
+    # Ending the window AFTER its binding cutoff keeps the result it had earned.
     fwd_protocol.end_window(db, "config changed")
+    assert fwd_protocol.evaluate_fwd1(db)["decision"] == "KEEP"
+
+
+def test_ending_a_window_before_binding_never_binds(tmp_path):
+    db = build(tmp_path / "t.db", days=10, selected_effect=0.8)
+    fwd_protocol.end_window(db, "restart on changed code")
     out = fwd_protocol.evaluate_fwd1(db)
-    assert out["decision"] == "INCONCLUSIVE" and "window ended" in out["reason"]
+    assert out["decision"] == "INCONCLUSIVE" and "ended" in out["reason"] and out["gross_excess"] == "BLINDED"
+
+
+def test_rows_scored_by_other_rules_block_binding(tmp_path):
+    db = build(tmp_path / "u.db", selected_effect=0.8)
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE shadow_outcomes SET protocol_fingerprint='dev-checkout' WHERE rowid % 7 = 0")
+    out = fwd_protocol.evaluate_fwd1(db)
+    assert out["decision"] == "INCONCLUSIVE" and "other than the registered protocol" in out["reason"]
+
+
+def test_registration_parser_tolerates_markdown_but_not_fragments():
+    record = {"start_utc": "2026-10-01T14:00:00+00:00", "registered_at_utc": "2026-10-01T14:00:01+00:00",
+              "decision_fingerprint": "abc", "config_hash": "def", "protocol_fingerprint": "123"}
+    line = fwd_protocol.registration_line(record)
+    assert fwd_protocol._parse_registration(f"- `{line}`") == record
+    assert fwd_protocol._parse_registration("FWD-v1 WINDOW REGISTERED: start_utc=x") is None
 
 
 def test_registration_cannot_be_backdated_and_commit_must_be_prompt(tmp_path):
@@ -227,15 +264,20 @@ def test_committed_registration_lines_reads_git_history_including_deleted_lines(
         subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True,
                        env={**__import__("os").environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
                             "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"})
+    def line(start):
+        return fwd_protocol.registration_line({"start_utc": start, "registered_at_utc": start,
+                                               "decision_fingerprint": "d", "config_hash": "c",
+                                               "protocol_fingerprint": "p"})
+    assert REGISTRATION_PREFIX in line("A")
     git("init", "-q")
-    first = f"{REGISTRATION_PREFIX} start_utc=A"
+    first = line("A")
     log.write_text("# log\n" + first + "\n", encoding="utf-8")
     git("add", "."); git("commit", "-qm", "register A")
     log.write_text("# log\n", encoding="utf-8")                     # someone deletes it...
     git("commit", "-qam", "remove A")
-    second = f"{REGISTRATION_PREFIX} start_utc=B"
-    log.write_text("# log\n" + second + "\n", encoding="utf-8")
+    second = line("B")
+    log.write_text("# log\n- `" + second + "`\n", encoding="utf-8")  # markdown-wrapped: same record
     git("commit", "-qam", "register B")
-    log.write_text("# log\n" + second + "\n" + f"{REGISTRATION_PREFIX} start_utc=UNCOMMITTED\n", encoding="utf-8")
+    log.write_text("# log\n" + line("UNCOMMITTED") + "\n", encoding="utf-8")
     lines = REAL_COMMITTED_LINES(repo)
     assert set(lines) == {first, second}                            # deleted one still counts; uncommitted not

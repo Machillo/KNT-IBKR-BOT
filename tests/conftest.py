@@ -1,17 +1,28 @@
-"""Tests must never touch the real runtime state directory (account baselines, locks, journals)."""
+"""Tests must never touch real runtime state (account baselines, locks, journals) or real logs.
+
+Layers (all automatic):
+1. every test runs with STATE_DIR -> a per-test temp dir (``state_path()`` resolves at call time);
+2. every test runs with the CWD set to a temp dir (catches any stray relative path);
+3. the file log handler is removed (tests never write logs/bot.log);
+4. after EACH test the real state/ directory is compared with its snapshot; any change fails
+   that test by name, and the session fails as a backstop.
+"""
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import pytest
 
-REAL_STATE = Path(__file__).resolve().parents[1] / "state"
+ROOT = Path(__file__).resolve().parents[1]
+REAL_STATE = ROOT / "state"
 
 
 def _snapshot() -> dict[str, tuple[int, int]]:
     if not REAL_STATE.exists():
         return {}
-    return {p.name: (p.stat().st_mtime_ns, p.stat().st_size) for p in REAL_STATE.iterdir() if p.is_file()}
+    return {str(p.relative_to(REAL_STATE)): (p.stat().st_mtime_ns, p.stat().st_size)
+            for p in REAL_STATE.rglob("*") if p.is_file()}
 
 
 _BEFORE: dict[str, tuple[int, int]] = {}
@@ -19,20 +30,26 @@ _BEFORE: dict[str, tuple[int, int]] = {}
 
 def pytest_sessionstart(session):
     _BEFORE.update(_snapshot())
+    for handler in list(logging.getLogger("knt_ibkr_bot").handlers):
+        if isinstance(handler, logging.FileHandler):
+            logging.getLogger("knt_ibkr_bot").removeHandler(handler)
+            handler.close()
 
 
 def pytest_sessionfinish(session, exitstatus):
-    after = _snapshot()
-    if after != _BEFORE:
-        changed = sorted(set(after) ^ set(_BEFORE) | {k for k in after if after.get(k) != _BEFORE.get(k)})
+    if _snapshot() != _BEFORE:
         session.exitstatus = 1
-        print(f"\nERROR: tests modified the real state directory: {changed}")
+        print("\nERROR: tests modified the real state directory")
 
 
 @pytest.fixture(autouse=True)
 def isolated_state_dir(tmp_path, monkeypatch):
-    """Point the repo-anchored STATE_DIR at a per-test temporary directory."""
+    """Point the repo-anchored STATE_DIR at a per-test temp dir and run from a temp CWD."""
     state = tmp_path / "state"
     monkeypatch.setattr("config.config.STATE_DIR", state)
     monkeypatch.setattr("engine.supervisor.STATE_DIR", state)
-    return state
+    monkeypatch.chdir(tmp_path)
+    before = _snapshot()
+    yield state
+    after = _snapshot()
+    assert after == before, f"test modified the REAL state directory: {sorted(set(after) ^ set(before))}"

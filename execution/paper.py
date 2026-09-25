@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from config.config import state_path
+
 import asyncio
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -62,8 +64,8 @@ class PaperExecutionResult:
 class TradeJournalStore:
     """Append-only paper execution journal."""
 
-    def __init__(self, path: str | Path = "state/strategy_performance.db") -> None:
-        self.path = Path(path)
+    def __init__(self, path: str | Path | None = None) -> None:
+        self.path = Path(path) if path is not None else state_path("strategy_performance.db")
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(self.path) as conn:
             conn.execute(

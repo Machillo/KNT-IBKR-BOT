@@ -83,6 +83,7 @@ async def main_async(args) -> None:
             ib, intelligence, max_candidates=cfg.runtime.shadow_max_candidates,
             quote_budget=cfg.runtime.universe_quote_budget, risk_manager=research_risk,
             paper_executor=None, session_policy=BrokerCalendarSessionPolicy(),
+            state_dir=STATE_DIR / "shadow_only",
         )
         states = PortfolioStateService(ib)
         logger.info("SHADOW-ONLY running | account=%s readonly=True executor=None", mask_account(account.account))

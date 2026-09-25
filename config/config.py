@@ -120,3 +120,10 @@ def read_only_ibkr_settings(settings: IBKRConfig, client_id_offset: int) -> IBKR
 # Absolute, repo-anchored runtime state directory: persisted risk locks must not depend on the
 # current working directory (starting from another folder would silently start fresh).
 STATE_DIR = Path(__file__).resolve().parents[1] / "state"
+
+
+def state_path(*parts: str) -> Path:
+    """Path inside the runtime state directory, resolved at call time (never CWD-relative)."""
+    import config.config as module  # late lookup so an override of STATE_DIR is honoured
+
+    return Path(module.STATE_DIR).joinpath(*parts)

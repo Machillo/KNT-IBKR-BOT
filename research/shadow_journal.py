@@ -16,6 +16,8 @@ live decisions directly.
 """
 from __future__ import annotations
 
+from config.config import state_path
+
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -38,8 +40,8 @@ DECISION_VERSION = "selector_v1+decision_pipeline_v1"
 
 
 class ShadowJournal:
-    def __init__(self, path: str | Path = "state/strategy_performance.db") -> None:
-        self.path = Path(path)
+    def __init__(self, path: str | Path | None = None) -> None:
+        self.path = Path(path) if path is not None else state_path("strategy_performance.db")
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(self.path) as conn:
             conn.execute(

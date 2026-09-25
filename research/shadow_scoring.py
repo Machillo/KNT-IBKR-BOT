@@ -18,6 +18,8 @@ Evaluated per decision:
 """
 from __future__ import annotations
 
+from config.config import state_path
+
 import inspect
 import json
 import sqlite3
@@ -165,8 +167,8 @@ def evaluate_row(row: sqlite3.Row, bars_after: list[PriceBar], costs: CostModel 
 
 
 class ShadowScorer:
-    def __init__(self, db_path: str | Path = "state/strategy_performance.db", costs: CostModel = BASELINE) -> None:
-        self.path = Path(db_path)
+    def __init__(self, db_path: str | Path | None = None, costs: CostModel = BASELINE) -> None:
+        self.path = Path(db_path) if db_path is not None else state_path("strategy_performance.db")
         self.costs = costs
         ShadowJournal(self.path)  # ensures the decision tables exist (append-only schema)
         with sqlite3.connect(self.path) as conn:

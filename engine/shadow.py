@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from itertools import combinations
+from pathlib import Path
 from types import SimpleNamespace
 from math import sqrt
 
@@ -49,11 +50,14 @@ class ShadowTradingEngine:
                  max_candidates: int = 12, quote_budget: int = 40, research_budget: int = 2,
                  risk_manager: RiskManager | None = None,
                  paper_executor: PaperExecutionEngine | None = None,
-                 session_policy=None) -> None:
+                 session_policy=None, state_dir: Path | None = None) -> None:
+        db = None if state_dir is None else Path(state_dir) / "strategy_performance.db"
+        if db is not None:
+            db.parent.mkdir(parents=True, exist_ok=True)
         self.ib = ib
         self.intelligence = market_intelligence
         self.history = HistoricalDataService(ib)
-        self.performance_store = StrategyPerformanceStore()
+        self.performance_store = StrategyPerformanceStore(db)
         self.selector = StrategySelector(minimum_signal_score, self.performance_store)
         self.research = ContinuousResearchCoordinator(self.history, self.performance_store)
         self.research_scheduler = ContinuousResearchScheduler(self.research, self.performance_store,
@@ -67,9 +71,9 @@ class ShadowTradingEngine:
         self.admission = None if risk_manager is None else PortfolioAdmissionCoordinator(
             risk_manager, require_sector_metadata=True)
         self.metadata = ContractMetadataService(ib)
-        self.risk_decisions = RiskDecisionStore()
+        self.risk_decisions = RiskDecisionStore(db)
         try:
-            self.journal: ShadowJournal | None = ShadowJournal()
+            self.journal: ShadowJournal | None = ShadowJournal(db)
         except Exception as exc:  # research journaling must never stop the shadow engine
             logger.warning("SHADOW JOURNAL unavailable | error=%s", exc)
             self.journal = None

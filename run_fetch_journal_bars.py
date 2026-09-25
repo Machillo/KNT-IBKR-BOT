@@ -32,7 +32,8 @@ async def main_async(args) -> None:
 
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    contracts = journal_contracts(args.db)
+    from config.config import state_path
+    contracts = journal_contracts(args.db or str(state_path("strategy_performance.db")))
     connection = IBKRConnection(read_only_ibkr_settings(config.ibkr, 52))
     try:
         ib = await connection.connect()
@@ -55,7 +56,7 @@ async def main_async(args) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--db", default="state/strategy_performance.db")
+    ap.add_argument("--db", default=None, help="default: <repo>/state/strategy_performance.db")
     ap.add_argument("--out-dir", default="reports/pit_cache")
     ap.add_argument("--duration", default="1 Y")
     asyncio.run(main_async(ap.parse_args()))

@@ -63,7 +63,7 @@ async def main_async(args) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--db", default="state/strategy_performance.db")
+    ap.add_argument("--db", default=None, help="default: <repo>/state/strategy_performance.db")
     ap.add_argument("--source", choices=["cache", "ibkr"], default="cache")
     ap.add_argument("--cache-dir", default="reports/history_cache")
     ap.add_argument("--limit", type=int, default=None)

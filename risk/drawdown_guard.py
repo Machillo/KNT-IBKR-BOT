@@ -11,6 +11,8 @@ a monitoring failure (entries locked).
 """
 from __future__ import annotations
 
+from config.config import state_path
+
 import json
 import os
 from dataclasses import asdict, dataclass
@@ -38,8 +40,8 @@ class DrawdownStatus:
 
 
 class DrawdownStateStore:
-    def __init__(self, path: str | Path = "state/drawdown_state.json") -> None:
-        self.path = Path(path)
+    def __init__(self, path: str | Path | None = None) -> None:
+        self.path = Path(path) if path is not None else state_path("drawdown_state.json")
 
     def _read(self) -> dict:
         if not self.path.exists():

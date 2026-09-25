@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from config.config import state_path
+
 import json
 import os
 from dataclasses import asdict, dataclass
@@ -20,8 +22,8 @@ class PersistedDailyRiskState:
 class DailyRiskStateStore:
     """Small fail-closed JSON store for the sticky daily risk baseline/state."""
 
-    def __init__(self, path: str | Path = "state/risk_state.json") -> None:
-        self.path = Path(path)
+    def __init__(self, path: str | Path | None = None) -> None:
+        self.path = Path(path) if path is not None else state_path("risk_state.json")
 
     @staticmethod
     def _key(account: str, trading_date: str) -> str:

@@ -193,7 +193,7 @@ def _candidate_error_severity(db, attempted, errors, excluded=0):
 
 
 def test_candidate_error_gate_needs_both_an_absolute_and_a_relative_threshold(tmp_path):
-    assert _candidate_error_severity(tmp_path / "a.db", 10, 1) == ["WARNING"]       # 1 error: never blocking
+    assert _candidate_error_severity(tmp_path / "a.db", 5, 1) == ["WARNING"]        # 1 error (20 %): never blocking
     assert _candidate_error_severity(tmp_path / "b.db", 10, 2) == ["BLOCKING"]      # 2 of 10 = 20 %
     assert _candidate_error_severity(tmp_path / "c.db", 30, 2) == ["WARNING"]       # 2 of 30 ≈ 6.7 %
 

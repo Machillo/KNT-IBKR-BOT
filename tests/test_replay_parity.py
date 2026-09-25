@@ -282,3 +282,31 @@ def test_journal_contract_listing_and_file_loader(tmp_path):
     (tmp_path / "NEW_intraday_1y.json").write_text(json.dumps(
         [{"time": "2026-01-05T10:00:00-05:00", "open": 1, "high": 1, "low": 1, "close": 1, "volume": 1}]), encoding="utf-8")
     assert list(load("files", "intraday_1y", str(tmp_path))) == ["NEW"]
+
+
+def test_replay_time_key_converts_utc_bars_to_exchange_time():
+    """Regression: bars fetched with complete_only carry UTC offsets; stripping without
+    converting made a 14:30Z bar look like 14:30 ET (= 18:30Z), so journal-universe snapshots
+    taken up to 4-5 h LATER decided membership (look-ahead)."""
+    from research.pipeline_backtest import _key
+
+    assert _key("2026-03-02T14:30:00+00:00") == datetime(2026, 3, 2, 9, 30)      # EST: -5 h
+    assert _key("2026-07-01T13:30:00+00:00") == datetime(2026, 7, 1, 9, 30)      # EDT: -4 h
+    assert _key("2026-03-02T09:30:00-05:00") == datetime(2026, 3, 2, 9, 30)      # already ET
+    assert _key("2026-03-02") == datetime(2026, 3, 2)                            # daily: unchanged
+
+
+def test_journal_universe_does_not_see_later_snapshots_through_utc_bars(tmp_path):
+    import sqlite3
+
+    from research.pipeline_backtest import _key
+    db = tmp_path / "j.db"
+    ShadowJournal(db)
+    with sqlite3.connect(db) as conn:
+        # Snapshot taken at 17:00Z = 12:00 ET.
+        conn.execute("INSERT INTO discovery_cycles (cycle_id, created_at) VALUES ('c1', '2026-03-02T17:00:00+00:00')")
+        conn.execute("INSERT INTO discovery_funnel (cycle_id, created_at, symbol, status) VALUES ('c1', '', 'AAA', 'ranked_eligible')")
+    u = JournalUniverse(db)
+    # A 14:30Z (09:30 ET) bar is BEFORE the snapshot: nobody is a member yet.
+    assert u.members_at(_key("2026-03-02T14:30:00+00:00")) == frozenset()
+    assert u.members_at(_key("2026-03-02T17:30:00+00:00")) == {"AAA"}

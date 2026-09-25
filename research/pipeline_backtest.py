@@ -33,6 +33,7 @@ from dataclasses import dataclass, field, replace
 from datetime import date, datetime
 from decimal import ROUND_HALF_UP, Decimal
 from math import floor
+from zoneinfo import ZoneInfo
 
 from backtest.costs import BASELINE, CostModel
 from backtest.metrics import as_datetime, cagr, daily_equity, period_returns, sharpe, sortino
@@ -46,6 +47,8 @@ from portfolio.brain import PortfolioBrain, PortfolioSnapshot
 from portfolio.state import PendingOrderExposure, PortfolioState, PositionExposure
 from risk.risk_manager import RiskManager
 from strategies.momentum import SignalSide
+
+_EXCHANGE_TZ = ZoneInfo("America/New_York")
 
 CONTEXT_BARS = 450
 PIPELINE_VERSION = 3  # v3: quant-review fixes (aligned correlations, strict limit fills, score priority)
@@ -162,11 +165,15 @@ def _returns(bars: list[PriceBar], lookback: int = 60) -> tuple[float, ...]:
 
 
 def _key(value) -> datetime:
-    """Exchange wall-clock time without tzinfo, so calendar protocol boundaries compare
-    uniformly across profiles (cached intraday bars carry ET offsets; daily bars are dates)."""
+    """Exchange wall-clock time (America/New_York) without tzinfo, so calendar protocol
+    boundaries compare uniformly across profiles. Aware times are CONVERTED first: bars fetched
+    with ``complete_only`` carry UTC offsets, and stripping those without converting would
+    shift every bar 4-5 h into the future (point-in-time universe look-ahead)."""
     dt = as_datetime(value)
     if dt is None:
         raise ValueError(f"unparseable bar time: {value!r}")
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(_EXCHANGE_TZ)
     return dt.replace(tzinfo=None)
 
 

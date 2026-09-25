@@ -281,3 +281,11 @@ def test_committed_registration_lines_reads_git_history_including_deleted_lines(
     log.write_text("# log\n" + line("UNCOMMITTED") + "\n", encoding="utf-8")
     lines = REAL_COMMITTED_LINES(repo)
     assert set(lines) == {first, second}                            # deleted one still counts; uncommitted not
+
+
+def test_a_stored_binding_result_cannot_be_re_evaluated_away(tmp_path):
+    db = build(tmp_path / "v.db", selected_effect=0.8)
+    assert fwd_protocol.evaluate_fwd1(db)["decision"] == "KEEP"
+    with sqlite3.connect(db) as conn:                        # someone "fixes" the data afterwards
+        conn.execute("UPDATE shadow_outcomes SET fwd_5 = fwd_5 - 5 WHERE evaluated='SELECTED'")
+    assert fwd_protocol.evaluate_fwd1(db)["decision"] == "KEEP"

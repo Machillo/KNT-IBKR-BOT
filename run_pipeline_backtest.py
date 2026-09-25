@@ -24,8 +24,14 @@ COSTS = {"baseline": BASELINE, "stressed": STRESSED, "severe": SEVERE}
 
 
 def load(universe: str, profile: str, cache_dir: str) -> dict:
+    """Cached bars for a validation cohort, or every file of the profile when universe == 'files'
+    (e.g. reports/pit_cache built from the discovery journal)."""
     p = PROFILES[profile]
     data = {}
+    if universe == "files":
+        for path in sorted(Path(cache_dir).glob(f"*_{p.name}.json")):
+            data[path.name[: -len(f"_{p.name}.json")]] = _load_bars(path)
+        return data
     for symbol in universe_symbols(universe):
         path = _cache_path(Path(cache_dir), symbol, p)
         if path.exists():
@@ -72,7 +78,8 @@ def summarize(result, *, detail: bool = True) -> str:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--profile", choices=list(PROFILES), default="long_10y")
-    ap.add_argument("--universe", choices=[*VALIDATION_UNIVERSES, "all"], default="all")
+    ap.add_argument("--universe", choices=[*VALIDATION_UNIVERSES, "all", "files"], default="all",
+                    help="validation cohort, or 'files' = every cached file in --cache-dir")
     ap.add_argument("--segment", choices=["train", "validation", "development", "holdout"], default="train")
     ap.add_argument("--variant", choices=list(VARIANTS), default="live_default")
     ap.add_argument("--cost", choices=list(COSTS), default="baseline")
@@ -80,15 +87,28 @@ def main() -> None:
     ap.add_argument("--cache-dir", default="reports/history_cache")
     ap.add_argument("--confirm-holdout", action="store_true")
     ap.add_argument("--split", choices=["calendar", "fraction"], default="calendar")
+    ap.add_argument("--universe-source", choices=["cohort", "journal", "csv"], default="cohort",
+                    help="cohort = static cache cohort (survivorship-biased); journal = KNT shadow "
+                         "discovery journal; csv = external point-in-time membership file")
+    ap.add_argument("--universe-path", default="state/strategy_performance.db")
     a = ap.parse_args()
     if a.segment == "holdout" and not a.confirm_holdout:
         ap.error("HOLDOUT is single-use. Freeze the configuration in docs/experiments first, then pass --confirm-holdout.")
     data = load(a.universe, a.profile, a.cache_dir)
     config: PipelineConfig = VARIANTS[a.variant].variant(cost_model=COSTS[a.cost], initial_equity=a.equity)
-    bt = PipelineBacktest(data, config)
+    universe = None
+    if a.universe_source == "journal":
+        from research.universe_provider import JournalUniverse
+        universe = JournalUniverse(a.universe_path)
+    elif a.universe_source == "csv":
+        from research.universe_provider import PointInTimeCsvUniverse
+        universe = PointInTimeCsvUniverse(a.universe_path)
+    bt = PipelineBacktest(data, config, universe=universe)
     start, end = segment_bounds(bt, a.segment, a.split)
     print(f"PIPELINE | protocol={PROTOCOL if a.split == 'calendar' else 'fraction'} profile={a.profile} universe={a.universe} symbols={len(data)} segment={a.segment.upper()} "
           f"cost={a.cost} equity={a.equity:.0f} window=[{start or 'begin'} .. {end or 'end'})")
+    biased = universe is None or getattr(universe, "survivorship_biased", True)
+    print(f"UNIVERSE | source={a.universe_source} survivorship_biased={biased}")
     if a.segment == "holdout":
         print("*** HOLDOUT EVALUATION — record the result; do not tune against it. ***")
     print(summarize(bt.run(start, end)))

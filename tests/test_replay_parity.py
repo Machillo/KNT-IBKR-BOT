@@ -263,3 +263,22 @@ def test_working_orders_count_for_the_correlation_guard_and_fail_closed():
     from engine.decision import return_series
     same = pipeline.decide(bars, symbol="A", portfolio_state=state, position_returns={"B": return_series(bars)})
     assert same.action == "PORTFOLIO_REJECTED" and same.reason == "correlation_limit"
+
+
+def test_journal_contract_listing_and_file_loader(tmp_path):
+    import json
+    import sqlite3
+    from run_fetch_journal_bars import journal_contracts
+    from run_pipeline_backtest import load
+
+    db = tmp_path / "j.db"
+    ShadowJournal(db)
+    with sqlite3.connect(db) as conn:
+        for sym, cid, status in [("NEW", 7, "ranked_eligible"), ("NEW", 7, "ranked_eligible"),
+                                 ("WIDE", 8, "ranked_rejected"), ("ZERO", 0, "ranked_eligible")]:
+            conn.execute("INSERT INTO discovery_funnel (cycle_id, created_at, symbol, con_id, status) "
+                         "VALUES ('c', '', ?, ?, ?)", (sym, cid, status))
+    assert journal_contracts(str(db)) == [("NEW", 7)]
+    (tmp_path / "NEW_intraday_1y.json").write_text(json.dumps(
+        [{"time": "2026-01-05T10:00:00-05:00", "open": 1, "high": 1, "low": 1, "close": 1, "volume": 1}]), encoding="utf-8")
+    assert list(load("files", "intraday_1y", str(tmp_path))) == ["NEW"]

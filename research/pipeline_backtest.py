@@ -52,6 +52,9 @@ class PipelineConfig:
     daily_loss_pct: float = 0.10                    # MAX_DAILY_LOSS_PCT default
     pause_high_volatility: bool = True
     regime_filter: tuple[str, ...] | None = None    # None = trade in any regime the selector allows
+    symbol_trend_sma: int | None = None             # longs need close > SMA(n) of the symbol
+    market_filter: tuple[str, int] | None = None    # (symbol, n): longs need market close > SMA(n)
+    bracket_atr: tuple[float, float] | None = None  # recompute (stop, target) as ATR(14) multiples
     cost_model: CostModel = BASELINE
     initial_equity: float = 100_000.0
 
@@ -316,13 +319,18 @@ class PipelineBacktest:
                     tradable = chosen is not None and (cfg.allow_short or chosen.signal.side == SignalSide.LONG)
                     if tradable and cfg.regime_filter is not None and regime not in cfg.regime_filter:
                         tradable = False
+                    if tradable and not self._filters_allow(chosen.signal.side, history, t):
+                        tradable = False
                     if not tradable:
                         no_trade += 1
                     else:
                         sig = chosen.signal
+                        stop, target = float(sig.stop), float(sig.target)
+                        if cfg.bracket_atr is not None:
+                            stop, target = self._atr_bracket(sig.side, history, *cfg.bracket_atr)
                         stress = max(1.0, float(selection.regime.volatility_stress or 1.0))
                         pending[symbol] = _Pending(
-                            symbol, chosen.strategy, regime, sig.side, float(sig.stop), float(sig.target),
+                            symbol, chosen.strategy, regime, sig.side, stop, target,
                             chosen.adjusted_score, max(0.25, min(1.0, 1.0 / stress)), _returns(history),
                         )
 
@@ -338,9 +346,43 @@ class PipelineBacktest:
             curve.append((final_time, cash))
         return self._result(cash, trades, curve, decisions, no_trade, rejected, in_market_ticks, total_ticks)
 
-    def _bars_until(self, symbol: str, t: datetime) -> list[PriceBar]:
+    def _bars_until(self, symbol: str, t: datetime, lookback: int = 70) -> list[PriceBar]:
+        """Bars of ``symbol`` strictly before ``t`` (all completed when deciding at ``t``)."""
         lo = bisect_left(self.times[symbol], t)
-        return self.data[symbol][max(0, lo - 70):lo]
+        return self.data[symbol][max(0, lo - lookback):lo]
+
+    def _filters_allow(self, side: SignalSide, history: list[PriceBar], t: datetime) -> bool:
+        cfg = self.config
+        if cfg.symbol_trend_sma is not None:
+            n = cfg.symbol_trend_sma
+            if len(history) < n:
+                return False
+            sma = sum(b.close for b in history[-n:]) / n
+            above = history[-1].close > sma
+            if (side == SignalSide.LONG and not above) or (side == SignalSide.SHORT and above):
+                return False
+        if cfg.market_filter is not None:
+            market_symbol, n = cfg.market_filter
+            if market_symbol not in self.data:
+                return False  # fail closed: no market data, no trade
+            mkt = self._bars_until(market_symbol, t, lookback=n)
+            if len(mkt) < n:
+                return False
+            above = mkt[-1].close > sum(b.close for b in mkt) / n
+            if (side == SignalSide.LONG and not above) or (side == SignalSide.SHORT and above):
+                return False
+        return True
+
+    @staticmethod
+    def _atr_bracket(side: SignalSide, history: list[PriceBar], stop_mult: float,
+                     target_mult: float) -> tuple[float, float]:
+        sample = history[-15:]
+        trs = [max(c.high - c.low, abs(c.high - p.close), abs(c.low - p.close)) for p, c in zip(sample, sample[1:])]
+        a = sum(trs) / len(trs) if trs else 0.0
+        price = history[-1].close
+        if side == SignalSide.LONG:
+            return max(0.01, price - stop_mult * a), price + target_mult * a
+        return price + stop_mult * a, max(0.01, price - target_mult * a)
 
     def _result(self, equity, trades, curve, decisions, no_trade, rejected, in_market, total) -> PipelineResult:
         cfg = self.config

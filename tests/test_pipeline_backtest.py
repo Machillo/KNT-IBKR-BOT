@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+import pytest
 from random import Random
 
 from backtest.costs import CostModel
@@ -98,3 +99,30 @@ def test_time_split_orders_boundaries():
     timeline = [T0 + timedelta(hours=i) for i in range(100)]
     v, h = time_split(timeline)
     assert timeline[0] < v < h < timeline[-1]
+
+
+def test_market_filter_uses_only_earlier_bars_and_fails_closed_without_data():
+    data = {"A": walk(1), "SPY": walk(3)}
+    bt = pipeline(data, market_filter=("SPY", 50))
+    t = data["A"][120].time
+    seen = bt._bars_until("SPY", t, lookback=50)
+    assert seen and max(b.time for b in seen) < t
+    no_market = pipeline({"A": walk(1)}, market_filter=("SPY", 50)).run()
+    assert no_market.trades == 0
+
+
+def test_symbol_trend_filter_blocks_longs_below_sma():
+    falling = []
+    price = 200.0
+    for i in range(400):
+        falling.append(PriceBar(T0 + timedelta(hours=i), price, price * 1.002, price * 0.995, price * 0.998, 1e6))
+        price *= 0.998
+    assert pipeline({"A": falling}, symbol_trend_sma=200).run().trades == 0
+    assert pipeline({"A": falling}).run().trades > 0
+
+
+def test_atr_bracket_geometry():
+    bars = walk(1, 50)
+    stop, target = PipelineBacktest._atr_bracket(SignalSide.LONG, bars, 2.0, 6.0)
+    price = bars[-1].close
+    assert stop < price < target and (target - price) == pytest.approx(3 * (price - stop))

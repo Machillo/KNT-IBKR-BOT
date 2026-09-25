@@ -32,4 +32,8 @@ VARIANTS: dict[str, PipelineConfig] = {
     "h5_with_shorts": LIVE.variant(name="h5_with_shorts", allow_short=True),
     # H6: no volatility down-sizing.
     "h6_no_vol_mult": LIVE.variant(name="h6_no_vol_mult", use_volatility_multiplier=False),
+    # Round 2 (pre-registered in docs/experiments/LOG.md). SMA lengths are in BARS of the profile.
+    "h7_symbol_trend": LIVE.variant(name="h7_symbol_trend", symbol_trend_sma=200),
+    "h8_market_trend": LIVE.variant(name="h8_market_trend", market_filter=("SPY", 200)),
+    "h9_wide_bracket": LIVE.variant(name="h9_wide_bracket", bracket_atr=(2.0, 6.0)),
 }

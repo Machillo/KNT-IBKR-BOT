@@ -87,6 +87,8 @@ def main() -> None:
     ap.add_argument("--equity", type=float, default=100_000.0)
     ap.add_argument("--cache-dir", default=None, help="default: <repo>/reports/history_cache")
     ap.add_argument("--confirm-holdout", action="store_true")
+    ap.add_argument("--confirm-forward", action="store_true",
+                    help="forward replays consume FWD evidence: only a variant registered in docs/experiments")
     ap.add_argument("--split", choices=["calendar", "fraction"], default="calendar")
     ap.add_argument("--universe-source", choices=["cohort", "journal", "csv"], default="cohort",
                     help="cohort = static cache cohort (survivorship-biased); journal = KNT shadow "
@@ -101,6 +103,9 @@ def main() -> None:
     if a.split == "fraction" and not a.confirm_holdout:
         ap.error("--split fraction mixes holdout-calendar data into every segment; it counts as a holdout use "
                  "(pass --confirm-holdout only for a frozen candidate).")
+    if a.segment == "forward" and not a.confirm_forward:
+        ap.error("FORWARD data is the evidence of FWD1-FWD3. Comparing variants on it is selection; run only a "
+                 "variant registered in docs/experiments/LOG.md, then pass --confirm-forward.")
     if a.segment == "holdout" and not a.confirm_holdout:
         ap.error("HOLDOUT is single-use. Freeze the configuration in docs/experiments first, then pass --confirm-holdout.")
     from config.config import reports_path

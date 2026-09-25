@@ -13,8 +13,10 @@ START = datetime(2026, 10, 1, 14, 0, tzinfo=timezone.utc)
 
 
 def build(path, *, days=45, cycles_per_day=2, selected_effect=0.0, cf_effect=0.0, noise=0.05, seed=1,
-          leak=False, late_effect=None):
+          leak=False, late_effect=None, register=True, unscored_day=None, start=START):
     rng = Random(seed)
+    if register:
+        fwd_protocol.register_window(path, start=datetime.now(timezone.utc) - timedelta(minutes=1))
     j = ShadowJournal(path)
     ShadowScorer(path)
     outcomes = []
@@ -23,7 +25,7 @@ def build(path, *, days=45, cycles_per_day=2, selected_effect=0.0, cf_effect=0.0
            "sector": "Tech", "bar_count": 140}
     for day in range(days):
         for c in range(cycles_per_day):
-            bar = START + timedelta(days=day, hours=c)
+            bar = start + timedelta(days=day, hours=c)
             cycle = f"c{day}-{c}"
             j.record_cycle(cycle, universe=None, scanners=[], rows_per_scanner=25, quote_budget=40,
                            market_data_type=1, session="REGULAR", market_open=True)
@@ -43,7 +45,8 @@ def build(path, *, days=45, cycles_per_day=2, selected_effect=0.0, cf_effect=0.0
                     context=ctx, created_at=created)
                 effect = selected_effect if late_effect is None or day < 40 else late_effect
                 fwd5 = base + (effect if selected else cf_effect) + rng.gauss(0, noise)
-                outcomes.append((did, SCORER_VERSION, "SELECTED" if selected else "COUNTERFACTUAL", fwd5))
+                if unscored_day is None or day != unscored_day:
+                    outcomes.append((did, SCORER_VERSION, "SELECTED" if selected else "COUNTERFACTUAL", fwd5))
             j.record_cycle_end(cycle, eligible=8, attempted=8, errors=0, max_candidates=12,
                                run_mode="shadow_only", learning_mode="frozen", scanner_rows={}, scanner_errors={},
                                config_hash="cfg-test")
@@ -94,3 +97,33 @@ def test_student_t_critical_values():
     assert abs(fwd_protocol.t_quantile(0.975, 10) - 2.228) < 1e-3
     assert abs(fwd_protocol.critical_t(10_000) - 2.394) < 1e-2        # Bonferroni K=3 -> normal limit
     assert fwd_protocol.critical_t(40) > 2.45                          # small samples need more
+
+
+
+def test_unregistered_window_is_never_evaluated(tmp_path):
+    out = fwd_protocol.evaluate_fwd1(build(tmp_path / "h.db", selected_effect=0.8, register=False))
+    assert out["decision"] == "INCONCLUSIVE" and "not registered" in out["reason"]
+    fwd_protocol.register_window(tmp_path / "x.db")
+    import pytest
+    with pytest.raises(FileExistsError):
+        fwd_protocol.register_window(tmp_path / "x.db")            # registered once, never moved
+
+
+def test_cutoff_is_counted_from_decisions_and_waits_for_scoring(tmp_path):
+    # Day 10 rows are not scored yet: the cutoff (day 40) is the same as with full scoring,
+    # but the result is monitoring-only until those rows are scored.
+    out = fwd_protocol.evaluate_fwd1(build(tmp_path / "i.db", selected_effect=0.8, unscored_day=10))
+    assert out["window"]["minimums_reached"] is True and out["window"]["binding"] is False
+    assert out["reason"] == "monitoring only: scoring incomplete up to the cutoff"
+    full = fwd_protocol.evaluate_fwd1(build(tmp_path / "j.db", selected_effect=0.8))
+    assert out["window"]["cutoff_day"] == full["window"]["cutoff_day"]
+
+
+
+def test_cutoff_never_lands_after_the_deadline(tmp_path):
+    # Minimums would only be reached around 2027-04-18, after the 2027-03-31 deadline.
+    late_start = datetime(2027, 3, 10, 14, 0, tzinfo=timezone.utc)
+    out = fwd_protocol.evaluate_fwd1(build(tmp_path / "k.db", selected_effect=0.8, start=late_start))
+    assert out["window"]["minimums_reached"] is False
+    assert out["window"]["cutoff_day"] <= fwd_protocol.EVIDENCE_DEADLINE.isoformat()
+    assert out["decision"] == "INCONCLUSIVE"

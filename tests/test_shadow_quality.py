@@ -130,10 +130,14 @@ def test_legacy_v1_rows_are_excluded_not_mixed(tmp_path):
 def test_code_or_config_change_inside_the_window_invalidates_it(tmp_path, monkeypatch):
     db = tmp_path / "j.db"
     _decision(db)
-    monkeypatch.setattr("research.shadow_journal.code_version", lambda: "other-sha")
+    monkeypatch.setattr("research.shadow_journal.code_version", lambda: "docs-only-commit")
     _decision(db)
     gates, session = _verdict(db)
-    assert "code_version_changed" in gates and session["verdict"] == "INVALID_FOR_RESEARCH"
+    assert session["verdict"] == "VALID_FOR_RESEARCH", session           # a new HEAD alone is not a change
+    monkeypatch.setattr("research.shadow_journal.decision_fingerprint", lambda: "other-decision-code")
+    _decision(db)
+    gates, session = _verdict(db)
+    assert "decision_code_changed" in gates and session["verdict"] == "INVALID_FOR_RESEARCH"
     db2 = tmp_path / "j2.db"
     _decision(db2)
     c = _decision(db2)

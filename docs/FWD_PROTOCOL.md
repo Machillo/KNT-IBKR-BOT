@@ -19,22 +19,32 @@ multiple-testing correction cannot tell skill from luck or from market drift.
 - FORWARD: from 2026-09-25. Only data recorded after registration.
 
 ## Evidence window and binding moment
-- **Start:** the first market-open `shadow_only` cycle journaled with `DECISION_VERSION =
-  selector_v1+decision_pipeline_v2`, scorer v3 and gates g1. That means after this code is
-  merged and shadow-only is restarted from a clean checkout.
-- **Binding cutoff:** the FIRST trading day on which every sample minimum of the test holds,
-  or **2027-03-31**, whichever comes first.
+- **Start:** REGISTERED once with `python run_shadow_report.py --register-fwd-window`, after
+  this code is merged and shadow-only is restarted from a clean checkout.
+  - The registration file (`<journal>.fwd_window.json`) pins three things: the start time, the
+    **decision-code fingerprint** (a content hash of every file on the decision path) and the
+    decision-config hash. It cannot be moved or overwritten.
+  - Commits that do not touch the decision path (docs, scorer, reports) do not change the
+    fingerprint. Any change to the decision path does, and invalidates the window.
+  - Rows before the registered start never count.
+- **Binding cutoff:** the FIRST trading day, never after **2027-03-31**, on which every sample
+  minimum of the test holds, or the deadline.
+  - The minimums are counted from the **decisions** themselves, after the per-cycle quality
+    exclusions. They never depend on how far the scorer has got.
+  - The result becomes binding only once every row up to the cutoff has been scored.
   - Rows after the cutoff are never used. This rules out optional stopping: the evaluator
     finds the cutoff from the ordered data, whenever it is run.
   - Before the cutoff the output is `INCONCLUSIVE — monitoring only`, which is never a
     decision.
   - At the deadline without the minimum, the result is INCONCLUSIVE. Extending the window
     requires a new registration.
-- **Validity:** the quality verdict (`research/shadow_quality.py`) is computed on exactly the
-  cycles that produced the population. It must be `VALID_FOR_RESEARCH`:
+- **Validity:** the quality verdict (`research/shadow_quality.py`) is computed on every cycle
+  from the registered start to the cutoff, excluded cycles included. It must be
+  `VALID_FOR_RESEARCH`:
   - no zero-tolerance gate in a market-open cycle;
   - ≤ 5 % of market-open cycles with a BLOCKING gate;
-  - **one code version, a clean tree, one decision-config hash** across the window.
+  - **one decision-code fingerprint, equal to the registered one, and one decision-config
+    hash** across the window.
   Otherwise the result is INCONCLUSIVE.
 
 ## Population (FWD1, FWD2)
@@ -123,6 +133,9 @@ size its window.
      checks, which have no forward equivalent;
   4. it survives the destruction tests: cost × 3; entry delayed 1 trading day; formation
      window × 0.5 and × 1.5; removing the best 5 % of events; removing the best symbol.
+     Round 3 varied the HOLDING horizon. Monthly momentum has a fixed 1-month holding
+     period, so the formation window is varied instead. This is a stated CHANGE, not a
+     silent adaptation.
 - **Otherwise:**
   - REJECT when the upper 97.5 % bound of the mean net is below 0;
   - INCONCLUSIVE when fewer than 12 rebalances exist, or in any other case.
@@ -130,10 +143,20 @@ size its window.
   Its deadline is **2027-12-31**. The FWD3 evaluator must be written, reviewed and frozen
   before the 12th rebalance exists.
 
+## Forward replays
+`run_pipeline_backtest.py --segment forward` requires `--confirm-forward`. Comparing variants
+on forward data is selection that uses up the FWD evidence. Only a variant registered in
+`docs/experiments/LOG.md` may be run there.
+
+## Scoring source
+Forward rows are scored from `reports/pit_cache` (the default of `run_score_shadow.py`) or
+from IBKR. Only the IBKR provider may expire an unalignable row to NOT_EVALUABLE; a cache that
+lacks the bars leaves the row pending.
+
 ## Invalidation (the count restarts under a NEW registration)
 Any of the following invalidates the window:
 - a change inside the window of:
-  - the code version (or a dirty tree);
+  - the decision-code fingerprint (any decision-path file, modified or untracked);
   - the decision-config hash (risk, runtime and market-data settings);
   - `DECISION_VERSION`, the scorer version or the gates version;
 - learning not frozen, or a non-zero selector bonus;

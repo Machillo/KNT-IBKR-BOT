@@ -31,12 +31,18 @@ def main() -> None:
     ap.add_argument("--run-mode", default="shadow_only", help="'any' for every run mode")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--persist", action="store_true", help="store gate results in research_quality")
+    ap.add_argument("--register-fwd-window", action="store_true",
+                    help="pin the FWD-v1 evidence window start (once; refuses to overwrite)")
     ap.add_argument("--fwd", action="store_true",
                     help="also run the pre-registered FWD1/FWD2 evaluator (binding only at the registered moment)")
     a = ap.parse_args()
     db = a.db or state_path("shadow_only", "strategy_performance.db")
     run_mode = None if a.run_mode == "any" else a.run_mode
     since, until = _parse(a.since), _parse(a.until)
+    if a.register_fwd_window:
+        from research.fwd_protocol import register_window
+        record = register_window(db)
+        print(f"FWD WINDOW registered | start={record['start_utc']} fingerprint={record['decision_fingerprint']}")
     summary = summarize(db, since=since, until=until, run_mode=run_mode)
     print(render(summary))
     if a.json:

@@ -48,10 +48,36 @@ _CYCLE_EXTRA_COLUMNS = (
     ("candidate_errors", "INTEGER"), ("max_candidates", "INTEGER"), ("run_mode", "TEXT"),
     ("learning_mode", "TEXT"), ("code_version", "TEXT"), ("decision_version", "TEXT"),
     ("scanner_rows", "TEXT"), ("scanner_errors", "TEXT"), ("config_hash", "TEXT"),
+    ("decision_fingerprint", "TEXT"),
 )
 # v2: frozen-learning shadow-only, pretrade execution model (SHADOW_SUBMIT/SHADOW_BLOCKED),
 # duplicates keyed by conId + run mode, conflicting re-decisions flagged.
 DECISION_VERSION = "selector_v1+decision_pipeline_v2"
+
+
+DECISION_PATH = ("engine", "execution", "market", "portfolio", "risk", "strategies", "core",
+                 "config/config.py", "research/shadow_journal.py", "run_shadow_only.py")
+
+
+@lru_cache(maxsize=1)
+def decision_fingerprint() -> str:
+    """Content hash of every file on the decision path, read from disk (tracked, modified or
+    untracked alike). Commits that do not touch the decision path (docs, scorer, reports) do
+    not change it; any change to what decides does. The FWD window requires one value."""
+    import hashlib
+
+    root = Path(__file__).resolve().parents[1]
+    digest = hashlib.sha256()
+    files: list[Path] = []
+    for entry in DECISION_PATH:
+        path = root / entry
+        files += sorted(path.rglob("*.py")) if path.is_dir() else ([path] if path.exists() else [])
+    for path in sorted(set(files)):
+        if "__pycache__" in path.parts:
+            continue
+        digest.update(str(path.relative_to(root)).replace("\\", "/").encode("utf-8"))
+        digest.update(path.read_bytes().replace(b"\r\n", b"\n"))
+    return digest.hexdigest()[:16]
 
 
 @lru_cache(maxsize=1)
@@ -213,12 +239,13 @@ class ShadowJournal:
             conn.execute(
                 """UPDATE discovery_cycles SET cycle_end=?, eligible_count=?, candidates_attempted=?,
                    candidate_errors=?, max_candidates=?, run_mode=?, learning_mode=?, code_version=?,
-                   decision_version=?, scanner_rows=?, scanner_errors=?, config_hash=? WHERE cycle_id=?""",
+                   decision_version=?, scanner_rows=?, scanner_errors=?, config_hash=?, decision_fingerprint=?
+                   WHERE cycle_id=?""",
                 (datetime.now(timezone.utc).isoformat(), int(eligible), int(attempted), int(errors),
                  int(max_candidates), run_mode, learning_mode, code_version(), DECISION_VERSION,
                  None if scanner_rows is None else json.dumps(scanner_rows, sort_keys=True),
                  None if scanner_errors is None else json.dumps(scanner_errors, sort_keys=True), config_hash,
-                 cycle_id),
+                 decision_fingerprint(), cycle_id),
             )
 
     def would_be_entries_on(self, utc_date: str, run_mode: str) -> list[dict]:

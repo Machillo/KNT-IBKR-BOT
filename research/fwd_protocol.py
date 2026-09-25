@@ -3,10 +3,13 @@
 The rules below are FIXED; changing any constant is a new pre-registration (new id, new
 evidence window), never an edit of this one.
 
-Window: from the first market-open shadow_only cycle journaled with DECISION_VERSION v2 up to
-the BINDING CUTOFF = the first trading day on which every sample minimum holds, or
-EVIDENCE_DEADLINE, whichever comes first. Data after the cutoff is never used (no optional
-stopping); before the cutoff the output is "monitoring only", never a decision.
+Window: starts at the REGISTERED start (``register_window``: a file next to the journal,
+written once, recording the start time, the decision-code fingerprint and the config hash).
+BINDING CUTOFF = the first trading day (never after EVIDENCE_DEADLINE) on which every sample
+minimum holds, counted from the DECISIONS (not from how far scoring has got), after the
+per-cycle quality exclusions; or the deadline. Data after the cutoff is never used. The
+result is binding only once every row up to the cutoff has been scored; before that the output
+is "monitoring only", never a decision.
 
 Population: canonical decisions of that window (v2, shadow_only, learning frozen) with a
 scorer-v3 5-bar forward return (FINAL or PENDING_DATA), market open at the cycle, cycle free of
@@ -20,8 +23,9 @@ day, never below the i.i.d. one; critical values from Student t with days − 1 
 """
 from __future__ import annotations
 
+import json
 import sqlite3
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from math import exp, lgamma, log, sqrt
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -111,8 +115,9 @@ def _population(path: Path, run_mode: str = "shadow_only"):
     conn.row_factory = sqlite3.Row
     with conn:
         rows = conn.execute(
-            """SELECT d.id, d.cycle_id, d.symbol, d.created_at, d.bar_time, d.action, d.strategy, d.top_side,
-                      o.status, o.evaluated, o.side, o.fwd_5, c.market_open, c.created_at AS cycle_created
+            """SELECT d.id, d.cycle_id, d.symbol, d.created_at, d.bar_time, d.action, d.strategy, d.side AS d_side,
+                      d.top_side, o.status, o.evaluated, o.side, o.fwd_5, c.market_open,
+                      c.created_at AS cycle_created, c.decision_fingerprint, c.config_hash
                FROM shadow_decisions d
                JOIN discovery_cycles c ON c.cycle_id = d.cycle_id
                LEFT JOIN shadow_outcomes o ON o.decision_id = d.id AND o.scorer_version = ?
@@ -180,35 +185,91 @@ def _sd(series: list[float]) -> float | None:
     return sqrt(sum((x - m) ** 2 for x in series) / (len(series) - 1))
 
 
-def _window(path: Path, run_mode: str, minimums) -> tuple[list, dict]:
-    """Rows up to the binding cutoff; the cutoff itself; quality verdict of that window."""
-    rows = _population(path, run_mode)
+def window_file(path: Path) -> Path:
+    path = Path(path)
+    return path.with_name(path.stem + ".fwd_window.json")
+
+
+def register_window(path: str | Path, *, start: datetime | None = None) -> dict:
+    """Pin the evidence window ONCE (refuses to overwrite). Records the start, the decision-code
+    fingerprint and the decision-config hash that every cycle of the window must carry."""
+    from research.shadow_journal import decision_fingerprint
+
+    target = window_file(Path(path))
+    if target.exists():
+        raise FileExistsError(f"FWD window already registered: {target}")
+    record = {"protocol": PROTOCOL_ID, "start_utc": (start or datetime.now(timezone.utc)).isoformat(),
+              "decision_fingerprint": decision_fingerprint(), "registered_at_utc": datetime.now(timezone.utc).isoformat()}
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(record, indent=2), encoding="utf-8")
+    return record
+
+
+def _registration(path: Path) -> dict | None:
+    target = window_file(path)
+    if not target.exists():
+        return None
+    return json.loads(target.read_text(encoding="utf-8"))
+
+
+def _decision_minimums(rows, test: str) -> bool:
+    """Sample minimums counted from the decision table (independent of scoring progress)."""
+    by_cycle: dict[str, int] = {}
+    for r in rows:
+        by_cycle[r["cycle_id"]] = by_cycle.get(r["cycle_id"], 0) + 1
+    usable = [r for r in rows if by_cycle[r["cycle_id"]] >= MIN_CYCLE_ROWS]
+    selected = [r for r in usable if r["strategy"] is not None and r["d_side"] == "LONG"]
+    if test == "FWD1":
+        return (len(selected) >= MIN_EVENTS and len({_day(r) for r in selected}) >= MIN_DAYS
+                and len({r["symbol"] for r in selected}) >= MIN_SYMBOLS)
+    counterfactual = [r for r in usable if r["strategy"] is None and r["top_side"] == "LONG"]
+    paired = {_day(r) for r in selected} & {_day(r) for r in counterfactual}
+    return len(selected) >= MIN_EVENTS and len(counterfactual) >= MIN_EVENTS and len(paired) >= MIN_PAIRED_DAYS
+
+
+def _window(path: Path, run_mode: str, test: str) -> tuple[list, dict]:
+    """Rows up to the binding cutoff, with the cutoff, the binding flag and the window verdict."""
+    registration = _registration(path)
+    if registration is None:
+        return [], {"binding": False, "reason": "window not registered (run_shadow_report.py --register-fwd-window)"}
+    start = _utc(registration["start_utc"])
+    deadline_end = datetime.combine(EVIDENCE_DEADLINE + timedelta(days=1), datetime.min.time(), tzinfo=_ET)
+    rows = [r for r in _population(path, run_mode)
+            if _utc(r["cycle_created"]) is not None and start <= _utc(r["cycle_created"]) < deadline_end]
     if not rows:
-        return [], {"window_start": None, "cutoff_day": None, "binding": False, "reason": "no data"}
-    days = sorted({_day(r) for r in rows})
-    cutoff_day, binding = None, False
-    for day in days:
-        subset = [r for r in rows if _day(r) <= day]
-        if minimums(subset):
-            cutoff_day, binding = day, True
-            break
-    if cutoff_day is None:
-        today = datetime.now(_ET).date()
-        if today > EVIDENCE_DEADLINE:
-            cutoff_day, binding = EVIDENCE_DEADLINE.isoformat(), True
-        else:
-            cutoff_day = days[-1]
-    rows = [r for r in rows if _day(r) <= cutoff_day]
-    # Quality window = exactly the cycles that produced this population (by cycle time).
-    cycle_times = [_utc(r["cycle_created"]) for r in rows if _utc(r["cycle_created"]) is not None]
-    start = min(cycle_times)
-    until = max(cycle_times) + timedelta(microseconds=1)
-    _, session = shadow_quality.evaluate(path, since=start, until=until, run_mode=run_mode)
-    excluded = set(session["excluded_cycles"])
+        return [], {"window_start": start.isoformat(), "binding": False, "reason": "no data in the window"}
+    # Per-cycle exclusions FIRST (they depend only on each cycle), then the minimums.
+    _, full = shadow_quality.evaluate(path, since=start, until=deadline_end, run_mode=run_mode)
+    excluded = set(full["excluded_cycles"])
     rows = [r for r in rows if r["cycle_id"] not in excluded]
-    return rows, {"window_start": start.isoformat(), "cutoff_day": cutoff_day, "binding": binding,
-                  "quality": session["verdict"], "quality_reasons": session["reasons"],
-                  "code_versions": session.get("code_versions"), "config_hashes": session.get("config_hashes")}
+    days = sorted({_day(r) for r in rows if _day(r) <= EVIDENCE_DEADLINE.isoformat()})
+    cutoff_day, reached = None, False
+    for day in days:
+        if _decision_minimums([r for r in rows if _day(r) <= day], test):
+            cutoff_day, reached = day, True
+            break
+    deadline_passed = datetime.now(_ET).date() > EVIDENCE_DEADLINE
+    if cutoff_day is None:
+        cutoff_day = EVIDENCE_DEADLINE.isoformat() if deadline_passed else (days[-1] if days else None)
+    rows = [r for r in rows if cutoff_day is not None and _day(r) <= cutoff_day]
+    unscored = sum(1 for r in rows if r["status"] is None or (r["status"] == "PENDING_DATA" and r["fwd_5"] is None))
+    binding = (reached or deadline_passed) and unscored == 0
+    window = {"window_start": start.isoformat(), "cutoff_day": cutoff_day, "minimums_reached": reached,
+              "deadline_passed": deadline_passed, "unscored_rows_to_cutoff": unscored, "binding": binding,
+              "registered_fingerprint": registration.get("decision_fingerprint")}
+    if rows:
+        # Verdict over EVERY cycle from the registered start to the last cycle of the cutoff day
+        # (excluded cycles included: a zero-tolerance event anywhere invalidates the window).
+        cycle_times = [_utc(r["cycle_created"]) for r in rows]
+        _, session = shadow_quality.evaluate(path, since=start,
+                                             until=max(cycle_times) + timedelta(microseconds=1), run_mode=run_mode)
+        fingerprints = {r["decision_fingerprint"] for r in rows}
+        reasons = list(session["reasons"])
+        if fingerprints != {registration.get("decision_fingerprint")}:
+            reasons.append("decision code differs from the registered fingerprint")
+        window.update(quality="VALID_FOR_RESEARCH" if not reasons else "INVALID_FOR_RESEARCH",
+                      quality_reasons=reasons, config_hashes=session.get("config_hashes"))
+    return rows, window
 
 
 def _missing_share(rows) -> float | None:
@@ -218,39 +279,31 @@ def _missing_share(rows) -> float | None:
     return missing / len(rows)
 
 
-def _fwd1_minimums(rows) -> bool:
-    events = _excess_events(rows, "SELECTED")
-    return (len(events) >= MIN_EVENTS and len({d for d, _, _ in events}) >= MIN_DAYS
-            and len({s for _, s, _ in events}) >= MIN_SYMBOLS)
-
-
-def _fwd2_minimums(rows) -> bool:
-    sel, cf = _excess_events(rows, "SELECTED"), _excess_events(rows, "COUNTERFACTUAL")
-    paired = set(_daily(sel)) & set(_daily(cf))
-    return len(sel) >= MIN_EVENTS and len(cf) >= MIN_EVENTS and len(paired) >= MIN_PAIRED_DAYS
-
-
 def _gate(window: dict, missing: float | None, enough: bool) -> str | None:
+    if window.get("reason"):
+        return window["reason"]
+    if not window.get("binding"):
+        if window.get("unscored_rows_to_cutoff"):
+            return "monitoring only: scoring incomplete up to the cutoff"
+        return "monitoring only: minimum sample not reached and deadline not passed"
     if window.get("quality") != "VALID_FOR_RESEARCH":
         return f"evidence window invalid: {window.get('quality_reasons')}"
     if missing is not None and missing > MAX_MISSING_SHARE:
         return f"missing forward returns {missing:.1%} > {MAX_MISSING_SHARE:.0%}"
-    if not window.get("binding"):
-        return "monitoring only: minimum sample not reached and deadline not passed"
     if not enough:
         return "deadline reached without the minimum sample"
     return None
 
 
 def evaluate_fwd1(path: str | Path, run_mode: str = "shadow_only") -> dict:
-    rows, window = _window(Path(path), run_mode, _fwd1_minimums)
+    rows, window = _window(Path(path), run_mode, "FWD1")
     events = _excess_events(rows, "SELECTED")
     daily = _daily(events)
     gross = _stats(list(daily.values()))
     net = _stats([x - ROUND_TRIP_COST_PCT for x in daily.values()])
     sample = {"events": len(events), "days": len(daily), "symbols": len({s for _, s, _ in events})}
     missing = _missing_share(rows)
-    decision, reason = "INCONCLUSIVE", _gate(window, missing, _fwd1_minimums(rows))
+    decision, reason = "INCONCLUSIVE", _gate(window, missing, _decision_minimums(rows, "FWD1"))
     if reason is None and gross["se_pct"] is not None and net["t"] is not None:
         crit = critical_t(len(daily))
         upper = gross["mean_pct"] + t_quantile(0.975, len(daily) - 1) * gross["se_pct"]
@@ -269,13 +322,13 @@ def evaluate_fwd1(path: str | Path, run_mode: str = "shadow_only") -> dict:
 
 
 def evaluate_fwd2(path: str | Path, run_mode: str = "shadow_only") -> dict:
-    rows, window = _window(Path(path), run_mode, _fwd2_minimums)
+    rows, window = _window(Path(path), run_mode, "FWD2")
     sel_events, cf_events = _excess_events(rows, "SELECTED"), _excess_events(rows, "COUNTERFACTUAL")
     sel, cf = _daily(sel_events), _daily(cf_events)
     paired = [sel[d] - cf[d] for d in sorted(set(sel) & set(cf))]
     diff = _stats(paired)
     missing = _missing_share(rows)
-    decision, reason = "INCONCLUSIVE", _gate(window, missing, _fwd2_minimums(rows))
+    decision, reason = "INCONCLUSIVE", _gate(window, missing, _decision_minimums(rows, "FWD2"))
     if reason is None and diff["se_pct"] is not None and diff["t"] is not None:
         crit = critical_t(len(paired))
         half_width = t_quantile(0.975, len(paired) - 1) * diff["se_pct"]

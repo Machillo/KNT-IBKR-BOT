@@ -287,7 +287,11 @@ class ShadowScorer:
             usable = align(row, list(bars or []))
             if usable is None:
                 created = _naive(row["created_at"])
-                expired = created is not None and now is not None and (now - created).days >= UNALIGNED_EXPIRY_DAYS
+                # Only a provider that can actually serve the bar (IBKR) may give up on a row;
+                # a local cache that lacks it (holdout cache, late fetch) leaves it pending.
+                authoritative = bool(getattr(provider, "authoritative", False))
+                expired = (authoritative and created is not None and now is not None
+                           and (now - created).days >= UNALIGNED_EXPIRY_DAYS)
                 outcome = ScoredOutcome(int(row["id"]), "NOT_EVALUABLE" if expired else "PENDING_DATA", None, None,
                                         None, False, "unaligned_series_expired" if expired else "unaligned_series",
                                         None, None, None, 0, {})

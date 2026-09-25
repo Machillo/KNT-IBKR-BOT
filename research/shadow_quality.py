@@ -38,7 +38,8 @@ MAX_DECISION_LAG = timedelta(minutes=80)
 INCOMPLETE_GRACE = timedelta(hours=1)        # a cycle younger than this may still be running
 ZERO_TOLERANCE = frozenset({"future_leakage", "nondeterministic_decision", "learning_drift",
                             "transmit_in_closed_session", "transmit_on_stale_bar"})
-SESSION_INVALIDATORS = frozenset({"code_version_changed", "dirty_code", "config_changed", "config_unknown"})
+SESSION_INVALIDATORS = frozenset({"decision_code_changed", "decision_code_unknown", "config_changed",
+                                  "config_unknown"})
 TRANSMIT_ACTIONS = ("SHADOW_SUBMIT", "PAPER_SUBMITTED")
 
 
@@ -198,11 +199,13 @@ def evaluate(path: str | Path, *, since: datetime | None = None, until: datetime
             add(GateResult("decision", did, "legacy_decision_version", "BLOCKING", str(d["decision_version"])))
 
     # Invalidation: the code and the decision configuration must be constant inside the window.
+    # Informational: git commits (docs/scorer commits change HEAD without changing decisions).
     versions = sorted({str(c["code_version"]) for c in cycles if c["code_version"]})
-    if len(versions) > 1:
-        add(GateResult("session", "window", "code_version_changed", "BLOCKING", ",".join(versions)))
-    if any(v.endswith("+dirty") for v in versions):
-        add(GateResult("session", "window", "dirty_code", "BLOCKING", "modified tracked files"))
+    fingerprints = sorted({str(c["decision_fingerprint"]) for c in cycles if c["cycle_end"] and c["decision_fingerprint"]})
+    if len(fingerprints) > 1:
+        add(GateResult("session", "window", "decision_code_changed", "BLOCKING", ",".join(fingerprints)))
+    if run_mode == "shadow_only" and any(c["cycle_end"] and not c["decision_fingerprint"] for c in cycles):
+        add(GateResult("session", "window", "decision_code_unknown", "BLOCKING", "cycles without a fingerprint"))
     configs = sorted({str(c["config_hash"]) for c in cycles if c["cycle_end"] and c["config_hash"]})
     if len(configs) > 1:
         add(GateResult("session", "window", "config_changed", "BLOCKING", ",".join(configs)))
@@ -238,7 +241,7 @@ def evaluate(path: str | Path, *, since: datetime | None = None, until: datetime
         "cycles": len(cycles), "market_open_cycles": len(open_cycles), "decisions": len(decisions),
         "cycles_with_blocking_gate": len(blocking_cycles), "open_cycles_with_blocking_gate": len(blocking_open),
         "blocking_open_cycle_share": share, "verdict": verdict, "reasons": reasons,
-        "code_versions": versions, "config_hashes": configs,
+        "code_versions": versions, "decision_fingerprints": fingerprints, "config_hashes": configs,
         "excluded_cycles": sorted(blocking_cycles),
     }
     return results, session

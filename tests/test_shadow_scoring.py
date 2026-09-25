@@ -224,6 +224,11 @@ def test_unalignable_rows_expire_instead_of_staying_pending_forever(tmp_path):
     journal_with_decisions(db)
     scorer = ShadowScorer(db, costs=ZERO)
     late = InMemoryBarsProvider({s: bars(FLAT20, start=500) for s in ("AAA", "BBB", "CCC")})
+    # A local cache that lacks the bars never gives up on a row...
+    counts = asyncio.run(scorer.score_pending(late, now=DECIDED + timedelta(days=15)))
+    assert counts["PENDING_DATA"] == 3 and counts["NOT_EVALUABLE"] == 0
+    # ...only an authoritative provider (IBKR) may expire it.
+    late.authoritative = True
     counts = asyncio.run(scorer.score_pending(late, now=DECIDED + timedelta(days=15)))
     assert counts["NOT_EVALUABLE"] == 3
 

@@ -22,6 +22,7 @@ class IBKRHistoryBarsProvider:
     """
 
     name = "IBKR"
+    authoritative = True
 
     def __init__(self, ib, min_interval_seconds: float = 10.5) -> None:
         from market.history import HistoricalDataService
@@ -84,7 +85,12 @@ async def main_async(args) -> None:
         finally:
             await connection.disconnect()
     else:
-        counts = await scorer.score_pending(CacheBarsProvider(args.cache_dir), limit=args.limit)
+        from config.config import reports_path
+
+        # Forward rows live in the journal-bar cache (run_fetch_journal_bars.py); the old
+        # history cache is the closed v1 holdout and never contains forward bars.
+        cache_dir = args.cache_dir or (reports_path("pit_cache") if args.source == "pit" else None)
+        counts = await scorer.score_pending(CacheBarsProvider(cache_dir), limit=args.limit)
     print(f"SHADOW SCORING | scored={counts}")
     print(json.dumps(scorer.report(), indent=2, default=str))
 
@@ -92,8 +98,10 @@ async def main_async(args) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--db", default=None, help="default: the shadow-only journal <repo>/state/shadow_only/strategy_performance.db")
-    ap.add_argument("--source", choices=["cache", "ibkr"], default="cache")
-    ap.add_argument("--cache-dir", default=None, help="default: <repo>/reports/history_cache")
+    ap.add_argument("--source", choices=["pit", "cache", "ibkr"], default="pit",
+                    help="pit = reports/pit_cache (journal bars, default); cache = reports/history_cache; "
+                         "ibkr = read-only history (the only source allowed to expire unalignable rows)")
+    ap.add_argument("--cache-dir", default=None, help="override the cache directory")
     ap.add_argument("--limit", type=int, default=None)
     asyncio.run(main_async(ap.parse_args()))
 

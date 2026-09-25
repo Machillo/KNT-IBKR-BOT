@@ -12,22 +12,29 @@ from __future__ import annotations
 import argparse
 import asyncio
 from dataclasses import replace
+from pathlib import Path
 
 from config.config import STATE_DIR, BotConfig, config, read_only_ibkr_settings
 
 
-def research_locked(supervisor, equity: float | None) -> str | None:
+def research_locked(supervisor, equity: float | None, real_state_dir: Path | None = None) -> str | None:
     """Reason the research decisions must be treated as locked, or None.
 
-    Computed INDEPENDENTLY from each real source instead of from ``RiskManager.lock_reason``:
+    Computed INDEPENDENTLY from each source instead of from ``RiskManager.lock_reason``:
     in this read-only process the paper-verification lock (expected: a readonly session is
     never verified as paper) is applied first and would mask any later lock's reason.
-    Sources: persisted sticky daily kill, daily-loss limit, multi-day drawdown lock, and an
-    unavailable/invalid equity reading (fail closed).
+    Sources: this process's sticky daily kill / daily-loss limit / multi-day drawdown lock
+    (state/shadow_only), the TRADING BOT's persisted sticky kill and drawdown lock in
+    ``real_state_dir`` (read-only, never written), and an unavailable equity reading.
+    Anything unreadable fails closed.
     """
     context = supervisor.context
     if context is None or equity is None or equity <= 0:
         return "equity_unavailable"
+    if real_state_dir is not None:
+        reason = _real_bot_lock(Path(real_state_dir), context.account, context.trading_date)
+        if reason:
+            return reason
     if getattr(supervisor, "_kill_persisted", False):
         return "sticky_daily_kill"
     daily = context.risk.daily_state(starting_equity=context.starting_equity, current_equity=equity)
@@ -44,12 +51,33 @@ def research_locked(supervisor, equity: float | None) -> str | None:
     return None
 
 
+def _real_bot_lock(state_dir: Path, account: str, trading_date: str) -> str | None:
+    from risk.drawdown_guard import DrawdownStateStore
+    from risk.state_store import DailyRiskStateStore
+
+    try:
+        daily = DailyRiskStateStore(state_dir / "risk_state.json").get(account=account, trading_date=trading_date)
+        drawdown = DrawdownStateStore(state_dir / "drawdown_state.json").get(account)
+    except Exception:
+        return "bot_state_unreadable"
+    if daily is not None and daily.kill_switch_triggered:
+        return "bot_sticky_daily_kill"
+    if drawdown is not None and drawdown.locked:
+        return "bot_multi_day_drawdown"
+    return None
+
+
 def shadow_only_config(base: BotConfig) -> BotConfig:
-    """Same runtime settings, but a read-only session, own clientId, dry-run kill switch and
-    autonomous trading disabled — nothing in this process can send an order."""
+    """Same runtime settings, but a read-only session, own clientId, dry-run kill switch,
+    autonomous trading disabled and live trading refused — nothing in this process can send an
+    order, and it never even connects to a live port (``validate`` raises on one)."""
+    ibkr = read_only_ibkr_settings(replace(base.ibkr, allow_live_trading=False), 53)
+    if ibkr.client_id <= 0:
+        # clientId 0 would bind TWS manual orders (reqAutoOpenOrders); refuse it outright.
+        raise RuntimeError("shadow-only clientId must be > 0")
     return replace(
         base,
-        ibkr=read_only_ibkr_settings(base.ibkr, 53),
+        ibkr=ibkr,
         risk=replace(base.risk, kill_switch_dry_run=True),
         runtime=replace(base.runtime, autonomous_trading_enabled=False),
     )
@@ -92,7 +120,7 @@ async def main_async(args) -> None:
             try:
                 await supervisor.evaluate()
                 snapshot = await supervisor.accounts.snapshot(context.account, log=False)
-                reason = research_locked(supervisor, snapshot.net_liquidation)
+                reason = research_locked(supervisor, snapshot.net_liquidation, real_state_dir=STATE_DIR)
                 if reason:
                     research_risk.lock_trading(reason)
                 else:

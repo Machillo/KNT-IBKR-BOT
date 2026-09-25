@@ -73,3 +73,39 @@ def test_research_lock_sees_a_persisted_drawdown_lock(isolated_state_dir):
     sup = _supervisor(isolated_state_dir, 100_000, max_drawdown_pct=0.05, max_daily_loss_pct=0.5)
     sup.drawdown.evaluate(94_000)                                   # -6 % from the high-water mark
     assert research_locked(sup, 94_000) == "multi_day_drawdown"
+
+
+def test_shadow_only_refuses_live_settings():
+    import pytest
+
+    base = BotConfig(ibkr=IBKRConfig(port=7496, allow_live_trading=True, client_id=901),
+                     risk=RiskConfig(), runtime=RuntimeConfig())
+    cfg = shadow_only_config(base)
+    assert cfg.ibkr.allow_live_trading is False
+    with pytest.raises(RuntimeError):
+        cfg.validate()  # the live port is refused before any connection
+    with pytest.raises(RuntimeError):
+        shadow_only_config(BotConfig(ibkr=IBKRConfig(port=7497, client_id=-53), risk=RiskConfig(),
+                                     runtime=RuntimeConfig()))
+
+
+def test_research_lock_mirrors_the_trading_bots_real_locks_read_only(isolated_state_dir):
+    import json
+
+    from run_shadow_only import research_locked
+
+    sup = _supervisor(isolated_state_dir / "shadow_only", 100_000)
+    real = isolated_state_dir
+    assert research_locked(sup, 100_000, real_state_dir=real) is None       # bot never ran: no files
+    assert not (real / "risk_state.json").exists()                           # and nothing was created
+    record = {"account": sup.context.account, "trading_date": sup.context.trading_date,
+              "starting_equity": 100000.0, "kill_switch_triggered": True,
+              "trigger_reason": "Daily loss limit reached", "updated_at_utc": ""}
+    (real / "risk_state.json").write_text(json.dumps(
+        {"version": 1, "records": {f"{sup.context.account}:{sup.context.trading_date}": record}}), encoding="utf-8")
+    before = (real / "risk_state.json").read_bytes()
+    assert research_locked(sup, 100_000, real_state_dir=real) == "bot_sticky_daily_kill"
+    assert (real / "risk_state.json").read_bytes() == before
+    (real / "risk_state.json").unlink()
+    (real / "drawdown_state.json").write_text("{corrupt", encoding="utf-8")
+    assert research_locked(sup, 100_000, real_state_dir=real) == "bot_state_unreadable"

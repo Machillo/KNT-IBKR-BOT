@@ -60,6 +60,11 @@ class DailyRiskStateStore:
         self._write(data)
         return state, True
 
+    def get(self, *, account: str, trading_date: str) -> PersistedDailyRiskState | None:
+        """Read-only lookup (never creates a baseline)."""
+        raw = self._read().get("records", {}).get(self._key(account, trading_date))
+        return None if raw is None else self._decode(raw)
+
     def has_prior_days(self, *, account: str, trading_date: str) -> bool:
         """True if this account has a persisted baseline from an EARLIER trading date."""
         records = self._read().get("records", {})

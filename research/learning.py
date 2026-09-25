@@ -37,10 +37,21 @@ class LearningEngine:
     change broker permissions, kill switches, daily-loss limits, or hard risk caps.
     """
 
-    def __init__(self, store: StrategyPerformanceStore) -> None:
+    def __init__(self, store: StrategyPerformanceStore, *, use_context_promotions: bool = False) -> None:
+        """``use_context_promotions`` is research-only and OFF by default.
+
+        Context promotions are derived from FULL-SAMPLE backtest comparisons across
+        hand-picked cohorts (often 3 datasets per context). That is in-sample,
+        multiple-comparison evidence and must not steer operational (shadow/paper)
+        decisions. The promotions table is kept for research; it is simply not read
+        unless explicitly enabled.
+        """
         self.store = store
         store_path = getattr(store, "path", None)
-        self.context_promotions = ContextPromotionStore(store_path) if store_path is not None else None
+        self.context_promotions = (
+            ContextPromotionStore(store_path)
+            if use_context_promotions and store_path is not None else None
+        )
 
     def _freshness_factor(self, *, symbol: str, asset_class: str, timeframe: str) -> float:
         status_reader = getattr(self.store, "research_status", None)

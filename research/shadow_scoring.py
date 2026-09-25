@@ -1,0 +1,255 @@
+"""Score journaled shadow decisions once enough FUTURE bars exist.
+
+Guarantees:
+* Decisions are never modified: outcomes go to ``shadow_outcomes`` only.
+* Future data is used only AFTER the decision, to evaluate it; the scorer reads
+  bars strictly later than the decision's ``bar_time``.
+* Idempotent and resumable: FINAL outcomes for the current ``SCORER_VERSION`` are
+  skipped; PENDING_DATA outcomes are re-evaluated when more bars arrive.
+* No broker order code; bars come from a pluggable provider (in-memory for tests,
+  the offline cache, or read-only IBKR history).
+
+Evaluated per decision:
+* SELECTED — the signal the selector actually chose (TRADE-type actions);
+* COUNTERFACTUAL — for NO_TRADE, the best directional evaluation that was below the
+  threshold or filtered, if one existed ("what did we pass on?");
+* forward close-to-close returns at 1 / 5 / 20 bars for every decision (TRADE or not),
+  so NO_TRADE can be studied even when no signal existed.
+"""
+from __future__ import annotations
+
+import inspect
+import json
+import sqlite3
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+
+from backtest.costs import BASELINE, CostModel
+from backtest.metrics import as_datetime
+from market.history import PriceBar
+from research.shadow_journal import ShadowJournal, score_decision
+
+SCORER_VERSION = "v1"
+FORWARD_HORIZONS = (1, 5, 20)
+MAX_BRACKET_BARS = 60
+
+
+def _naive(value) -> datetime | None:
+    dt = as_datetime(value)
+    if dt is None:
+        return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
+
+
+class InMemoryBarsProvider:
+    """{symbol: [PriceBar,...]} — for tests and offline replays."""
+
+    def __init__(self, data: dict[str, list[PriceBar]]) -> None:
+        self.data = data
+
+    def bars_after(self, symbol: str, con_id: int, after, timeframe: str) -> list[PriceBar]:
+        cutoff = _naive(after)
+        return [b for b in self.data.get(symbol, []) if cutoff is not None and _naive(b.time) > cutoff]
+
+
+class CacheBarsProvider(InMemoryBarsProvider):
+    """Reads ``reports/history_cache/{SYMBOL}_{profile}.json`` for the decision timeframe."""
+
+    PROFILE_BY_TIMEFRAME = {"1 hour": "intraday_1y", "4 hours": "swing_5y", "1 day": "long_10y"}
+
+    def __init__(self, cache_dir: str | Path = "reports/history_cache") -> None:
+        super().__init__({})
+        self.cache_dir = Path(cache_dir)
+
+    def bars_after(self, symbol, con_id, after, timeframe):
+        key = f"{symbol}|{timeframe}"
+        if key not in self.data:
+            profile = self.PROFILE_BY_TIMEFRAME.get(timeframe)
+            path = self.cache_dir / f"{symbol}_{profile}.json"
+            bars = []
+            if profile and path.exists():
+                raw = json.loads(path.read_text(encoding="utf-8"))
+                bars = [PriceBar(r["time"], float(r["open"]), float(r["high"]), float(r["low"]),
+                                 float(r["close"]), float(r.get("volume", 0.0))) for r in raw]
+            self.data[key] = bars
+        cutoff = _naive(after)
+        return [b for b in self.data[key] if cutoff is not None and _naive(b.time) > cutoff]
+
+
+@dataclass(frozen=True)
+class ScoredOutcome:
+    decision_id: int
+    status: str             # FINAL | PENDING_DATA | NOT_EVALUABLE
+    evaluated: str | None   # SELECTED | COUNTERFACTUAL | None
+    strategy: str | None
+    side: str | None
+    filled: bool
+    exit_reason: str | None
+    return_pct: float | None
+    mae_pct: float | None
+    mfe_pct: float | None
+    bars_held: int
+    forward: dict[int, float | None]
+
+
+TRADE_ACTION_PREFIXES = ("WOULD_", "APPROVED_", "PAPER_", "PORTFOLIO_REJECTED")
+
+
+def evaluate_row(row: sqlite3.Row, bars_after: list[PriceBar], costs: CostModel = BASELINE) -> ScoredOutcome:
+    """Pure evaluation of one decision row against bars that came after it."""
+    action = str(row["action"] or "")
+    selected = row["strategy"] is not None and row["side"] not in (None, "FLAT") and action.startswith(TRADE_ACTION_PREFIXES)
+    if selected:
+        kind, strategy, side, stop, target = "SELECTED", row["strategy"], row["side"], row["stop"], row["target"]
+    elif row["top_side"] in ("LONG", "SHORT") and row["top_stop"] is not None and row["top_target"] is not None:
+        kind, strategy, side, stop, target = ("COUNTERFACTUAL", row["top_strategy"], row["top_side"],
+                                              row["top_stop"], row["top_target"])
+    else:
+        kind = strategy = side = stop = target = None
+
+    # Forward returns are measured from the decision bar's close (known at decision time).
+    keys = row.keys()
+    reference = None
+    for key in ("reference_close", "entry", "top_entry"):
+        if key in keys and row[key] is not None:
+            reference = float(row[key])
+            break
+    forward: dict[int, float | None] = {}
+    for h in FORWARD_HORIZONS:
+        forward[h] = (bars_after[h - 1].close / reference - 1) * 100 if reference and len(bars_after) >= h else None
+
+    if kind is None:
+        if reference is None:
+            status = "NOT_EVALUABLE"  # no signal and no reference price was recorded
+        elif all(v is not None for v in forward.values()):
+            status = "FINAL"
+        else:
+            status = "PENDING_DATA"
+        return ScoredOutcome(int(row["id"]), status, None, None, None, False, None, None, None, None, 0, forward)
+
+    out = score_decision(side, float(stop), float(target), bars_after, costs, MAX_BRACKET_BARS)
+    complete_forward = all(v is not None for v in forward.values())
+    if not bars_after:
+        status = "PENDING_DATA"
+    elif out.resolved and complete_forward:
+        status = "FINAL"
+    else:
+        status = "PENDING_DATA"
+    return ScoredOutcome(int(row["id"]), status, kind, strategy, side, out.filled, out.exit_reason,
+                         out.return_pct, out.mae_pct, out.mfe_pct, out.bars_held, forward)
+
+
+class ShadowScorer:
+    def __init__(self, db_path: str | Path = "state/strategy_performance.db", costs: CostModel = BASELINE) -> None:
+        self.path = Path(db_path)
+        self.costs = costs
+        ShadowJournal(self.path)  # ensures the decision tables exist (append-only schema)
+        with sqlite3.connect(self.path) as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS shadow_outcomes (
+                    decision_id INTEGER NOT NULL,
+                    scorer_version TEXT NOT NULL,
+                    scored_at TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    evaluated TEXT,
+                    strategy TEXT,
+                    side TEXT,
+                    filled INTEGER,
+                    exit_reason TEXT,
+                    return_pct REAL,
+                    mae_pct REAL,
+                    mfe_pct REAL,
+                    bars_held INTEGER,
+                    fwd_1 REAL,
+                    fwd_5 REAL,
+                    fwd_20 REAL,
+                    cost_model TEXT,
+                    PRIMARY KEY (decision_id, scorer_version)
+                )
+                """
+            )
+
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.path)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def pending_rows(self) -> list[sqlite3.Row]:
+        with self._connect() as conn:
+            return conn.execute(
+                """SELECT d.* FROM shadow_decisions d
+                   LEFT JOIN shadow_outcomes o ON o.decision_id=d.id AND o.scorer_version=?
+                   WHERE o.decision_id IS NULL OR o.status='PENDING_DATA'
+                   ORDER BY d.id""",
+                (SCORER_VERSION,),
+            ).fetchall()
+
+    async def score_pending(self, provider, limit: int | None = None) -> dict[str, int]:
+        counts = {"FINAL": 0, "PENDING_DATA": 0, "NOT_EVALUABLE": 0}
+        rows = self.pending_rows()
+        if limit is not None:
+            rows = rows[:limit]
+        for row in rows:
+            bars = provider.bars_after(row["symbol"], row["con_id"], row["bar_time"], row["timeframe"])
+            if inspect.isawaitable(bars):
+                bars = await bars
+            outcome = evaluate_row(row, list(bars or []), self.costs)
+            self._upsert(outcome)
+            counts[outcome.status] += 1
+        return counts
+
+    def _upsert(self, o: ScoredOutcome) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """INSERT INTO shadow_outcomes (decision_id, scorer_version, scored_at, status, evaluated,
+                   strategy, side, filled, exit_reason, return_pct, mae_pct, mfe_pct, bars_held,
+                   fwd_1, fwd_5, fwd_20, cost_model)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(decision_id, scorer_version) DO UPDATE SET
+                     scored_at=excluded.scored_at, status=excluded.status, evaluated=excluded.evaluated,
+                     strategy=excluded.strategy, side=excluded.side, filled=excluded.filled,
+                     exit_reason=excluded.exit_reason, return_pct=excluded.return_pct,
+                     mae_pct=excluded.mae_pct, mfe_pct=excluded.mfe_pct, bars_held=excluded.bars_held,
+                     fwd_1=excluded.fwd_1, fwd_5=excluded.fwd_5, fwd_20=excluded.fwd_20,
+                     cost_model=excluded.cost_model
+                   WHERE shadow_outcomes.status != 'FINAL'""",
+                (o.decision_id, SCORER_VERSION, datetime.now(timezone.utc).isoformat(), o.status, o.evaluated,
+                 o.strategy, o.side, int(o.filled), o.exit_reason, o.return_pct, o.mae_pct, o.mfe_pct,
+                 o.bars_held, o.forward.get(1), o.forward.get(5), o.forward.get(20), self.costs.name),
+            )
+
+    def report(self) -> dict:
+        """Aggregate FINAL outcomes: selected trades vs NO_TRADE counterfactuals, by regime/strategy."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT o.*, d.action, d.regime, d.symbol FROM shadow_outcomes o
+                   JOIN shadow_decisions d ON d.id=o.decision_id
+                   WHERE o.status='FINAL' AND o.scorer_version=?""",
+                (SCORER_VERSION,),
+            ).fetchall()
+
+        def summary(items):
+            rets = [r["return_pct"] for r in items if r["filled"] and r["return_pct"] is not None]
+            return {
+                "n": len(items), "filled": len(rets),
+                "mean_net_return_pct": (sum(rets) / len(rets)) if rets else None,
+                "win_rate_pct": (sum(x > 0 for x in rets) / len(rets) * 100) if rets else None,
+            }
+
+        selected = [r for r in rows if r["evaluated"] == "SELECTED"]
+        counterfactual = [r for r in rows if r["evaluated"] == "COUNTERFACTUAL"]
+        rejected_good = [r for r in counterfactual if r["filled"] and (r["return_pct"] or 0) > 0]
+        by_regime: dict[str, list] = {}
+        for r in selected:
+            by_regime.setdefault(r["regime"], []).append(r)
+        return {
+            "final_outcomes": len(rows),
+            "selected": summary(selected),
+            "no_trade_counterfactual": summary(counterfactual),
+            "no_trade_rejected_profitable": len(rejected_good),
+            "selected_by_regime": {k: summary(v) for k, v in sorted(by_regime.items())},
+        }

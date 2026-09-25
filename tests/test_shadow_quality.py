@@ -175,3 +175,29 @@ def test_a_cycle_with_many_failed_candidates_is_blocking(tmp_path):
         conn.execute("UPDATE discovery_cycles SET candidates_attempted=10, candidate_errors=3 WHERE cycle_id=?", (c,))
     results, _ = shadow_quality.evaluate(db)
     assert any(r.gate == "candidate_errors" and r.severity == "BLOCKING" for r in results)
+
+
+def _candidate_error_severity(db, attempted, errors, excluded=0):
+    c = _decision(db)
+    j = ShadowJournal(db)
+    for k in range(excluded):
+        j.record_decision(c, symbol=f"X{k}", con_id=100 + k, bar_time=None, timeframe="1 hour", regime="UNKNOWN",
+                          action="INSTRUMENT_EXCLUDED", strategy=None, side=None, score=None, entry=None,
+                          stop=None, target=None, reason="instrument_type:ETF",
+                          context={"run_mode": "shadow_only", "learning_mode": "frozen"})
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE discovery_cycles SET candidates_attempted=?, candidate_errors=? WHERE cycle_id=?",
+                     (attempted, errors, c))
+    results, _ = shadow_quality.evaluate(db)
+    return [r.severity for r in results if r.gate == "candidate_errors"]
+
+
+def test_candidate_error_gate_needs_both_an_absolute_and_a_relative_threshold(tmp_path):
+    assert _candidate_error_severity(tmp_path / "a.db", 10, 1) == ["WARNING"]       # 1 error: never blocking
+    assert _candidate_error_severity(tmp_path / "b.db", 10, 2) == ["BLOCKING"]      # 2 of 10 = 20 %
+    assert _candidate_error_severity(tmp_path / "c.db", 30, 2) == ["WARNING"]       # 2 of 30 ≈ 6.7 %
+
+
+def test_type_excluded_names_do_not_dilute_the_candidate_error_share(tmp_path):
+    # 2 errors of 22 attempted is 9 %, but 10 were excluded by type: 2 of 12 analysable is 17 %.
+    assert _candidate_error_severity(tmp_path / "d.db", 22, 2, excluded=10) == ["BLOCKING"]

@@ -324,3 +324,23 @@ def test_cache_provider_never_reads_another_companys_plain_file(tmp_path):
     cache = CacheBarsProvider(tmp_path)
     assert cache.bars_from("ABC", 2, "2026-10-01T15:00:00+00:00", "1 hour")
     assert cache.bars_from("ABC", 1, "2026-10-01T15:00:00+00:00", "1 hour") == []              # ambiguous: none
+
+
+def test_scoring_inside_a_registered_window_requires_the_registered_rules(tmp_path):
+    import json
+
+    from research.fwd_protocol import protocol_fingerprint, window_file
+
+    db = tmp_path / "j.db"
+    journal_with_decisions(db)
+    scorer = ShadowScorer(db, costs=ZERO)
+    window_file(db).write_text(json.dumps({"protocol_fingerprint": "other-checkout"}), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="differ from the registered"):
+        asyncio.run(scorer.score_pending(provider()))
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM shadow_outcomes").fetchone()[0] == 0   # nothing written
+    window_file(db).write_text("{corrupt", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="unreadable"):
+        asyncio.run(scorer.score_pending(provider()))
+    window_file(db).write_text(json.dumps({"protocol_fingerprint": protocol_fingerprint()}), encoding="utf-8")
+    assert asyncio.run(scorer.score_pending(provider()))["FINAL"] > 0

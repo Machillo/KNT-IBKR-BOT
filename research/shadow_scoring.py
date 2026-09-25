@@ -261,6 +261,24 @@ class ShadowScorer:
         conn.row_factory = sqlite3.Row
         return conn
 
+    def _window_refusal(self) -> str | None:
+        """Scores inside a REGISTERED FWD window may only be written by the registered scoring rules:
+        a single run from another checkout would stamp rows that can never bind."""
+        import json
+
+        from research.fwd_protocol import protocol_fingerprint, window_file
+        target = window_file(self.path)
+        if not target.exists():
+            return None
+        try:
+            registered = json.loads(target.read_text(encoding="utf-8")).get("protocol_fingerprint")
+        except ValueError:
+            return "registration file unreadable: scoring refused"
+        if registered and registered != protocol_fingerprint():
+            return ("scoring rules differ from the registered FWD window: score from the pinned checkout "
+                    "(nothing was written)")
+        return None
+
     def pending_rows(self, min_created_at: str | None = None) -> list[sqlite3.Row]:
         with self._connect() as conn:
             rows = conn.execute(
@@ -278,6 +296,9 @@ class ShadowScorer:
 
     async def score_pending(self, provider, limit: int | None = None, now: datetime | None = None,
                             min_created_at: str | None = None) -> dict[str, int]:
+        refusal = self._window_refusal()
+        if refusal:
+            raise RuntimeError(refusal)
         counts = {"FINAL": 0, "PENDING_DATA": 0, "NOT_EVALUABLE": 0, "DUPLICATE": 0, "PROVIDER_ERROR": 0}
         provider_name = getattr(provider, "name", None) or type(provider).__name__
         now = _naive(now or datetime.now(timezone.utc))

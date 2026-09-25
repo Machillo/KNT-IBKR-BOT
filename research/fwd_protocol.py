@@ -199,7 +199,10 @@ PRE_START_GRACE = timedelta(hours=1)          # shadow cycles of the registered 
 PROTOCOL_FILES = ("research/fwd_protocol.py", "research/shadow_scoring.py", "research/shadow_quality.py",
                   "research/protocol.py", "backtest/costs.py", "backtest/metrics.py", "run_score_shadow.py",
                   "run_fetch_journal_bars.py")
-ACCEPTANCE_REF = "origin/main"   # the registration line must be reachable from the pushed main branch
+# The pushed branch that must contain the registration line. This repository never merges to
+# main (CLAUDE.md): the integration branch is feature/paper-alpha. The chosen ref is recorded IN
+# the registration, so it cannot be changed afterwards.
+DEFAULT_ACCEPTANCE_REF = "origin/feature/paper-alpha"
 
 
 def protocol_fingerprint() -> str:
@@ -268,7 +271,8 @@ def committed_registration_lines(repo: Path | None = None) -> dict[str, datetime
     return {registration_line(rec): when for rec, when in committed_registrations(repo).values()}
 
 
-def register_window(path: str | Path, *, config_hash: str, start: datetime | None = None) -> dict:
+def register_window(path: str | Path, *, config_hash: str, start: datetime | None = None,
+                    acceptance_ref: str = DEFAULT_ACCEPTANCE_REF) -> dict:
     """Pin the evidence window ONCE (refuses to overwrite). Records the start, the decision-code
     fingerprint, the decision-config hash and the protocol fingerprint (evaluator + scorer +
     gates). The start may not be backdated."""
@@ -285,7 +289,7 @@ def register_window(path: str | Path, *, config_hash: str, start: datetime | Non
         raise ValueError("the window start cannot be backdated")
     record = {"protocol": PROTOCOL_ID, "start_utc": begin.isoformat(), "registered_at_utc": now.isoformat(),
               "decision_fingerprint": decision_fingerprint(), "config_hash": config_hash,
-              "protocol_fingerprint": protocol_fingerprint()}
+              "protocol_fingerprint": protocol_fingerprint(), "acceptance_ref": acceptance_ref}
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(record, indent=2), encoding="utf-8")
     return record
@@ -304,9 +308,20 @@ def end_window(path: str | Path, reason: str) -> dict:
 
 
 def registration_is_pushed(registration: dict) -> bool:
-    pushed = committed_registrations(ref=ACCEPTANCE_REF)
+    pushed = committed_registrations(ref=registration.get("acceptance_ref") or DEFAULT_ACCEPTANCE_REF)
     entry = pushed.get(registration.get("start_utc", ""))
     return entry is not None and registration_line(entry[0]) == registration_line(registration)
+
+
+def _record_acceptance(path: Path, commit_time: datetime) -> None:
+    """The first successful acceptance is stored, so a later squash/rebase or a deleted branch
+    (which change or hide the original commit time) cannot turn a valid window invalid."""
+    target = window_file(path)
+    record = json.loads(target.read_text(encoding="utf-8"))
+    if "accepted_commit_time_utc" not in record:
+        record["accepted_commit_time_utc"] = commit_time.isoformat()
+        record["accepted_at_utc"] = datetime.now(timezone.utc).isoformat()
+        target.write_text(json.dumps(record, indent=2), encoding="utf-8")
 
 
 def _registration(path: Path) -> dict | None:
@@ -333,12 +348,17 @@ def _registration_refusal(path: Path, registration: dict) -> str | None:
     if len(committed) > 1:
         return (f"{len(committed)} {PROTOCOL_ID} registrations were committed: a new window needs a new "
                 f"protocol id and counts in the family")
+    acceptance_ref = registration.get("acceptance_ref") or DEFAULT_ACCEPTANCE_REF
     if not registration_is_pushed(registration):
-        return f"registration line not reachable from {ACCEPTANCE_REF} (push it to main)"
+        return f"registration line not reachable from {acceptance_ref} (commit it there and push)"
     registered_at = _utc(registration["registered_at_utc"])
-    commit_time = committed[line].astimezone(timezone.utc)
+    if registration.get("accepted_commit_time_utc"):
+        commit_time = _utc(registration["accepted_commit_time_utc"])
+    else:
+        commit_time = committed[line].astimezone(timezone.utc)
     if not (registered_at - timedelta(minutes=1) <= commit_time <= registered_at + MAX_COMMIT_DELAY):
         return "registration line committed outside the allowed delay"
+    _record_acceptance(path, commit_time)
     if protocol_fingerprint() != registration["protocol_fingerprint"]:
         return "evaluator/scorer/gates changed since registration (run the evaluator from the pinned checkout)"
     start = _utc(registration["start_utc"])

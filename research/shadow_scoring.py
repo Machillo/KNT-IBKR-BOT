@@ -92,10 +92,15 @@ class CacheBarsProvider(InMemoryBarsProvider):
         self.cache_dir = Path(cache_dir) if cache_dir is not None else reports_path("history_cache")
 
     def bars_from(self, symbol, con_id, at, timeframe):
-        key = f"{symbol}|{timeframe}"
+        key = f"{symbol}|{con_id}|{timeframe}"
         if key not in self.data:
             profile = self.PROFILE_BY_TIMEFRAME.get(timeframe)
-            path = self.cache_dir / f"{symbol}_{profile}.json"
+            # A reused ticker is stored per conId (run_fetch_journal_bars.cache_file). Never read a
+            # plain SYMBOL file when per-conId files exist: it may belong to the other company.
+            by_con = self.cache_dir / f"{symbol}.{con_id}_{profile}.json"
+            plain = self.cache_dir / f"{symbol}_{profile}.json"
+            shared = any(self.cache_dir.glob(f"{symbol}.*_{profile}.json")) if profile else False
+            path = by_con if by_con.exists() else (plain if not shared else by_con)
             bars = []
             if profile and path.exists():
                 raw = json.loads(path.read_text(encoding="utf-8"))
@@ -247,9 +252,9 @@ class ShadowScorer:
         conn.row_factory = sqlite3.Row
         return conn
 
-    def pending_rows(self) -> list[sqlite3.Row]:
+    def pending_rows(self, min_created_at: str | None = None) -> list[sqlite3.Row]:
         with self._connect() as conn:
-            return conn.execute(
+            rows = conn.execute(
                 """SELECT d.*, c.market_open AS market_open FROM shadow_decisions d
                    LEFT JOIN discovery_cycles c ON c.cycle_id=d.cycle_id
                    LEFT JOIN shadow_outcomes o ON o.decision_id=d.id AND o.scorer_version=?
@@ -257,12 +262,17 @@ class ShadowScorer:
                    ORDER BY d.id""",
                 (SCORER_VERSION,),
             ).fetchall()
+        if min_created_at is None:
+            return rows
+        floor = _naive(min_created_at)
+        return [r for r in rows if _naive(r["created_at"]) is not None and _naive(r["created_at"]) >= floor]
 
-    async def score_pending(self, provider, limit: int | None = None, now: datetime | None = None) -> dict[str, int]:
+    async def score_pending(self, provider, limit: int | None = None, now: datetime | None = None,
+                            min_created_at: str | None = None) -> dict[str, int]:
         counts = {"FINAL": 0, "PENDING_DATA": 0, "NOT_EVALUABLE": 0, "DUPLICATE": 0, "PROVIDER_ERROR": 0}
         provider_name = getattr(provider, "name", None) or type(provider).__name__
         now = _naive(now or datetime.now(timezone.utc))
-        rows = self.pending_rows()
+        rows = self.pending_rows(min_created_at)
         if limit is not None:
             rows = rows[:limit]
         for row in rows:
@@ -313,7 +323,9 @@ class ShadowScorer:
                      strategy=excluded.strategy, side=excluded.side, filled=excluded.filled,
                      exit_reason=excluded.exit_reason, return_pct=excluded.return_pct,
                      mae_pct=excluded.mae_pct, mfe_pct=excluded.mfe_pct, bars_held=excluded.bars_held,
-                     fwd_1=excluded.fwd_1, fwd_5=excluded.fwd_5, fwd_20=excluded.fwd_20,
+                     fwd_1=COALESCE(shadow_outcomes.fwd_1, excluded.fwd_1),
+                     fwd_5=COALESCE(shadow_outcomes.fwd_5, excluded.fwd_5),
+                     fwd_20=COALESCE(shadow_outcomes.fwd_20, excluded.fwd_20),
                      cost_model=excluded.cost_model, executable=excluded.executable,
                      provider=excluded.provider
                    WHERE shadow_outcomes.status != 'FINAL'""",
@@ -323,8 +335,20 @@ class ShadowScorer:
                  int(bool(o.executable)), provider),
             )
 
+    def counts(self) -> dict:
+        """Outcome COUNTS only (by status and arm): safe to look at during an open FWD window."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT status, evaluated, COUNT(*) FROM shadow_outcomes WHERE scorer_version=? "
+                "GROUP BY status, evaluated", (SCORER_VERSION,)).fetchall()
+        return {"scorer_version": SCORER_VERSION,
+                "by_status_and_arm": {f"{s}|{e or '-'}": n for s, e, n in rows}}
+
     def report(self, min_cycle_rows: int = MIN_CYCLE_ROWS) -> dict:
-        """Aggregate FINAL outcomes: selected trades vs NO_TRADE counterfactuals, by regime/strategy."""
+        """Aggregate FINAL outcomes: selected trades vs NO_TRADE counterfactuals, by regime/strategy.
+
+        UNBLINDED outcome statistics. While an FWD window is open, reading this is an interim look
+        (docs/FWD_PROTOCOL.md): use ``counts()`` instead, or record the look in LOG.md."""
         with self._connect() as conn:
             rows = conn.execute(
                 """SELECT o.*, d.action, d.regime, d.symbol, d.cycle_id, d.side AS decision_side FROM shadow_outcomes o

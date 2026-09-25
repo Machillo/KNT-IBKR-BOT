@@ -73,7 +73,11 @@ class IBKRHistoryBarsProvider:
 async def main_async(args) -> None:
     from config.config import shadow_journal_path
 
+    from research.protocol import FORWARD_START
+
     scorer = ShadowScorer(args.db or shadow_journal_path())
+    # Decisions before the FORWARD segment would be scored with holdout-calendar bars.
+    min_created_at = None if args.confirm_holdout else FORWARD_START.isoformat()
     if args.source == "ibkr":
         from config.config import config, read_only_ibkr_settings
         from core.connection import IBKRConnection
@@ -81,7 +85,8 @@ async def main_async(args) -> None:
         connection = IBKRConnection(read_only_ibkr_settings(config.ibkr, 50))
         try:
             ib = await connection.connect()
-            counts = await scorer.score_pending(IBKRHistoryBarsProvider(ib), limit=args.limit)
+            counts = await scorer.score_pending(IBKRHistoryBarsProvider(ib), limit=args.limit,
+                                                min_created_at=min_created_at)
         finally:
             await connection.disconnect()
     else:
@@ -90,9 +95,15 @@ async def main_async(args) -> None:
         # Forward rows live in the journal-bar cache (run_fetch_journal_bars.py); the old
         # history cache is the closed v1 holdout and never contains forward bars.
         cache_dir = args.cache_dir or (reports_path("pit_cache") if args.source == "pit" else None)
-        counts = await scorer.score_pending(CacheBarsProvider(cache_dir), limit=args.limit)
+        counts = await scorer.score_pending(CacheBarsProvider(cache_dir), limit=args.limit,
+                                            min_created_at=min_created_at)
     print(f"SHADOW SCORING | scored={counts}")
-    print(json.dumps(scorer.report(), indent=2, default=str))
+    if args.unblind:
+        print("WARNING: unblinded outcome statistics. During an open FWD window this is an interim look: "
+              "record it in docs/experiments/LOG.md.")
+        print(json.dumps(scorer.report(), indent=2, default=str))
+    else:
+        print(json.dumps(scorer.counts(), indent=2, default=str))
 
 
 def main() -> None:
@@ -103,6 +114,10 @@ def main() -> None:
                          "ibkr = read-only history (the only source allowed to expire unalignable rows)")
     ap.add_argument("--cache-dir", default=None, help="override the cache directory")
     ap.add_argument("--limit", type=int, default=None)
+    ap.add_argument("--unblind", action="store_true",
+                    help="print outcome statistics (an interim look during an open FWD window)")
+    ap.add_argument("--confirm-holdout", action="store_true",
+                    help="also score decisions before the FORWARD segment (holdout-calendar bars)")
     asyncio.run(main_async(ap.parse_args()))
 
 

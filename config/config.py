@@ -131,7 +131,22 @@ def read_only_ibkr_settings(settings: IBKRConfig, client_id_offset: int) -> IBKR
 
 # Absolute, repo-anchored runtime state directory: persisted risk locks must not depend on the
 # current working directory (starting from another folder would silently start fresh).
-STATE_DIR = Path(__file__).resolve().parents[1] / "state"
+def _state_dir_from_env(name: str, default: Path) -> Path:
+    """Absolute state directory shared across checkouts (pinned FWD worktree + dev checkout).
+    A relative override is refused: it would silently depend on the working directory."""
+    raw = getenv(name)
+    if not raw:
+        return default
+    path = Path(raw)
+    if not path.is_absolute():
+        raise RuntimeError(f"{name} must be an absolute path")
+    return path
+
+
+STATE_DIR = _state_dir_from_env("KNT_STATE_DIR", Path(__file__).resolve().parents[1] / "state")
+# The TRADING BOT's state directory, read-only, for shadow-only's lock mirror. Defaults to
+# STATE_DIR (same checkout); a pinned FWD worktree must point it at the bot's real state.
+BOT_STATE_DIR = _state_dir_from_env("KNT_BOT_STATE_DIR", STATE_DIR)
 
 
 REPORTS_DIR = Path(__file__).resolve().parents[1] / "reports"

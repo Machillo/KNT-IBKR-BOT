@@ -115,7 +115,7 @@ def _population(path: Path, run_mode: str = "shadow_only"):
     conn.row_factory = sqlite3.Row
     with conn:
         rows = conn.execute(
-            """SELECT d.id, d.cycle_id, d.symbol, d.created_at, d.bar_time, d.action, d.strategy, d.side AS d_side,
+            """SELECT d.id, d.cycle_id, d.symbol, d.created_at, d.bar_time, d.action, d.reason, d.strategy, d.side AS d_side,
                       d.top_side, d.top_stop, d.top_target, o.status, o.evaluated, o.side, o.fwd_5, c.market_open,
                       c.created_at AS cycle_created, c.decision_fingerprint, c.config_hash
                FROM shadow_decisions d
@@ -123,7 +123,7 @@ def _population(path: Path, run_mode: str = "shadow_only"):
                LEFT JOIN shadow_outcomes o ON o.decision_id = d.id AND o.scorer_version = ?
                WHERE d.duplicate_of IS NULL AND d.decision_version = ? AND d.run_mode = ?
                  AND COALESCE(d.learning_mode, '') = 'frozen' AND c.market_open = 1
-                 AND d.action != 'CANDIDATE_ERROR'
+                 AND d.action NOT IN ('CANDIDATE_ERROR', 'INSTRUMENT_EXCLUDED')
                ORDER BY d.created_at""",
             (SCORER_VERSION, DECISION_VERSION, run_mode)).fetchall()
     conn.close()
@@ -190,19 +190,58 @@ def window_file(path: Path) -> Path:
     return path.with_name(path.stem + ".fwd_window.json")
 
 
-LOG_FILE = Path(__file__).resolve().parents[1] / "docs" / "experiments" / "LOG.md"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+LOG_FILE = REPO_ROOT / "docs" / "experiments" / "LOG.md"
+REGISTRATION_PREFIX = f"{PROTOCOL_ID} WINDOW REGISTERED:"
+MAX_COMMIT_DELAY = timedelta(days=3)          # the registration line must be committed promptly
+PRE_START_GRACE = timedelta(hours=1)          # shadow cycles of the registered code before start
+PROTOCOL_FILES = ("research/fwd_protocol.py", "research/shadow_scoring.py", "research/shadow_quality.py",
+                  "research/protocol.py", "backtest/costs.py")
+
+
+def protocol_fingerprint() -> str:
+    """Content hash of the evaluator, scorer, quality gates, protocol calendar and cost model:
+    every rule that turns journal rows into a KEEP/REJECT. Pinned by the registration."""
+    import hashlib
+
+    digest = hashlib.sha256()
+    for rel in PROTOCOL_FILES:
+        digest.update(rel.encode("utf-8"))
+        digest.update((REPO_ROOT / rel).read_bytes().replace(b"\r\n", b"\n"))
+    return digest.hexdigest()[:16]
 
 
 def registration_line(record: dict) -> str:
-    """The exact line that must be COMMITTED to docs/experiments/LOG.md (tamper evidence: the
-    state file is gitignored and could be deleted and re-registered; the commit cannot)."""
-    return (f"FWD-v1 WINDOW REGISTERED: start_utc={record['start_utc']} "
-            f"decision_fingerprint={record['decision_fingerprint']} config_hash={record['config_hash']}")
+    """The exact line that must be COMMITTED to docs/experiments/LOG.md."""
+    return (f"{REGISTRATION_PREFIX} start_utc={record['start_utc']} registered_at_utc={record['registered_at_utc']} "
+            f"decision_fingerprint={record['decision_fingerprint']} config_hash={record['config_hash']} "
+            f"protocol_fingerprint={record['protocol_fingerprint']}")
+
+
+def committed_registration_lines(repo: Path | None = None) -> dict[str, datetime]:
+    """Every distinct registration line EVER committed on any ref (git history is shared by all
+    worktrees), with the time of the first commit that added it. Uncommitted edits do not count;
+    a deleted line still counts (a re-registration is visible forever)."""
+    import subprocess
+
+    out = subprocess.run(
+        ["git", "log", "--all", "--reverse", "--format=@@%cI", "-p", "-S", REGISTRATION_PREFIX, "--",
+         "docs/experiments/LOG.md"],
+        cwd=repo or REPO_ROOT, capture_output=True, text=True, timeout=30, check=False)
+    lines: dict[str, datetime] = {}
+    when = None
+    for raw in (out.stdout or "").splitlines():
+        if raw.startswith("@@") and not raw.startswith("@@ "):
+            when = datetime.fromisoformat(raw[2:].strip())
+        elif raw.startswith("+" + REGISTRATION_PREFIX) and when is not None:
+            lines.setdefault(raw[1:].strip(), when)
+    return lines
 
 
 def register_window(path: str | Path, *, config_hash: str, start: datetime | None = None) -> dict:
     """Pin the evidence window ONCE (refuses to overwrite). Records the start, the decision-code
-    fingerprint and the decision-config hash that every cycle of the window must carry."""
+    fingerprint, the decision-config hash and the protocol fingerprint (evaluator + scorer +
+    gates). The start may not be backdated."""
     from research.shadow_journal import decision_fingerprint
 
     if not config_hash:
@@ -210,11 +249,27 @@ def register_window(path: str | Path, *, config_hash: str, start: datetime | Non
     target = window_file(Path(path))
     if target.exists():
         raise FileExistsError(f"FWD window already registered: {target}")
-    record = {"protocol": PROTOCOL_ID, "start_utc": (start or datetime.now(timezone.utc)).isoformat(),
+    now = datetime.now(timezone.utc)
+    begin = start or now
+    if begin < now - timedelta(minutes=5):
+        raise ValueError("the window start cannot be backdated")
+    record = {"protocol": PROTOCOL_ID, "start_utc": begin.isoformat(), "registered_at_utc": now.isoformat(),
               "decision_fingerprint": decision_fingerprint(), "config_hash": config_hash,
-              "registered_at_utc": datetime.now(timezone.utc).isoformat()}
+              "protocol_fingerprint": protocol_fingerprint()}
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(record, indent=2), encoding="utf-8")
+    return record
+
+
+def end_window(path: str | Path, reason: str) -> dict:
+    """Append an END record (never deletes). An ended window is never binding; its interim
+    state must be reported in LOG.md and it counts in the family (docs/FWD_PROTOCOL.md)."""
+    target = window_file(Path(path))
+    record = json.loads(target.read_text(encoding="utf-8"))
+    if "ended_at_utc" not in record:
+        record["ended_at_utc"] = datetime.now(timezone.utc).isoformat()
+        record["end_reason"] = str(reason)
+        target.write_text(json.dumps(record, indent=2), encoding="utf-8")
     return record
 
 
@@ -222,38 +277,82 @@ def _registration(path: Path) -> dict | None:
     target = window_file(path)
     if not target.exists():
         return None
-    return json.loads(target.read_text(encoding="utf-8"))
+    try:
+        record = json.loads(target.read_text(encoding="utf-8"))
+    except ValueError:
+        return {"corrupt": True}
+    return record if isinstance(record, dict) else {"corrupt": True}
 
 
-def _decision_minimums(rows, test: str) -> bool:
-    """Sample minimums counted from the decision table (independent of scoring progress)."""
+def _registration_refusal(path: Path, registration: dict) -> str | None:
+    if registration.get("corrupt"):
+        return "registration file unreadable"
+    if "ended_at_utc" in registration:
+        return f"window ended at {registration['ended_at_utc']} ({registration.get('end_reason')}): report it, never bind"
+    required = ("start_utc", "registered_at_utc", "decision_fingerprint", "config_hash", "protocol_fingerprint")
+    if any(not registration.get(k) for k in required):
+        return "registration incomplete"
+    line = registration_line(registration)
+    committed = committed_registration_lines()
+    if line not in committed:
+        return "registration line not committed to docs/experiments/LOG.md"
+    if len(committed) > 1:
+        return (f"{len(committed)} {PROTOCOL_ID} registrations were committed: a new window needs a new "
+                f"protocol id and counts in the family")
+    registered_at = _utc(registration["registered_at_utc"])
+    commit_time = committed[line].astimezone(timezone.utc)
+    if not (registered_at - timedelta(minutes=1) <= commit_time <= registered_at + MAX_COMMIT_DELAY):
+        return "registration line committed outside the allowed delay"
+    if protocol_fingerprint() != registration["protocol_fingerprint"]:
+        return "evaluator/scorer/gates changed since registration (run the evaluator from the pinned checkout)"
+    start = _utc(registration["start_utc"])
+    conn = sqlite3.connect(path)
+    try:
+        early = conn.execute(
+            "SELECT COUNT(*) FROM discovery_cycles WHERE run_mode='shadow_only' AND decision_fingerprint=? "
+            "AND created_at < ?", (registration["decision_fingerprint"], (start - PRE_START_GRACE).isoformat())
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    if early:
+        return f"{early} cycles of the registered code ran before the window start (pre-registration look)"
+    return None
+
+
+def _arm(rows, arm: str) -> list:
+    """Arm membership from the DECISION table (same definitions as the scorer's evaluate_row):
+    SELECTED = a chosen LONG signal with a trade-type action; COUNTERFACTUAL = a NO_TRADE whose
+    best evaluation (top_*) is LONG with a stop and a target."""
     by_cycle: dict[str, int] = {}
     for r in rows:
         by_cycle[r["cycle_id"]] = by_cycle.get(r["cycle_id"], 0) + 1
     usable = [r for r in rows if by_cycle[r["cycle_id"]] >= MIN_CYCLE_ROWS]
-    # Same definitions as the scorer (evaluate_row): SELECTED = a chosen LONG signal with a
-    # trade-type action; COUNTERFACTUAL = no selection but a scorable best LONG evaluation.
-    selected = [r for r in usable if r["strategy"] is not None and r["d_side"] == "LONG"
+    if arm == "SELECTED":
+        return [r for r in usable if r["strategy"] is not None and r["d_side"] == "LONG"
                 and str(r["action"] or "").startswith(TRADE_ACTION_PREFIXES)]
+    return [r for r in usable if r["strategy"] is None and r["top_side"] == "LONG"
+            and r["top_stop"] is not None and r["top_target"] is not None]
+
+
+def _decision_minimums(rows, test: str) -> bool:
+    """Sample minimums counted from the decision table (independent of scoring progress)."""
+    selected = _arm(rows, "SELECTED")
     if test == "FWD1":
         return (len(selected) >= MIN_EVENTS and len({_day(r) for r in selected}) >= MIN_DAYS
                 and len({r["symbol"] for r in selected}) >= MIN_SYMBOLS)
-    counterfactual = [r for r in usable if r["strategy"] is None and r["top_side"] == "LONG"
-                      and r["top_stop"] is not None and r["top_target"] is not None]
+    counterfactual = _arm(rows, "COUNTERFACTUAL")
     paired = {_day(r) for r in selected} & {_day(r) for r in counterfactual}
     return len(selected) >= MIN_EVENTS and len(counterfactual) >= MIN_EVENTS and len(paired) >= MIN_PAIRED_DAYS
 
 
-def _window(path: Path, run_mode: str, test: str, log_file: Path | None = None) -> tuple[list, dict]:
+def _window(path: Path, run_mode: str, test: str) -> tuple[list, dict]:
     """Rows up to the binding cutoff, with the cutoff, the binding flag and the window verdict."""
     registration = _registration(path)
     if registration is None:
-        return [], {"binding": False, "reason": "window not registered (run_shadow_report.py --register-fwd-window)"}
-    log = Path(log_file) if log_file is not None else LOG_FILE
-    committed = log.read_text(encoding="utf-8") if log.exists() else ""
-    if registration.get("config_hash") is None or registration_line(registration) not in committed:
-        return [], {"binding": False,
-                    "reason": "registration not recorded in docs/experiments/LOG.md (commit the registration line)"}
+        return [], {"binding": False, "reason": "window not registered (run_shadow_only.py --register-fwd-window)"}
+    refusal = _registration_refusal(path, registration)
+    if refusal:
+        return [], {"binding": False, "reason": refusal}
     start = _utc(registration["start_utc"])
     deadline_end = datetime.combine(EVIDENCE_DEADLINE + timedelta(days=1), datetime.min.time(), tzinfo=_ET)
     rows = [r for r in _population(path, run_mode)
@@ -296,6 +395,23 @@ def _window(path: Path, run_mode: str, test: str, log_file: Path | None = None) 
     return rows, window
 
 
+def _arm_missing(rows, arms) -> dict[str, float | None]:
+    """Missing forward returns PER ARM (a total can hide a selective hole in one arm)."""
+    return {arm: _missing_share(_arm(rows, arm)) for arm in arms}
+
+
+def _blind(result: dict) -> dict:
+    """Before the binding moment NO outcome statistic leaves the evaluator (no interim looks)."""
+    if result["window"].get("binding"):
+        return result
+    for key in ("gross_excess", "net_excess", "difference", "missing_share", "arm_missing_share",
+                "critical_t", "no_trade_reasons"):
+        if key in result:
+            result[key] = "BLINDED"
+    result["sample"] = {k: v for k, v in result["sample"].items() if k != "daily_sd_pct"}
+    return result
+
+
 def _missing_share(rows) -> float | None:
     if not rows:
         return None
@@ -303,7 +419,7 @@ def _missing_share(rows) -> float | None:
     return missing / len(rows)
 
 
-def _gate(window: dict, missing: float | None, enough: bool) -> str | None:
+def _gate(window: dict, missing, enough: bool) -> str | None:
     if window.get("reason"):
         return window["reason"]
     if not window.get("binding"):
@@ -312,8 +428,10 @@ def _gate(window: dict, missing: float | None, enough: bool) -> str | None:
         return "monitoring only: minimum sample not reached and deadline not passed"
     if window.get("quality") != "VALID_FOR_RESEARCH":
         return f"evidence window invalid: {window.get('quality_reasons')}"
-    if missing is not None and missing > MAX_MISSING_SHARE:
-        return f"missing forward returns {missing:.1%} > {MAX_MISSING_SHARE:.0%}"
+    worst = max((v for v in (missing.values() if isinstance(missing, dict) else [missing]) if v is not None),
+                default=None)
+    if worst is not None and worst > MAX_MISSING_SHARE:
+        return f"missing forward returns {worst:.1%} > {MAX_MISSING_SHARE:.0%} (worst arm)"
     if not enough:
         return "deadline reached without the minimum sample"
     return None
@@ -326,7 +444,7 @@ def evaluate_fwd1(path: str | Path, run_mode: str = "shadow_only") -> dict:
     gross = _stats(list(daily.values()))
     net = _stats([x - ROUND_TRIP_COST_PCT for x in daily.values()])
     sample = {"events": len(events), "days": len(daily), "symbols": len({s for _, s, _ in events})}
-    missing = _missing_share(rows)
+    missing = _arm_missing(rows, ("SELECTED",))
     decision, reason = "INCONCLUSIVE", _gate(window, missing, _decision_minimums(rows, "FWD1"))
     if reason is None and gross["se_pct"] is not None and net["t"] is not None:
         crit = critical_t(len(daily))
@@ -340,9 +458,9 @@ def evaluate_fwd1(path: str | Path, run_mode: str = "shadow_only") -> dict:
     elif reason is None:
         reason = "statistics not computable"
     sample["daily_sd_pct"] = _sd(list(daily.values()))
-    return {"protocol": PROTOCOL_ID, "test": "FWD1", "decision": decision, "reason": reason, "sample": sample,
-            "gross_excess": gross, "net_excess": net, "missing_share": missing, "window": window,
-            "critical_t": critical_t(len(daily)) if daily else None}
+    return _blind({"protocol": PROTOCOL_ID, "test": "FWD1", "decision": decision, "reason": reason,
+                   "sample": sample, "gross_excess": gross, "net_excess": net, "arm_missing_share": missing,
+                   "window": window, "critical_t": critical_t(len(daily)) if daily else None})
 
 
 def evaluate_fwd2(path: str | Path, run_mode: str = "shadow_only") -> dict:
@@ -351,21 +469,27 @@ def evaluate_fwd2(path: str | Path, run_mode: str = "shadow_only") -> dict:
     sel, cf = _daily(sel_events), _daily(cf_events)
     paired = [sel[d] - cf[d] for d in sorted(set(sel) & set(cf))]
     diff = _stats(paired)
-    missing = _missing_share(rows)
+    missing = _arm_missing(rows, ("SELECTED", "COUNTERFACTUAL"))
     decision, reason = "INCONCLUSIVE", _gate(window, missing, _decision_minimums(rows, "FWD2"))
     if reason is None and diff["se_pct"] is not None and diff["t"] is not None:
         crit = critical_t(len(paired))
         half_width = t_quantile(0.975, len(paired) - 1) * diff["se_pct"]
         if diff["mean_pct"] > 0 and diff["t"] >= crit:
-            decision, reason = "KEEP", "the threshold separates better setups from the ones it passes on"
+            decision, reason = "KEEP", ("setups taken beat the NO_TRADE setups passed on (in practice mostly the "
+                                        "high-volatility pause; regime-confounded by construction)")
         elif abs(diff["mean_pct"]) + half_width < ROUND_TRIP_COST_PCT:
-            decision, reason = "REJECT", "95% interval of the difference within +/- round-trip cost (hypothesis supported)"
+            decision, reason = "REJECT", ("95% interval of the difference within +/- round-trip cost: NO_TRADE "
+                                          "passes on setups as good as the ones it takes (hypothesis supported)")
         else:
             reason = "neither threshold crossed"
     elif reason is None:
         reason = "statistics not computable"
-    return {"protocol": PROTOCOL_ID, "test": "FWD2", "decision": decision, "reason": reason,
-            "sample": {"selected": len(sel_events), "counterfactual": len(cf_events), "paired_days": len(paired),
-                       "daily_sd_pct": _sd(paired)},
-            "difference": diff, "missing_share": missing, "window": window,
-            "critical_t": critical_t(len(paired)) if paired else None}
+    # Pre-registered DESCRIPTIVE breakdown (never tested): which NO_TRADE rule produced the arm.
+    reasons: dict[str, int] = {}
+    for r in _arm(rows, "COUNTERFACTUAL"):
+        reasons[str(r["reason"])] = reasons.get(str(r["reason"]), 0) + 1
+    return _blind({"protocol": PROTOCOL_ID, "test": "FWD2", "decision": decision, "reason": reason,
+                   "sample": {"selected": len(sel_events), "counterfactual": len(cf_events),
+                              "paired_days": len(paired), "daily_sd_pct": _sd(paired)},
+                   "difference": diff, "arm_missing_share": missing, "no_trade_reasons": reasons,
+                   "window": window, "critical_t": critical_t(len(paired)) if paired else None})

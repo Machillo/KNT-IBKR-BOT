@@ -31,23 +31,12 @@ def main() -> None:
     ap.add_argument("--run-mode", default="shadow_only", help="'any' for every run mode")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--persist", action="store_true", help="store gate results in research_quality")
-    ap.add_argument("--register-fwd-window", action="store_true",
-                    help="pin the FWD-v1 evidence window start (once; refuses to overwrite)")
     ap.add_argument("--fwd", action="store_true",
                     help="also run the pre-registered FWD1/FWD2 evaluator (binding only at the registered moment)")
     a = ap.parse_args()
     db = a.db or state_path("shadow_only", "strategy_performance.db")
     run_mode = None if a.run_mode == "any" else a.run_mode
     since, until = _parse(a.since), _parse(a.until)
-    if a.register_fwd_window:
-        from config.config import config
-        from research.fwd_protocol import register_window, registration_line
-        from run_shadow_only import decision_config_hash, shadow_only_config
-
-        record = register_window(db, config_hash=decision_config_hash(shadow_only_config(config)))
-        print("FWD WINDOW registered. Commit this exact line to docs/experiments/LOG.md now "
-              "(the evaluator refuses a window that is not recorded there):")
-        print(registration_line(record))
     summary = summarize(db, since=since, until=until, run_mode=run_mode)
     print(render(summary))
     if a.json:

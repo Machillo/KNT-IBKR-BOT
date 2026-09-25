@@ -128,3 +128,35 @@ def test_shadow_only_refuses_to_restart_on_code_or_config_that_breaks_a_register
     monkeypatch.setattr("research.shadow_journal.decision_fingerprint", lambda: "changed")
     assert "code differs" in fwd_window_guard(db, cfg)
     assert fwd_window_guard(db, cfg, end_window=True) is None                 # explicit acknowledgement
+
+
+def test_window_guard_fails_closed_on_a_corrupt_registration_and_releases_an_ended_one(tmp_path):
+    from research import fwd_protocol
+    from run_shadow_only import decision_config_hash, fwd_window_guard
+
+    cfg = shadow_only_config(BotConfig(ibkr=IBKRConfig(port=7497, client_id=901), risk=RiskConfig(),
+                                       runtime=RuntimeConfig()))
+    db = tmp_path / "strategy_performance.db"
+    fwd_protocol.window_file(db).write_text("{corrupt", encoding="utf-8")
+    assert "unreadable" in fwd_window_guard(db, cfg)
+    fwd_protocol.window_file(db).unlink()
+    fwd_protocol.register_window(db, config_hash=decision_config_hash(cfg))
+    fwd_protocol.end_window(db, "test")
+    other = shadow_only_config(BotConfig(ibkr=IBKRConfig(port=7497, client_id=901),
+                                         risk=RiskConfig(max_position_pct=0.05), runtime=RuntimeConfig()))
+    assert fwd_window_guard(db, other) is None                    # an ended window no longer pins anything
+    import json
+    assert "ended_at_utc" in json.loads(fwd_protocol.window_file(db).read_text(encoding="utf-8"))
+
+
+def test_state_dirs_can_be_shared_across_checkouts_but_never_relative(monkeypatch):
+    import pytest
+
+    import config.config as cfg
+    monkeypatch.setenv("KNT_STATE_DIR", "relative/state")
+    with pytest.raises(RuntimeError):
+        cfg._state_dir_from_env("KNT_STATE_DIR", cfg.STATE_DIR)
+    from pathlib import Path
+    absolute = str(Path.cwd().resolve() / "shared_state")
+    monkeypatch.setenv("KNT_STATE_DIR", absolute)
+    assert cfg._state_dir_from_env("KNT_STATE_DIR", cfg.STATE_DIR) == Path(absolute)

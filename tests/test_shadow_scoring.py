@@ -286,3 +286,41 @@ def test_day_order_placed_late_does_not_live_into_the_next_session():
     nxt = [PriceBar(datetime(2026, 2, 3, 10 + i), 90, 91, 89, 90, 1) for i in range(3)]   # opens through the limit
     out = score_decision("LONG", 85, 110, nxt, ZERO, limit=100.0, valid_on=date(2026, 2, 2))
     assert (out.filled, out.exit_reason) == (False, "limit_not_filled")
+
+
+def test_first_forward_returns_are_frozen_and_counts_are_blind(tmp_path):
+    db = tmp_path / "s.db"
+    journal_with_decisions(db)
+    scorer = ShadowScorer(db, costs=ZERO)
+    asyncio.run(scorer.score_pending(provider()))
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE shadow_outcomes SET status='PENDING_DATA' WHERE decision_id=2")
+        before = conn.execute("SELECT fwd_5 FROM shadow_outcomes WHERE decision_id=2").fetchone()[0]
+    shifted = {s: [PriceBar(b.time, b.open * 2, b.high * 2, b.low * 2, b.close * 3, 1) for b in bars_]
+               for s, bars_ in provider().data.items()}
+    asyncio.run(scorer.score_pending(InMemoryBarsProvider(shifted)))       # a different provider later
+    with sqlite3.connect(db) as conn:
+        after = conn.execute("SELECT fwd_5 FROM shadow_outcomes WHERE decision_id=2").fetchone()[0]
+    assert after == before                                                 # never rewritten once written
+    counts = scorer.counts()
+    assert "mean" not in str(counts) and "t" not in {k for k in counts}
+
+
+def test_decisions_before_the_forward_segment_are_not_scored_by_default(tmp_path):
+    db = tmp_path / "s.db"
+    journal_with_decisions(db)                                             # decided in 2026-02 (holdout calendar)
+    scorer = ShadowScorer(db, costs=ZERO)
+    counts = asyncio.run(scorer.score_pending(provider(), min_created_at="2026-09-25T00:00:00+00:00"))
+    assert sum(counts.values()) == 0
+
+
+def test_cache_provider_never_reads_another_companys_plain_file(tmp_path):
+    import json
+    from research.shadow_scoring import CacheBarsProvider
+
+    row = [{"time": "2026-10-01T15:00:00+00:00", "open": 1, "high": 1, "low": 1, "close": 1, "volume": 1}]
+    (tmp_path / "ABC_intraday_1y.json").write_text(json.dumps(row), encoding="utf-8")          # old company
+    (tmp_path / "ABC.2_intraday_1y.json").write_text(json.dumps(row), encoding="utf-8")        # new conId 2
+    cache = CacheBarsProvider(tmp_path)
+    assert cache.bars_from("ABC", 2, "2026-10-01T15:00:00+00:00", "1 hour")
+    assert cache.bars_from("ABC", 1, "2026-10-01T15:00:00+00:00", "1 hour") == []              # ambiguous: none

@@ -17,7 +17,7 @@ import asyncio
 from dataclasses import replace
 from pathlib import Path
 
-from config.config import STATE_DIR, BotConfig, config, read_only_ibkr_settings
+from config.config import BOT_STATE_DIR, STATE_DIR, BotConfig, config, read_only_ibkr_settings
 
 
 def research_locked(supervisor, equity: float | None, real_state_dir: Path | None = None) -> str | None:
@@ -82,9 +82,16 @@ def fwd_window_guard(journal_path: Path, cfg: BotConfig, *, end_window: bool = F
     from research.shadow_journal import decision_fingerprint
 
     target = window_file(journal_path)
-    if not target.exists() or end_window:
+    if not target.exists():
         return None
-    record = json.loads(target.read_text(encoding="utf-8"))
+    try:
+        record = json.loads(target.read_text(encoding="utf-8"))
+    except ValueError:
+        return "registration file unreadable (inspect it; never delete a registration)"
+    if not isinstance(record, dict):
+        return "registration file invalid (inspect it; never delete a registration)"
+    if "ended_at_utc" in record or end_window:
+        return None  # the window is over (ending it is recorded by main_async)
     if record.get("decision_fingerprint") != decision_fingerprint():
         return "decision code differs from the registered FWD window (deploy the pinned checkout)"
     if record.get("config_hash") != decision_config_hash(cfg):
@@ -120,11 +127,28 @@ async def main_async(args) -> None:
     from risk.risk_manager import RiskManager
     from utils.logger import logger
 
+    from research.fwd_protocol import end_window, register_window, registration_line, window_file
+
     cfg = shadow_only_config(config)
-    refusal = fwd_window_guard(STATE_DIR / "shadow_only" / "strategy_performance.db", cfg,
-                               end_window=getattr(args, "end_fwd_window", False))
+    journal_path = STATE_DIR / "shadow_only" / "strategy_performance.db"
+    if cfg.risk.max_trade_risk_pct > 0.01:
+        logger.critical("MAX_TRADE_RISK_PCT=%.4f is looser than the 1%% the allocator targets; set 0.01",
+                        cfg.risk.max_trade_risk_pct)
+    refusal = fwd_window_guard(journal_path, cfg, end_window=getattr(args, "end_fwd_window", False))
     if refusal:
         raise SystemExit(f"SHADOW-ONLY refused: {refusal}. Pass --end-fwd-window only to END the window.")
+    if getattr(args, "end_fwd_window", False) and window_file(journal_path).exists():
+        record = end_window(journal_path, "shadow-only restarted with --end-fwd-window")
+        logger.critical("FWD WINDOW ENDED at %s: report its interim state in docs/experiments/LOG.md; "
+                        "a new window needs a new protocol id", record.get("ended_at_utc"))
+    if getattr(args, "register_fwd_window", False):
+        # Registered by THIS process: the fingerprint and config hash are the ones actually running.
+        if cfg.risk.max_trade_risk_pct > 0.01 or cfg.market_data.market_data_type != 1:
+            raise SystemExit("Refusing to register: set MAX_TRADE_RISK_PCT<=0.01 and MARKET_DATA_TYPE=1 first")
+        record = register_window(journal_path, config_hash=decision_config_hash(cfg))
+        print("FWD WINDOW REGISTERED. Commit this exact line to docs/experiments/LOG.md (any branch of this "
+              "repository) within 3 days, or the evaluator refuses the window:")
+        print(registration_line(record))
     cfg.validate()
     connection = IBKRConnection(cfg.ibkr)
     try:
@@ -153,7 +177,7 @@ async def main_async(args) -> None:
             try:
                 await supervisor.evaluate()
                 snapshot = await supervisor.accounts.snapshot(context.account, log=False)
-                reason = research_locked(supervisor, snapshot.net_liquidation, real_state_dir=STATE_DIR)
+                reason = research_locked(supervisor, snapshot.net_liquidation, real_state_dir=BOT_STATE_DIR)
                 if reason:
                     research_risk.lock_trading(reason)
                 else:
@@ -175,6 +199,8 @@ async def main_async(args) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--cycles", type=int, default=0)
+    ap.add_argument("--register-fwd-window", action="store_true",
+                    help="register the FWD-v1 window from this very process (once), then run")
     ap.add_argument("--end-fwd-window", action="store_true",
                     help="start on changed decision code/config, knowingly ENDING the registered FWD window")
     asyncio.run(main_async(ap.parse_args()))

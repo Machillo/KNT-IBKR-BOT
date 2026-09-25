@@ -15,20 +15,22 @@ START = datetime(2026, 10, 1, 14, 0, tzinfo=timezone.utc)
 import pytest
 
 
+COMMITTED: dict = {}
+REAL_COMMITTED_LINES = fwd_protocol.committed_registration_lines   # captured before any patching
+
+
 @pytest.fixture(autouse=True)
-def committed_log(tmp_path, monkeypatch):
-    """A stand-in for docs/experiments/LOG.md into which registrations are 'committed'."""
-    log = tmp_path / "LOG.md"
-    log.write_text("# log" + chr(10), encoding="utf-8")
-    monkeypatch.setattr(fwd_protocol, "LOG_FILE", log)
-    return log
+def committed_log(monkeypatch):
+    """Stand-in for 'git log -S' over docs/experiments/LOG.md: lines 'committed' by the test."""
+    COMMITTED.clear()
+    monkeypatch.setattr(fwd_protocol, "committed_registration_lines", lambda: dict(COMMITTED))
+    return COMMITTED
 
 
 def _register(path, start, record_in_log=True, config_hash="cfg-test"):
     record = fwd_protocol.register_window(path, config_hash=config_hash, start=start)
     if record_in_log:
-        with fwd_protocol.LOG_FILE.open("a", encoding="utf-8") as fh:
-            fh.write(fwd_protocol.registration_line(record) + chr(10))
+        COMMITTED[fwd_protocol.registration_line(record)] = datetime.now(timezone.utc)
     return record
 
 
@@ -37,6 +39,7 @@ def build(path, *, days=45, cycles_per_day=2, selected_effect=0.0, cf_effect=0.0
           registered_config="cfg-test"):
     rng = Random(seed)
     if register:
+        COMMITTED.clear()          # each synthetic journal stands for its own repository history
         _register(path, datetime.now(timezone.utc) - timedelta(minutes=1), record_in_log, registered_config)
     j = ShadowJournal(path)
     ShadowScorer(path)
@@ -131,7 +134,7 @@ def test_unregistered_window_is_never_evaluated(tmp_path):
 
 def test_registration_must_be_committed_to_the_log(tmp_path):
     out = fwd_protocol.evaluate_fwd1(build(tmp_path / "l.db", selected_effect=0.8, record_in_log=False))
-    assert out["decision"] == "INCONCLUSIVE" and "LOG.md" in out["reason"]
+    assert out["decision"] == "INCONCLUSIVE" and "not committed" in out["reason"]
 
 
 def test_config_differing_from_the_registration_invalidates_the_window(tmp_path):
@@ -157,3 +160,82 @@ def test_cutoff_never_lands_after_the_deadline(tmp_path):
     assert out["window"]["minimums_reached"] is False
     assert out["window"]["cutoff_day"] <= fwd_protocol.EVIDENCE_DEADLINE.isoformat()
     assert out["decision"] == "INCONCLUSIVE"
+
+
+
+def test_interim_statistics_are_blinded_until_binding(tmp_path):
+    out = fwd_protocol.evaluate_fwd1(build(tmp_path / "n.db", days=10, selected_effect=0.8))
+    assert out["window"]["binding"] is False
+    assert out["gross_excess"] == "BLINDED" and out["net_excess"] == "BLINDED" and out["critical_t"] == "BLINDED"
+    binding = fwd_protocol.evaluate_fwd1(build(tmp_path / "o.db", selected_effect=0.8))
+    assert binding["window"]["binding"] is True and isinstance(binding["gross_excess"], dict)
+
+
+def test_second_registration_or_protocol_change_or_ending_never_binds(tmp_path, monkeypatch):
+    db = build(tmp_path / "p.db", selected_effect=0.8)
+    assert fwd_protocol.evaluate_fwd1(db)["decision"] == "KEEP"
+    # A second registration line ever committed (e.g. delete + re-register) -> never binds.
+    COMMITTED["FWD-v1 WINDOW REGISTERED: start_utc=later ..."] = datetime.now(timezone.utc)
+    assert "registrations were committed" in fwd_protocol.evaluate_fwd1(db)["reason"]
+    COMMITTED.pop("FWD-v1 WINDOW REGISTERED: start_utc=later ...")
+    # The evaluator/scorer/gates changed since registration -> refused.
+    monkeypatch.setattr(fwd_protocol, "protocol_fingerprint", lambda: "edited")
+    assert "changed since registration" in fwd_protocol.evaluate_fwd1(db)["reason"]
+    monkeypatch.undo()
+    monkeypatch.setattr(fwd_protocol, "committed_registration_lines", lambda: dict(COMMITTED))
+    # Ending the window is recorded, never silent, and never binding.
+    fwd_protocol.end_window(db, "config changed")
+    out = fwd_protocol.evaluate_fwd1(db)
+    assert out["decision"] == "INCONCLUSIVE" and "window ended" in out["reason"]
+
+
+def test_registration_cannot_be_backdated_and_commit_must_be_prompt(tmp_path):
+    with pytest.raises(ValueError):
+        fwd_protocol.register_window(tmp_path / "q.db", config_hash="c",
+                                     start=datetime.now(timezone.utc) - timedelta(days=2))
+    db = tmp_path / "r.db"
+    record = fwd_protocol.register_window(db, config_hash="cfg-test")
+    COMMITTED[fwd_protocol.registration_line(record)] = datetime.now(timezone.utc) + timedelta(days=10)
+    ShadowJournal(db)
+    assert "outside the allowed delay" in fwd_protocol.evaluate_fwd1(db)["reason"]
+
+
+def test_cycles_of_the_registered_code_before_the_start_are_a_pre_registration_look(tmp_path):
+    db = tmp_path / "s.db"
+    j = ShadowJournal(db)
+    j.record_cycle("early", universe=None, scanners=[], rows_per_scanner=25, quote_budget=40,
+                   market_data_type=1, session="REGULAR", market_open=True, run_mode="shadow_only")
+    j.record_cycle_end("early", eligible=0, attempted=0, errors=0, max_candidates=12, run_mode="shadow_only",
+                       learning_mode="frozen", scanner_rows={}, scanner_errors={}, config_hash="cfg-test")
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE discovery_cycles SET created_at=?",
+                     ((datetime.now(timezone.utc) - timedelta(days=3)).isoformat(),))
+    _register(db, datetime.now(timezone.utc))
+    assert "pre-registration look" in fwd_protocol.evaluate_fwd1(db)["reason"]
+
+
+def test_committed_registration_lines_reads_git_history_including_deleted_lines(tmp_path):
+    import subprocess
+
+    from research.fwd_protocol import REGISTRATION_PREFIX
+
+    repo = tmp_path / "repo"
+    (repo / "docs" / "experiments").mkdir(parents=True)
+    log = repo / "docs" / "experiments" / "LOG.md"
+
+    def git(*args):
+        subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True,
+                       env={**__import__("os").environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+                            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"})
+    git("init", "-q")
+    first = f"{REGISTRATION_PREFIX} start_utc=A"
+    log.write_text("# log\n" + first + "\n", encoding="utf-8")
+    git("add", "."); git("commit", "-qm", "register A")
+    log.write_text("# log\n", encoding="utf-8")                     # someone deletes it...
+    git("commit", "-qam", "remove A")
+    second = f"{REGISTRATION_PREFIX} start_utc=B"
+    log.write_text("# log\n" + second + "\n", encoding="utf-8")
+    git("commit", "-qam", "register B")
+    log.write_text("# log\n" + second + "\n" + f"{REGISTRATION_PREFIX} start_utc=UNCOMMITTED\n", encoding="utf-8")
+    lines = REAL_COMMITTED_LINES(repo)
+    assert set(lines) == {first, second}                            # deleted one still counts; uncommitted not

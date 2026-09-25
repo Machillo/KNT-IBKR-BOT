@@ -157,13 +157,7 @@ def evaluate_monthly_target(
     oos_bars = _oos_slice(bars)
     for strategy in strategies:
         for scenario in scenarios:
-            engine = BacktestEngine(
-                initial_equity=initial_equity,
-                risk_pct=scenario.risk_pct,
-                commission_bps=scenario.commission_bps,
-                slippage_bps=scenario.slippage_bps,
-                max_position_pct=scenario.max_position_pct,
-            )
+            engine = scenario.engine(initial_equity)
             full = engine.run(bars, strategy)
             full_monthly = summarize_months(full, target_pct=target_pct)
             oos = engine.run(oos_bars, strategy) if len(oos_bars) >= 2 else engine.run([], strategy)

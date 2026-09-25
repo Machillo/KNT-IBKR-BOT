@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from backtest.costs import BASELINE, STRESSED
 from backtest.validation import (
     ValidationScenario,
     buy_hold_return_pct,
@@ -30,8 +31,8 @@ def test_buy_hold_return_uses_first_and_last_close():
 
 def test_validation_matrix_runs_strategy_across_scenarios():
     scenarios = (
-        ValidationScenario("a", 0.01, 1, 2, 0.25),
-        ValidationScenario("b", 0.005, 3, 5, 0.10),
+        ValidationScenario("a", 0.01, BASELINE, 0.25),
+        ValidationScenario("b", 0.005, STRESSED, 0.10),
     )
     rows = run_validation_matrix(
         symbol="TEST",

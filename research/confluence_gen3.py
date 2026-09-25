@@ -16,7 +16,7 @@ def split_train_validation_test(bars:list[PriceBar])->tuple[list[PriceBar],list[
     return bars[:train_end],bars[train_end:validation_end],bars[validation_end:]
 
 def _run(bars:list[PriceBar],strategy:object):
-    return BacktestEngine(initial_equity=10_000.0,risk_pct=.01,commission_bps=2.0,slippage_bps=2.0,max_position_pct=.10).run(bars,strategy)
+    return BacktestEngine(initial_equity=10_000.0,risk_pct=.01,max_position_pct=.10).run(bars,strategy)
 
 def _selection_score(result)->float:
     monthly=summarize_months(result); pf=result.profit_factor

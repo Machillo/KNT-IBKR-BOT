@@ -38,7 +38,7 @@ def run(*,gen3_csv:str,cache_dir:str,output_dir:str,min_trades:int)->None:
         p=PROFILES[c.profile]; path=_cache_path(cache,c.symbol,p)
         if not path.exists(): print(f"SKIP {c.symbol} {c.profile} cache_missing"); continue
         _,_,test=split_train_validation_test(_load_bars(path)); strategy=_strategy_by_name(c.strategy)
-        result=BacktestEngine(initial_equity=10_000,risk_pct=.01,commission_bps=2,slippage_bps=2,max_position_pct=.10).run(test,strategy); monthly=_monthly_returns(result)
+        result=BacktestEngine(initial_equity=10_000,risk_pct=.01,max_position_pct=.10).run(test,strategy); monthly=_monthly_returns(result)
         if not monthly: continue
         series[f"{c.symbol}:{c.profile}:{c.strategy}"]=monthly; stats=summarize_months(result); audit.append((c,stats.compounded_monthly_pct,result.max_drawdown_pct,result.trades)); print(f"ADMIT {c.symbol:6s} {c.profile:12s} {c.strategy:42s} test/mo={stats.compounded_monthly_pct:6.2f}% DD={result.max_drawdown_pct:5.2f}% trades={result.trades}")
     result=simulate_equal_risk_portfolio(series); out=Path(output_dir); out.mkdir(parents=True,exist_ok=True)

@@ -118,6 +118,11 @@ class OrderManager:
             action.upper(), quantity, entry_price, take_profit_price, stop_price,
             tif="DAY", outsideRth=False,
         )
+        # ib_async passes tif to ALL three legs. The ENTRY is a DAY order, but the protective
+        # children must outlive the session: DAY children would expire at the close and leave a
+        # filled position naked overnight. IBKR cancels the children if the parent expires unfilled.
+        bracket.takeProfit.tif = "GTC"
+        bracket.stopLoss.tif = "GTC"
         if adaptive_parent:
             bracket.parent.algoStrategy = "Adaptive"
             bracket.parent.algoParams = [TagValue("adaptivePriority", "Normal")]

@@ -530,3 +530,22 @@ def test_execution_lock_persists_across_days_until_a_human_clears_it(tmp_path):
     assert store.read() is None
     (tmp_path / "lock.json").write_text("{corrupt", encoding="utf-8")
     assert store.read() is not None                           # unreadable = locked
+
+
+def test_bracket_entry_is_day_but_protective_children_are_gtc(tmp_path):
+    """Regression: DAY children expire at the close and leave a filled position unprotected."""
+    from ib_async import LimitOrder, StopOrder
+
+    class RealBracketIB(FakeIB):
+        def bracketOrder(self, action, quantity, entry, target, stop, **kwargs):
+            reverse = "SELL" if action == "BUY" else "BUY"
+            parent = LimitOrder(action, quantity, entry, orderId=101, transmit=False, **kwargs)
+            tp = LimitOrder(reverse, quantity, target, orderId=102, transmit=False, parentId=101, **kwargs)
+            sl = StopOrder(reverse, quantity, stop, orderId=103, transmit=True, parentId=101, **kwargs)
+            return FakeBracketOrder(parent, tp, sl)
+
+    ib = RealBracketIB()
+    result = run(engine(tmp_path, ib, enabled=True).submit(stock(), request()))
+    assert result.submitted
+    tifs = [order.tif for _, order, _ in ib.submitted]
+    assert tifs == ["DAY", "GTC", "GTC"]

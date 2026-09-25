@@ -19,6 +19,7 @@ from __future__ import annotations
 from config.config import state_path
 
 from dataclasses import dataclass
+from functools import lru_cache
 from datetime import datetime, timezone
 from pathlib import Path
 import json
@@ -35,8 +36,35 @@ _DECISION_EXTRA_COLUMNS = (
     ("atr", "REAL"), ("adx", "REAL"), ("volatility_stress", "REAL"),
     ("liquidity_score", "REAL"), ("selector_threshold", "REAL"), ("decision_version", "TEXT"),
     ("reference_close", "REAL"), ("duplicate_of", "INTEGER"),
+    # v2: reproducibility + execution-model context (see docs/SHADOW_EVIDENCE.md).
+    ("run_mode", "TEXT"), ("learning_mode", "TEXT"), ("selector_bonus", "REAL"),
+    ("bar_count", "INTEGER"), ("first_bar_time", "TEXT"), ("session_open", "INTEGER"),
+    ("sector", "TEXT"), ("correlation", "REAL"), ("quantity", "REAL"), ("notional", "REAL"),
+    ("risk_amount", "REAL"), ("volatility_multiplier", "REAL"), ("reference_price", "REAL"),
+    ("reference_data_type", "INTEGER"), ("conflict_with", "INTEGER"),
 )
-DECISION_VERSION = "selector_v1+decision_pipeline_v1"
+_CYCLE_EXTRA_COLUMNS = (
+    ("cycle_end", "TEXT"), ("eligible_count", "INTEGER"), ("candidates_attempted", "INTEGER"),
+    ("candidate_errors", "INTEGER"), ("max_candidates", "INTEGER"), ("run_mode", "TEXT"),
+    ("learning_mode", "TEXT"), ("code_version", "TEXT"), ("decision_version", "TEXT"),
+)
+# v2: frozen-learning shadow-only, pretrade execution model (SHADOW_SUBMIT/SHADOW_BLOCKED),
+# duplicates keyed by conId + run mode, conflicting re-decisions flagged.
+DECISION_VERSION = "selector_v1+decision_pipeline_v2"
+
+
+@lru_cache(maxsize=1)
+def code_version() -> str | None:
+    """Git commit of the running code (read-only; None when unavailable)."""
+    import subprocess
+
+    try:
+        out = subprocess.run(["git", "rev-parse", "--short=12", "HEAD"], cwd=Path(__file__).resolve().parents[1],
+                             capture_output=True, text=True, timeout=5, check=False)
+    except Exception:
+        return None
+    sha = (out.stdout or "").strip()
+    return sha or None
 
 
 class ShadowJournal:
@@ -126,6 +154,10 @@ class ShadowJournal:
             for name, ddl in _DECISION_EXTRA_COLUMNS:
                 if name not in existing:
                     conn.execute("ALTER TABLE shadow_decisions ADD COLUMN " + name + " " + ddl)
+            existing = {row[1] for row in conn.execute("PRAGMA table_info(discovery_cycles)")}
+            for name, ddl in _CYCLE_EXTRA_COLUMNS:
+                if name not in existing:
+                    conn.execute("ALTER TABLE discovery_cycles ADD COLUMN " + name + " " + ddl)
 
     @staticmethod
     def new_cycle_id() -> str:
@@ -160,6 +192,18 @@ class ShadowJournal:
                  None if market_open is None else int(bool(market_open))),
             )
 
+    def record_cycle_end(self, cycle_id: str, *, eligible: int, attempted: int, errors: int,
+                         max_candidates: int, run_mode: str, learning_mode: str) -> None:
+        """Completion marker: a cycle without ``cycle_end`` is INCOMPLETE for research."""
+        with sqlite3.connect(self.path) as conn:
+            conn.execute(
+                """UPDATE discovery_cycles SET cycle_end=?, eligible_count=?, candidates_attempted=?,
+                   candidate_errors=?, max_candidates=?, run_mode=?, learning_mode=?, code_version=?,
+                   decision_version=? WHERE cycle_id=?""",
+                (datetime.now(timezone.utc).isoformat(), int(eligible), int(attempted), int(errors),
+                 int(max_candidates), run_mode, learning_mode, code_version(), DECISION_VERSION, cycle_id),
+            )
+
     def record_funnel(self, cycle_id: str, funnel) -> int:
         now = datetime.now(timezone.utc).isoformat()
         rows = [
@@ -191,30 +235,41 @@ class ShadowJournal:
         top = top or {}
         context = context or {}
         bar_text = None if bar_time is None else str(bar_time)
+        run_mode = context.get("run_mode")
+        con_id = int(con_id or 0)
         with sqlite3.connect(self.path) as conn:
             # Shadow cycles run more often than bars complete: the first decision on a
-            # completed bar is canonical, later ones are kept for audit but flagged.
+            # completed bar is canonical, later ones are kept for audit but flagged. Keyed by
+            # conId (symbol only when unknown) and run mode: two processes never dedupe each other.
             first = None if bar_text is None else conn.execute(
-                """SELECT id FROM shadow_decisions WHERE symbol=? AND bar_time=? AND timeframe=?
-                   AND decision_version=? AND duplicate_of IS NULL ORDER BY id LIMIT 1""",
-                (symbol, bar_text, timeframe, DECISION_VERSION),
+                """SELECT id, strategy, side FROM shadow_decisions
+                   WHERE (CASE WHEN ? > 0 THEN con_id=? ELSE symbol=? END) AND bar_time=? AND timeframe=?
+                   AND decision_version=? AND COALESCE(run_mode,'')=COALESCE(?,'') AND duplicate_of IS NULL
+                   ORDER BY id LIMIT 1""",
+                (con_id, con_id, symbol, bar_text, timeframe, DECISION_VERSION, run_mode),
             ).fetchone()
-            cur = conn.execute(
-                """INSERT INTO shadow_decisions (cycle_id, created_at, symbol, con_id, bar_time, timeframe,
-                   regime, action, strategy, side, score, entry, stop, target, reason,
-                   top_strategy, top_side, top_score, top_entry, top_stop, top_target,
-                   atr, adx, volatility_stress, liquidity_score, selector_threshold, decision_version,
-                   reference_close, duplicate_of)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (cycle_id, (created_at or datetime.now(timezone.utc)).isoformat(), symbol, int(con_id or 0),
-                 bar_text, timeframe, regime, action, strategy, side,
-                 score, entry, stop, target, reason,
-                 top.get("strategy"), top.get("side"), top.get("score"), top.get("entry"),
-                 top.get("stop"), top.get("target"),
-                 context.get("atr"), context.get("adx"), context.get("volatility_stress"),
-                 context.get("liquidity_score"), context.get("selector_threshold"), DECISION_VERSION,
-                 context.get("reference_close"), None if first is None else int(first[0])),
-            )
+            # Same bar, same code, different selector output = non-determinism: flag it.
+            conflict = None if first is None or (first[1], first[2]) == (strategy, side) else int(first[0])
+            session_open = context.get("session_open")
+            columns = {
+                "cycle_id": cycle_id, "created_at": (created_at or datetime.now(timezone.utc)).isoformat(),
+                "symbol": symbol, "con_id": con_id, "bar_time": bar_text, "timeframe": timeframe,
+                "regime": regime, "action": action, "strategy": strategy, "side": side, "score": score,
+                "entry": entry, "stop": stop, "target": target, "reason": reason,
+                "top_strategy": top.get("strategy"), "top_side": top.get("side"), "top_score": top.get("score"),
+                "top_entry": top.get("entry"), "top_stop": top.get("stop"), "top_target": top.get("target"),
+                "decision_version": DECISION_VERSION,
+                "duplicate_of": None if first is None else int(first[0]), "conflict_with": conflict,
+                "session_open": None if session_open is None else int(bool(session_open)),
+            }
+            for key in ("atr", "adx", "volatility_stress", "liquidity_score", "selector_threshold",
+                        "reference_close", "run_mode", "learning_mode", "selector_bonus", "bar_count",
+                        "first_bar_time", "sector", "correlation", "quantity", "notional", "risk_amount",
+                        "volatility_multiplier", "reference_price", "reference_data_type"):
+                columns[key] = context.get(key)
+            names = ", ".join(columns)
+            marks = ", ".join("?" for _ in columns)
+            cur = conn.execute(f"INSERT INTO shadow_decisions ({names}) VALUES ({marks})", tuple(columns.values()))
             return int(cur.lastrowid)
 
 

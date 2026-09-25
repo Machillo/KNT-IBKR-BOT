@@ -5,6 +5,9 @@
 * Kill switch forced to DRY-RUN for this process regardless of ``.env``.
 * Uses the real supervisor (account/risk state), discovery, DecisionPipeline and portfolio
   admission, and journals every cycle: discovery funnel + every decision (incl. NO_TRADE).
+* Selector learning is FROZEN (no evidence bonus/AVOID, no research scheduler) and approved
+  setups go through the executor's pure pre-trade + hard-risk checks with a fresh read-only
+  quote: journaled as SHADOW_SUBMIT or SHADOW_BLOCKED:<reason> (nothing is ever sent).
 * ``--cycles N`` stops after N cycles (0 = until Ctrl+C). Score later with run_score_shadow.py.
 """
 from __future__ import annotations
@@ -112,6 +115,9 @@ async def main_async(args) -> None:
             quote_budget=cfg.runtime.universe_quote_budget, risk_manager=research_risk,
             paper_executor=None, session_policy=BrokerCalendarSessionPolicy(),
             state_dir=STATE_DIR / "shadow_only",
+            # Forward evidence: frozen selector (no learning drift inside the window) and the
+            # order-free execution model (pretrade + hard risk + daily cap + virtual book).
+            learning_enabled=False, research_execution=True, run_mode="shadow_only",
         )
         states = PortfolioStateService(ib)
         logger.info("SHADOW-ONLY running | account=%s readonly=True executor=None", mask_account(account.account))

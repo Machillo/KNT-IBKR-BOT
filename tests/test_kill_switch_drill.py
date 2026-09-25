@@ -198,3 +198,40 @@ def test_kill_switch_skips_fractional_stock_positions():
     ib = GtcIB([("AAA", 11, 0.5, "STK")])
     result = _armed(ib)
     assert ib.placed == [] and result.flat_confirmed is False
+
+
+def test_kill_switch_fails_closed_when_the_every_client_view_is_unavailable():
+    ib = GtcIB([("AAA", 11, 1, "STK")])
+
+    async def broken():
+        raise TimeoutError("no answer")
+    ib.reqAllOpenOrdersAsync = broken
+    result = _armed(ib)
+    assert ib.placed == [] and result.flat_confirmed is False
+
+
+def test_kill_switch_never_cancels_another_clients_order_ids():
+    # ib_async may cache other clients' orders after reqAllOpenOrders; their orderIds live in
+    # another namespace, so cancelling one could hit OUR order with the same number.
+    ib = GtcIB([("AAA", 11, 1, "STK")], own=(11,))
+    ib.client = SimpleNamespace(port=7497, clientId=901)
+    foreign = GtcIB._order(11)
+    foreign.order.clientId = 7
+    ib._trades[0].order.clientId = 901
+    ib._trades.append(foreign)
+    _armed(ib)
+    assert all(getattr(o, "clientId", 901) == 901 for o in ib.cancelled)
+
+
+def test_kill_switch_may_retry_while_the_account_is_not_flat():
+    import asyncio as aio
+    from config.config import RiskConfig
+    from core.paper_guard import build_paper_guard
+    from risk.kill_switch import KillSwitch
+
+    ib = GtcIB([("AAA", 11, 1, "STK")], other=(11,))
+    ks = KillSwitch(ib, RiskConfig(kill_switch_enabled=True, kill_switch_dry_run=False), ACCOUNT,
+                    guard=build_paper_guard(ib, SETTINGS))
+    assert aio.run(ks.execute("daily loss")).flat_confirmed is False
+    ib.other_clients = []                                   # the human cancelled the foreign stop
+    assert aio.run(ks.execute("daily loss")).flat_confirmed is True and len(ib.placed) == 1

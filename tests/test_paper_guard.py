@@ -43,6 +43,9 @@ class FakeIB:
     def openTrades(self):
         return list(self._trades)
 
+    async def reqAllOpenOrdersAsync(self):
+        return [t for t in self._trades if not t.isDone()]
+
     def positions(self):
         return list(self._positions)
 

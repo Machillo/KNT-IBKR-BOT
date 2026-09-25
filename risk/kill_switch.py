@@ -44,7 +44,17 @@ class KillSwitch:
         self.state = BrokerStateService(ib)
         self._last_result: KillSwitchResult | None = None
 
+    def _own_client_id(self) -> int | None:
+        client = getattr(self.ib, "client", None)
+        value = getattr(client, "clientId", None)
+        return value if isinstance(value, int) else None
+
     def _account_open_trades(self):
+        """Working orders of the account that THIS client may cancel. Orders of other clients
+        (which ib_async may cache after a reqAllOpenOrders) are excluded: cancelOrder uses the
+        orderId, which is namespaced per clientId, so cancelling a foreign order could hit one of
+        our own orders with the same number."""
+        own = self._own_client_id()
         result = []
         for trade in list(self.ib.openTrades()):
             if trade.isDone():
@@ -52,21 +62,22 @@ class KillSwitch:
             order_account = (getattr(trade.order, "account", "") or "").strip()
             if order_account and order_account != self.account:
                 continue
+            order_client = getattr(trade.order, "clientId", None)
+            if own is not None and isinstance(order_client, int) and order_client != own:
+                continue
             result.append(trade)
         return result
 
     async def _all_open_trades(self):
-        """Working orders of the account from EVERY client (read-only request); falls back to this
-        client's own orders when the broker call is unavailable."""
+        """Working orders of the account from EVERY client (read-only request, used only as a
+        VETO). Returns None when the broker cannot answer: unknown is never treated as none."""
         request = getattr(self.ib, "reqAllOpenOrdersAsync", None)
-        trades = None
-        if request is not None:
-            try:
-                trades = await asyncio.wait_for(request(), timeout=5)
-            except Exception:
-                trades = None
-        if trades is None:
-            return self._account_open_trades()
+        if request is None:
+            return None
+        try:
+            trades = await asyncio.wait_for(request(), timeout=5)
+        except Exception:
+            return None
         result = []
         for trade in list(trades or []):
             if trade.isDone():
@@ -97,9 +108,11 @@ class KillSwitch:
 
     async def execute(self, reason: str, *, dry_run: bool | None = None) -> KillSwitchResult:
         dry_run = self.settings.kill_switch_dry_run if dry_run is None else dry_run
-        if self.triggered and self._last_result is not None:
+        if self.triggered and self._last_result is not None and (
+                self._last_result.flat_confirmed or self._last_result.dry_run):
             logger.critical("KILL SWITCH already triggered | duplicate execution suppressed")
             return self._last_result
+        # An armed run that did not confirm flat may run again (e.g. a cancel confirmed late).
         self.triggered = True
         self.reason = reason
 
@@ -164,14 +177,19 @@ class KillSwitch:
 
         cancel_deadline = asyncio.get_running_loop().time() + 10
         while self._account_open_trades() and asyncio.get_running_loop().time() < cancel_deadline:
-            if all(con_id(t) in manual_con_ids for t in self._account_open_trades() if con_id(t)):
+            # Only orders KNOWN to belong to positions left to a human may remain (conId 0 = unknown).
+            if all(con_id(t) and con_id(t) in manual_con_ids for t in self._account_open_trades()):
                 break
             await asyncio.sleep(0.25)
 
         # Every client's working orders (this clientId cannot see or cancel another client's
         # GTC stop). A live order on a position means a market flatten could later be followed
         # by that order firing and REVERSING the position: leave it to a human.
-        still_working = {con_id(t) for t in await self._all_open_trades()}
+        all_orders = await self._all_open_trades()
+        if all_orders is None:
+            logger.critical("KILL SWITCH | every-client order view unavailable: no flatten (a foreign GTC "
+                            "order could reverse it) | manual intervention required")
+        still_working = None if all_orders is None else {con_id(t) for t in all_orders}
 
         flattenable_ids = {con_id(p) for p in flattenable}
         liquidation_trades = []
@@ -183,7 +201,9 @@ class KillSwitch:
                 logger.critical("KILL SWITCH FLATTEN skipped | position exceeds liquidation limit | "
                                 "manual intervention required")
                 continue
-            if con_id(position) in still_working:
+            # Unknown view, an order with an unknown contract (conId 0), or a live order on this
+            # position: never flatten (fail closed).
+            if still_working is None or 0 in still_working or con_id(position) in still_working:
                 logger.critical("KILL SWITCH FLATTEN skipped | a working order on this position is still live "
                                 "(other client or unconfirmed cancel) | manual intervention required")
                 continue
@@ -215,7 +235,7 @@ class KillSwitch:
         # Flat means no position AND no working order from ANY client (a leftover GTC child could
         # reopen a position later).
         leftover_orders = await self._all_open_trades()
-        flat = bool(final_state.is_flat) and not leftover_orders
+        flat = bool(final_state.is_flat) and leftover_orders is not None and not leftover_orders
         if not flat:
             logger.critical("KILL SWITCH INCOMPLETE | manual intervention required")
         else:

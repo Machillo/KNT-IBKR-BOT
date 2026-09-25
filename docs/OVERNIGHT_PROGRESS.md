@@ -1,47 +1,39 @@
-# Overnight progress — checkpoint (end of session 1)
+# Overnight progress — checkpoint (session 2)
 
-Branch `claude/overnight-hardening` (pushed; draft PR, base `feature/paper-alpha`), created from
-`feature/paper-alpha` @ 0b9e191 (the real project; `main` is only an initial commit; PR #1
-unmerged). Never merged. No IBKR connection and no orders during the session; local `.env` set
-`AUTONOMOUS_TRADING_ENABLED=false`.
+Branch `claude/overnight-hardening` (pushed; draft PR #2, base `feature/paper-alpha`), created from
+`feature/paper-alpha` @ 0b9e191. Never merged. No orders, no IBKR connection this session;
+local `.env` keeps `AUTONOMOUS_TRADING_ENABLED=false`.
 
-## Baseline → now
-Tests 124 → 275 passing. Mutation checks: removing the paper-guard call, the gap-stop fix or the
-OOS-only evidence filter each makes tests fail (3/2/1 failures).
+## Session 1 (see git log up to 868f7d9)
+Paper guard, executor gates, backtester v2, leak-free validation, pipeline replay, protocol v1,
+H1–H9 all REJECT, null model, shadow journal v1. Tests 124 → 275.
 
-## Blocks done
-| Block | Commits |
+## Session 2 — blocks
+| block | key commits |
 |---|---|
-| .gitignore (state/, reports/, logs, *.db, .env*) + hygiene tests | a378276 |
-| Paper guard (DU/DF on every managed account + real socket port + config, per order), executor gates (broker equity risk re-check, live two-sided quote, no shorts, whole shares, daily cap, conId duplicates, INTENT journal, unwind→lock), ACK for autonomous loop, completed bars, masked/redacted account ids | 0fa8b3e, 0ee0d9b |
-| Broker-calendar session policy (holidays/half days, 5/15-min buffers, fail closed) | bfd47a4 |
-| Static order-path guards; README/.env.example | 616c67f, fc9f521 |
-| CLAUDE.md, 4 agents, 5 skills | 0b3072e, 4a199fe |
-| Backtester v2: gap stops, IBKR fixed commissions, spread/slippage, sell fee, borrow, integer qty, daily Sharpe, full-cost MTM, trade_start | d356f0a, 15288fb |
-| Validation: warm windows, OOS-only engine-v2 evidence, regime at signal time, monthly-target holdout, Gen2/Gen3/Gen4 leakage fixes | 04c76b8, 15288fb |
-| Full-sample context promotions removed from operational selector | 96329f4 |
-| Pipeline (selector) backtest, calendar protocol v1, experiments H1–H9, null model | 2521a8f, d4ef686, 4ce5014, 94e45d8 |
-| Shadow journal: point-in-time discovery + every decision + scorer | 6e5fa61 |
-| Release-gate fixes: journal non-fatal, paper run plan | (latest) |
+| Point-in-time discovery funnel (every scanner row, status, reason, sources) + cycle metadata + decision context | 1bf7796 |
+| Idempotent shadow scorer (TRADE + NO_TRADE counterfactual, MAE/MFE, fwd 1/5/20, dedup, alignment, LIMIT/DAY) | 76076d2, d2a8d6e, fe8a7ad |
+| Shared `DecisionPipeline` (runtime = replay); replay v3 with real allocator/admission, LIMIT/DAY entries, caps, score-ordered cycles | a4204e5, 955edc2 |
+| Point-in-time universe providers (journal, CSV with delistings) + replay wiring + journal bar fetcher | a4204e5, 9198f35, 3fc0004 |
+| Risk: sticky multi-day drawdown lock; sector concentration with fail-closed metadata; working orders count for correlation; in-cycle exposure update | 8ae6711, e8e415f, 955edc2, (latest) |
+| Kill-switch paper drill runner + runbook (NOT run) | f5eb166 |
+| Order-incapable shadow-only runner for forward evidence | 083ecbe |
+| Cohort-neutral event study + round 3 families F1–F6 (all REJECT) + stop condition + forward hypotheses | 9f3c4a3 … 5b6d511, fd395ff |
+| `market-discovery` skill; docs POINT_IN_TIME_DATA, REPLAY_PARITY, KILL_SWITCH_DRILL | 59ddd2b, 9198f35 |
 
-Independent reviews: execution-safety (0 blockers; should-fix fixed), quant-methodology
-(1 blocker — Gen2 ranked on holdout — fixed; should-fix fixed), release-gate (git/tests PASS).
+Reviews this session: execution-safety ×2 (0 blockers; should-fix fixed), quant-methodology ×2
+(3 + 2 blockers, all fixed), trading-architect (13 documented divergences; 2 runtime fixes).
 
-## Quant result (protocol v1, details in docs/experiments/LOG.md)
-9 pre-registered variants + baseline on VALIDATION; all REJECT. Live selector ≈ zero expectancy
-after costs (PF 0.89–1.06). Null model: selector beats random entries on 4h (~1.8 sd, weak) but
-is worse than random longs on daily. HOLDOUT (≥ 2025-03-01) unused. No edge. Data (38-name
-hindsight cohort, no delisted names) is the main blocker.
-
-## Readiness
-BACKTEST: engine ready, data not. VALIDATED CANDIDATE: none. SHADOW: partial (journal yes,
-scoring runner no). PAPER: ready only for a supervised 1-share plumbing test
-(docs/PAPER_RUN_PLAN.md). LIVE: NOT READY.
+## Research status
+- Tests on protocol-v1 VALIDATION: **15** (H1–H9, F1–F6) → stop searching this dataset.
+- HOLDOUT (≥ 2025-03-01): unused.
+- No KEEP. Most informative: F6 — selector-logic LONG picks on daily/4h bars underperform the
+  cohort after costs in VALIDATION; F1 momentum is a survivorship artefact of the cohort.
+- Forward-only hypotheses FWD1–FWD3 pre-registered for shadow data recorded from now on.
 
 ## Next actions
-1. Human: review draft PR; run docs/PAPER_RUN_PLAN.md (needs MARKET_DATA_TYPE=1 + live data).
-2. Code: runner that scores journaled shadow decisions against later bars (read-only history).
-3. Research: point-in-time universe (accumulate shadow discovery snapshots; or external
-   survivorship-free data) before any new strategy round; start protocol v2 on new data.
-4. Open issues: sector exposure unmodelled; kill-switch armed flow never paper-tested; no
-   multi-day drawdown lock; shortability not modelled (shorts disabled).
+1. Human: review PR #2; start `run_shadow_only.py` during market hours (read-only; no orders)
+   to begin forward evidence; weekly `run_score_shadow.py` and `run_fetch_journal_bars.py`.
+2. Human: first supervised paper plumbing test (`docs/PAPER_RUN_PLAN.md`, MARKET_DATA_TYPE=1)
+   and kill-switch drill (`docs/KILL_SWITCH_DRILL.md`).
+3. Decide on an external survivorship-free dataset (`docs/POINT_IN_TIME_DATA.md`).

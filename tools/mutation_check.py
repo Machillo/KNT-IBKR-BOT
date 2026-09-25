@@ -92,7 +92,7 @@ MUTATIONS = [
      "tests/test_kill_switch_drill.py::test_kill_switch_keeps_the_protection_of_positions_it_leaves_to_a_human"),
     ("daily-loss baseline rolls per day", "engine/supervisor.py",
      "        self._roll_trading_day(account.net_liquidation)", "        pass",
-     "tests/test_guard_interactions.py::test_long_running_supervisor_measures_daily_loss_from_each_new_day"),
+     "tests/test_guard_interactions.py::test_evaluate_itself_rolls_the_baseline_when_the_date_changes"),
     ("instrument-type universe", "engine/shadow.py",
      "                if stock_type not in TRADABLE_STOCK_TYPES:", "                if False:",
      "tests/test_opportunity.py::test_stock_type_is_journaled_and_non_common_instruments_are_excluded_before_deciding"),

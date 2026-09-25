@@ -92,7 +92,7 @@ def test_evaluate_itself_rolls_the_baseline_when_the_date_changes(isolated_state
 
     sup, ib = _supervisor(isolated_state_dir, net_liq=100_000)
     _record_kill(sup)
-    sup.context = replace(sup.context, trading_date="2000-01-03")      # the process started "yesterday"
-    ib.net_liq = 104_000
+    # The process "started yesterday" with a stale baseline of 50k; today's persisted baseline is 100k.
+    sup.context = replace(sup.context, trading_date="2000-01-03", starting_equity=50_000)
     asyncio.run(sup.evaluate())
-    assert sup.context.trading_date != "2000-01-03" and sup.context.starting_equity == 104_000
+    assert sup.context.trading_date != "2000-01-03" and sup.context.starting_equity == 100_000

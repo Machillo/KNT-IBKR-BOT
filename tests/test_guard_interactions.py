@@ -84,3 +84,15 @@ def test_a_new_day_never_unlocks_an_existing_lock(isolated_state_dir):
     sup.context.risk.lock_trading("multi-day drawdown lock")
     sup._roll_trading_day(100_000, now=datetime.now(ZoneInfo("America/New_York")) + timedelta(days=1))
     assert sup.context.risk.trading_locked and "drawdown" in sup.context.risk.lock_reason
+
+
+def test_evaluate_itself_rolls_the_baseline_when_the_date_changes(isolated_state_dir):
+    import asyncio
+    from dataclasses import replace
+
+    sup, ib = _supervisor(isolated_state_dir, net_liq=100_000)
+    _record_kill(sup)
+    sup.context = replace(sup.context, trading_date="2000-01-03")      # the process started "yesterday"
+    ib.net_liq = 104_000
+    asyncio.run(sup.evaluate())
+    assert sup.context.trading_date != "2000-01-03" and sup.context.starting_equity == 104_000

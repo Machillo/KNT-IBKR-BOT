@@ -63,3 +63,39 @@ asymmetric exits are among the most persistent documented equity effects; curren
 | H9 | Letting winners run beats capped targets | bracket recomputed at signal: stop 2 × ATR(14), target 6 × ATR(14) |
 
 Same decision rule as round 1.
+
+## Round 2 results
+
+| variant | 4h TRAIN ret / Sharpe / PF | 4h VAL ret / Sharpe / PF | 1d TRAIN ret / Sharpe / PF | 1d VAL ret / Sharpe / PF | decision |
+|---|---|---|---|---|---|
+| H0 live_default | −14.5 % / −0.43 / 0.89 | +1.6 % / 0.15 / 1.02 | +15.7 % / 0.23 / 1.05 | −0.9 % / −0.00 / 0.98 | baseline |
+| H7 symbol SMA200 | −5.7 % / −0.15 / 0.95 | −1.5 % / −0.02 / 0.99 | +13.4 % / 0.22 / 1.06 | +7.0 % / 0.46 / 1.11 | REJECT (4h val) |
+| H8 SPY SMA200 | −13.1 % / −0.64 / 0.83 | +11.7 % / 0.73 / 1.12 | +17.1 % / 0.27 / 1.08 | −1.9 % / −0.06 / 0.96 | REJECT (1d val) |
+| H9 ATR 2/6 bracket | −5.6 % / −0.12 / 0.94 | +2.4 % / 0.18 / 1.03 | +27.3 % / 0.35 / 1.16 | −4.3 % / −0.23 / 0.91 | REJECT |
+
+Pattern across 9 variants: each "improvement" helps one profile and hurts the other — the
+signature of noise, not edge. Continuing to mine the same VALIDATION set would mostly produce
+false discoveries, so the variant loop stops here for protocol v1 (see null-model diagnostic).
+
+## Null-model diagnostic (DEVELOPMENT = TRAIN+VALIDATION, not a selection step)
+
+`run_null_benchmark.py`: random long entries (p = 0.1 per bar, same 1.5/2.5 ATR bracket, same
+sizing, caps, regime pause and baseline costs), 6 seeds, versus `live_default`.
+
+| profile | live_default ret / Sharpe / PF | null mean ret (sd) / mean PF | nulls ≥ live |
+|---|---|---|---|
+| 4h (2021-09 → 2025-03) | +4.9 % / 0.17 / 1.02 | −9.6 % (7.9) / 0.96 | 0 / 6 |
+| 1d (2016-09 → 2025-03) | +23.4 % / 0.26 / 1.06 | +35.9 % (14.0) / 1.09 | 4 / 6 |
+
+Reading: on 4h the selector is ~1.8 sd above random (weak, 6 seeds); on daily it is WORSE than
+random long entries, which profit from the cohort's hindsight-selected bull run. Neither is a
+robust edge. The long-only daily "returns" are largely beta + survivorship, not skill.
+
+## Status after protocol v1
+- Candidates frozen: none. HOLDOUT (≥ 2025-03-01, incl. all of intraday_1y): **unused**.
+- Variants evaluated on VALIDATION: 9 (+ baseline). Any future candidate must be reported with
+  that count.
+- Main blocker to honest equity research is data, not strategies: the cache is a 38-name,
+  hindsight-selected cohort with no delisted names and no point-in-time universe. Long-biased
+  results on it are not interpretable as edge. Next research cycle should start with a
+  point-in-time universe (or scanner-snapshot history recorded going forward by shadow mode).

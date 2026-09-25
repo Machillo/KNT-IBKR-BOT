@@ -21,14 +21,20 @@ H1–H9 all REJECT, null model, shadow journal v1. Tests 124 → 275.
 | Cohort-neutral event study + round 3 families F1–F6 (all REJECT) + stop condition + forward hypotheses | 9f3c4a3 … 5b6d511, fd395ff |
 | `market-discovery` skill; docs POINT_IN_TIME_DATA, REPLAY_PARITY, KILL_SWITCH_DRILL | 59ddd2b, 9198f35 |
 
-Reviews this session: execution-safety ×2 (0 blockers; should-fix fixed), quant-methodology ×2
+| Safety review round 3: drawdown failures never block the kill switch, repo-anchored state, readonly sessions refused by the guard, drill limits, ACKs refused from .env, shadow-only isolated state, test isolation of state/ | 961b3d8, eb92db5, 61270a4 |
+| Diagnostic: baseline + null model under replay v3 | 45b3476 |
+
+Reviews this session: execution-safety ×3 (0 blockers; all should-fix fixed), quant-methodology ×2
 (3 + 2 blockers, all fixed), trading-architect (13 documented divergences; 2 runtime fixes).
+Tests: 275 → 351 passing; conftest fails the run if the real state/ directory changes.
 
 ## Research status
 - Tests on protocol-v1 VALIDATION: **15** (H1–H9, F1–F6) → stop searching this dataset.
 - HOLDOUT (≥ 2025-03-01): unused.
 - No KEEP. Most informative: F6 — selector-logic LONG picks on daily/4h bars underperform the
-  cohort after costs in VALIDATION; F1 momentum is a survivorship artefact of the cohort.
+  cohort after costs in VALIDATION (|t| ≈ 3.4–3.6); F1 momentum is a survivorship artefact.
+- Replay v3 (executor-faithful entries) makes absolute results positive, but random entries under
+  the same mechanics match it: execution mechanics in a rising cohort, not selection.
 - Forward-only hypotheses FWD1–FWD3 pre-registered for shadow data recorded from now on.
 
 ## Next actions

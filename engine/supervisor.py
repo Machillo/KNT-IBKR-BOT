@@ -140,19 +140,28 @@ class PaperSupervisor:
         if not result.action_required:
             return None
 
-        reason = self.context.risk.lock_reason or "daily loss limit reached"
+        # The persisted reason is the daily-loss breach itself, never an earlier unrelated lock.
+        reason = (
+            f"Daily loss limit reached: {result.state.loss_pct * 100:.2f}% "
+            f">= {self.context.risk.settings.max_daily_loss_pct * 100:.2f}%"
+        )
         if not self._kill_persisted:
-            self.store.mark_triggered(
-                account=self.context.account,
-                trading_date=self.context.trading_date,
-                reason=reason,
-            )
-            self._kill_persisted = True
-            logger.critical(
-                "SUPERVISOR STICKY KILL persisted | account=%s date=%s",
-                mask_account(self.context.account),
-                self.context.trading_date,
-            )
+            try:
+                self.store.mark_triggered(
+                    account=self.context.account,
+                    trading_date=self.context.trading_date,
+                    reason=reason,
+                )
+                self._kill_persisted = True
+                logger.critical(
+                    "SUPERVISOR STICKY KILL persisted | account=%s date=%s",
+                    mask_account(self.context.account),
+                    self.context.trading_date,
+                )
+            except Exception as exc:
+                # A state-file failure (OneDrive lock, full disk) must never stop the kill switch.
+                # Entries are already locked by the daily guard; retried on the next poll.
+                logger.critical("SUPERVISOR STICKY KILL NOT PERSISTED | kill switch still runs | %s", exc)
         return await self.kill_switch.execute(reason)
 
     def _check_drawdown(self, risk: RiskManager, equity: float) -> None:

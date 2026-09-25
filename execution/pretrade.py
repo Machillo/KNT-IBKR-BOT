@@ -17,6 +17,8 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from decimal import ROUND_HALF_UP, Decimal
 
+from core.exceptions import RiskRejectedError
+
 FRESH_MARKET_DATA_TYPES = frozenset({1})
 BLOCKED_REASONS = frozenset({"market_session_closed", "risk_manager_locked", "daily_entry_limit_reached"})
 
@@ -105,3 +107,22 @@ def evaluate(request: PreTradeRequest, ctx: PreTradeContext) -> PreTradeResult:
     if abs(normalized.entry_price - ref) / ref > ctx.max_reference_deviation_pct:
         return _result("entry_far_from_fresh_reference", normalized)
     return _result(None, normalized, reference_checked=True)
+
+
+def hard_risk_refusal(risk_manager, *, equity: float, entry_price: float, stop_price: float,
+                      quantity: float) -> str | None:
+    """Hard per-trade risk re-check on the NORMALIZED (tick-rounded) prices, or None if approved.
+
+    The caller chooses the equity (the executor uses min(caller, broker NetLiquidation)).
+    """
+    evaluate = getattr(risk_manager, "evaluate_trade", None)
+    if risk_manager is None or evaluate is None:
+        return "risk_manager_required"
+    try:
+        decision = evaluate(equity=float(equity), entry_price=float(entry_price),
+                            stop_price=float(stop_price), quantity=float(quantity))
+    except RiskRejectedError:
+        return "hard_risk:invalid_inputs"
+    if not getattr(decision, "approved", False):
+        return f"hard_risk:{getattr(decision, 'reason', 'rejected')}"
+    return None

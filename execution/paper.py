@@ -10,7 +10,6 @@ from os import getenv
 from pathlib import Path
 import sqlite3
 
-from core.exceptions import RiskRejectedError
 from core.order_manager import OrderManager
 from core.paper_guard import PaperGuardError, PaperOrderGuard
 from execution import pretrade
@@ -272,27 +271,14 @@ class PaperExecutionEngine:
         return min(candidates) if candidates else None
 
     def _hard_risk_refusal(self, request: PaperExecutionRequest) -> str | None:
-        if self.risk_manager is None:
-            return "risk_manager_required"
-        evaluate = getattr(self.risk_manager, "evaluate_trade", None)
-        if evaluate is None:
+        if self.risk_manager is None or getattr(self.risk_manager, "evaluate_trade", None) is None:
             return "risk_manager_required"
         broker_equity = self._broker_equity()
         if broker_equity is None:
             return "broker_equity_unavailable"
-        equity = min(float(request.account_equity), broker_equity)
-        try:
-            decision = evaluate(
-                equity=equity,
-                entry_price=float(request.entry_price),
-                stop_price=float(request.stop_price),
-                quantity=float(request.quantity),
-            )
-        except RiskRejectedError:
-            return "hard_risk:invalid_inputs"
-        if not getattr(decision, "approved", False):
-            return f"hard_risk:{getattr(decision, 'reason', 'rejected')}"
-        return None
+        return pretrade.hard_risk_refusal(
+            self.risk_manager, equity=min(float(request.account_equity), broker_equity),
+            entry_price=request.entry_price, stop_price=request.stop_price, quantity=request.quantity)
 
     def _has_duplicate(self, symbol: str, con_id: int = 0) -> bool:
         target = symbol.upper()

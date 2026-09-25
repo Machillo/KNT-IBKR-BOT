@@ -229,3 +229,25 @@ human registers it.
   NO_TRADE reason. The counterfactual definition (`top_*`) is unchanged from the registered
   `counterfactual_vs_cycle_fwd5`.
 - **Exploration:** TRAIN only.
+
+**FWD-v1 r3 amendment (2026-09-25, same day, still before any registration or forward row; no
+shadow row looked at):**
+- **Cohort:** per cycle, deep analysis takes the first 12 eligible names (liquidity order) whose
+  IBKR type is COMMON/ADR/REIT. Type-excluded names use no slot; at most 36 type lookups.
+- **Failed type lookups** are `CANDIDATE_ERROR` rows, never exclusions.
+  - A cycle is BLOCKING at ≥ 2 candidate errors AND > 10 % of the analysable candidates
+    (attempted − type-excluded).
+  - These thresholds are PROVISIONAL. They are confirmed in a scratch run (separate state
+    directory) before registration, and pinned by the protocol fingerprint from then on.
+- **Missing data:** the 10 % limit applies to each arm and to all population rows.
+- **Binding results are stored** in the registration file, returned ever after, and copied to
+  this log the day they bind.
+- **Acceptance ref:** the registration line must be reachable from `origin/feature/paper-alpha`.
+  The ref is recorded in the registration; this repository never merges to `main`.
+- **Scoring:** outcome rows carry the scoring-rules fingerprint. The scorer refuses to write
+  inside a registered window under other rules.
+- **Forward replays** are refused while a registered window is open and unbound.
+- **FWD3 universe** is filtered through the recorded `instrument_types`. Names never looked up
+  are excluded, a stated bias towards the most liquid names.
+- **FWD1 → FWD2 disclosure:** if FWD1 binds first, its unblinded selected arm is also FWD2's
+  selected arm. FWD2's rules are mechanical and pinned.

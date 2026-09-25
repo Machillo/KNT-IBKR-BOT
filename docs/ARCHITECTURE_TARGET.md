@@ -251,7 +251,7 @@ replay path (zero costs, no sectors), not the shadow-only path, admission with s
 | Change | Changes decisions? | Why before FWD |
 |---|---|---|
 | Bracket children GTC | **Yes, indirectly:** GTC exits count as pending exposure across days, tightening capacity (≈ 3 positions) | Safety bug (exits expired at the close). |
-| Kill switch: non-STK skip, all-client orders, keeps manual positions' protection, no flatten under a live opposite order | No | Safety. |
+| Kill switch: non-STK skip; decides from the every-client view BEFORE cancelling; keeps the protection of every position it will not flatten; never cancels or duplicates its own pending liquidation | No | Safety. |
 | Hard risk default 1 % (+ float tolerance) | Not certified by the digest; with the default allocator risk is ≤ 1 % already | Hard layer enforces what the allocator assumes. |
 | Size on tick-rounded prices | Slightly (quantity) | Avoids decisions the executor would refuse. |
 | Learning off by default | Paper only (shadow-only was already off) | Unvalidated evidence must not steer paper. |
@@ -274,8 +274,8 @@ golden decision digest.
 2. **PR-B, evidence store (research only):** per-opportunity R, versioned regime labels with
    the same context length, hierarchical pooling, power calculator. Opportunity journaling in
    the replay. It runs offline on TRAIN only and changes no decision. Adding journal columns or
-   versioning `market/regime.py` changes the fingerprint: merge to main, never deploy to the
-   pinned run.
+   versioning `market/regime.py` changes the fingerprint: merge to `feature/paper-alpha`, never
+   deploy to the pinned run.
 3. **PR-C, InstrumentSpec for STK (then ETF):** multiplier/tick/increment/currency plumbing,
    `sec_type` in the journal, `stockType` in the funnel (REPLAY_PARITY N13). **Changes the
    fingerprint and the universe path**: a new FWD version for anything evaluated after it.
@@ -292,7 +292,7 @@ golden decision digest.
    §7 column with tests. Paper only after its own shadow period.
 
 **Fingerprint rule for every PR:** anything touching the decision path (the §9 list) or the
-protocol files changes a fingerprint. Such PRs may merge to main during a window, but the
+protocol files changes a fingerprint. Such PRs may merge to `feature/paper-alpha` during a window, but the
 pinned run keeps its checkout until the window binds (at the latest 2027-03-31) or is
 explicitly ended. That includes safety hotfixes: if a safety fix is urgent, end the window
 (recorded and reported) rather than patching the pinned run silently.

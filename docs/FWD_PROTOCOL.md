@@ -38,12 +38,18 @@ multiple-testing correction cannot tell skill from luck or from market drift.
     fingerprint. Any change to the decision path does, and invalidates the window.
   - Rows before the registered start never count.
   - **Tamper evidence (guards against accidents; makes cheating deliberate, cannot prevent
-    it):** registration prints one line. Commit it DIRECTLY to `main`, push it within
-    **3 days**, and never squash, rebase or re-wrap it. The evaluator reads the git history of
-    every local ref and of `origin/main`. Lines are parsed as records (markdown and extra spaces
-    are tolerated) and deduplicated by `start_utc`. It refuses:
-    - a registration line that was never committed, is not reachable from `origin/main`, or was
-      committed outside that delay;
+    it):** registration prints one line. Commit it DIRECTLY to the **acceptance ref**, push it
+    within **3 days**, and never squash, rebase or re-wrap it.
+    - The acceptance ref is `origin/feature/paper-alpha` (this repository never merges to
+      `main`). It is written INTO the registration file, so it cannot be changed afterwards.
+    - The evaluator reads the git history of every local ref and of the acceptance ref. Lines are
+      parsed as records (markdown and extra spaces are tolerated) and deduplicated by
+      `start_utc`.
+    - The first accepted commit time is stored in the registration file: a later rebase or
+      deleted branch cannot turn a valid window invalid.
+    It refuses:
+    - a registration line that was never committed, is not reachable from the acceptance ref,
+      or was committed outside that delay;
     - a registration line that no longer matches the registration file;
     - **more than one `FWD-v1` registration ever committed**, even one that was later deleted.
       A new window needs a new protocol id and counts in the family.
@@ -113,7 +119,8 @@ Every condition must hold:
   - Deep analysis takes the first 12 ELIGIBLE names (liquidity order) whose type passes; excluded
     types do not use up a slot (at most 36 type lookups per cycle).
   - A FAILED type lookup is a `CANDIDATE_ERROR` (`metadata_unavailable`), never an exclusion. A
-    cycle with more than 5 % candidate errors is BLOCKING;
+    cycle is BLOCKING at ≥ 2 candidate errors AND > 10 % of the analysable candidates
+    (attempted − type-excluded). PROVISIONAL: confirmed in a scratch run before registration;
 - the market was open at the cycle, and the cycle carries no BLOCKING gate;
 - it was decided within 80 minutes of its decision bar completing. This excludes stale-bar
   re-decisions after restarts or overnight;
@@ -265,9 +272,11 @@ checkout, so the recipe makes them explicit.
    python run_shadow_only.py --register-fwd-window --risk-limits-reviewed
    ```
    Registration refuses unless `MAX_TRADE_RISK_PCT <= 0.01` and `MARKET_DATA_TYPE = 1`.
-4. **Commit the printed line** to `docs/experiments/LOG.md` on the development checkout (main
-   branch), within 3 days. Git history is shared by all worktrees.
-5. **Score and report from the worktree**, with the same `KNT_STATE_DIR`:
+4. **Commit the printed line** to `docs/experiments/LOG.md` on `feature/paper-alpha` (the
+   acceptance ref, never `main`) and push it within 3 days. Git history is shared by all
+   worktrees.
+5. **Score and report from the worktree**, with the same `KNT_STATE_DIR`. The scorer refuses to
+   write when its rules differ from the registered protocol fingerprint (nothing is written):
    ```bash
    python run_fetch_journal_bars.py
    ```
@@ -280,7 +289,9 @@ checkout, so the recipe makes them explicit.
    Output shows counts only.
 6. **Evaluate from the worktree too** (`python run_shadow_report.py --fwd`). The evaluator code
    is pinned by the protocol fingerprint; it finds the committed line through the shared git
-   history.
+   history. When a test binds, commit its binding result (decision, n, statistic) to
+   `docs/experiments/LOG.md` the same day; the stored result in the registration file is the
+   reference.
 
 Development continues on other branches; later commits never touch the running process.
 `run_shadow_only.py` refuses to (re)start when a registered window exists and the running

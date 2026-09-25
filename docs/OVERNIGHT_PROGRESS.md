@@ -98,7 +98,8 @@ Second re-verification round (6 reviewers, 2 integrity blockers + ~15 should-fix
 - **Integrity:**
   - a binding result is stored and survives ending the window;
   - outcomes carry the scoring-protocol fingerprint;
-  - registration must be on `origin/main`, with tolerant parsing;
+  - registration must be reachable from the recorded acceptance ref
+    (`origin/feature/paper-alpha`), with tolerant parsing;
   - forward replays are refused while a window is open.
 - **Candidates:** failed type lookups are candidate errors (gated); excluded types do not use up
   slots.
@@ -122,16 +123,19 @@ other asset classes.
 ## Next actions (human)
 1. Review draft PR #3, including every behavior change in its body. Decide the scope question
    (see the PR body). Do not merge unreviewed.
-2. Decide the risk limits BEFORE registration (they are in the config hash): per-trade 1 %
+2. Calibrate the PROVISIONAL candidate-error gate (≥ 2 errors and > 10 % of analysable
+   candidates) in a scratch shadow run with a separate `KNT_STATE_DIR`, before registration.
+3. Decide the risk limits BEFORE registration (they are in the config hash): per-trade 1 %
    (set `MAX_TRADE_RISK_PCT=0.01` in your local `.env`; it still says 0.10). The reviewers
    recommend daily loss 2–3 % and drawdown ≈ 10 % (today 10 % / 15 %).
-3. Deploy FWD-v1 exactly per docs/FWD_PROTOCOL.md §Pinned deployment:
+4. Deploy FWD-v1 exactly per docs/FWD_PROTOCOL.md §Pinned deployment:
    - a pinned worktree with a copied `.env`;
    - `KNT_STATE_DIR` / `KNT_BOT_STATE_DIR` set;
    - `python run_shadow_only.py --register-fwd-window --risk-limits-reviewed` during market hours, on a FRESH `KNT_STATE_DIR`;
-   - commit the printed line DIRECTLY to main and push within 3 days (never squash or re-wrap).
-4. Periodically, from the worktree: `run_fetch_journal_bars.py`, `run_score_shadow.py`
+   - commit the printed line DIRECTLY to `feature/paper-alpha` (the recorded acceptance ref,
+     never main) and push within 3 days (never squash or re-wrap).
+5. Periodically, from the worktree: `run_fetch_journal_bars.py`, `run_score_shadow.py`
    (counts only), `run_shadow_report.py --persist`.
-5. After ≥ 10 VALID days and a dry-run drill: `run_paper_preflight.py`, then the supervised
+6. After ≥ 10 VALID days and a dry-run drill: `run_paper_preflight.py`, then the supervised
    1-share plumbing test. Check on paper the GTC children after a partial fill.
-6. Decide on an external survivorship-free dataset (`docs/POINT_IN_TIME_DATA.md`).
+7. Decide on an external survivorship-free dataset (`docs/POINT_IN_TIME_DATA.md`).

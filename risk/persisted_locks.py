@@ -24,3 +24,17 @@ def persisted_lock_reason(state_dir: Path, account: str, trading_date: str) -> s
     if drawdown is not None and drawdown.locked:
         return "bot_multi_day_drawdown"
     return None
+
+
+def drawdown_state_missing_with_history(state_dir: Path, account: str, trading_date: str) -> bool | None:
+    """True when the account has daily-risk history but no drawdown record: the supervisor will
+    refuse to initialize the high-water mark and lock entries on every poll (fail closed) until
+    a human runs run_reset_drawdown_lock.py. None if the state is unreadable."""
+    state_dir = Path(state_dir)
+    try:
+        history = DailyRiskStateStore(state_dir / "risk_state.json").has_prior_days(
+            account=account, trading_date=trading_date)
+        record = DrawdownStateStore(state_dir / "drawdown_state.json").get(account)
+    except Exception:
+        return None
+    return bool(history and record is None)

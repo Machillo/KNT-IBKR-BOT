@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 
 from core.paper_guard import verify_paper_account
 from risk.execution_lock import ExecutionLockStore
-from risk.persisted_locks import persisted_lock_reason
+from risk.persisted_locks import drawdown_state_missing_with_history, persisted_lock_reason
 
 ACK_NAMES = ("KNT_SIGNAL_PAPER_ACK", "AUTONOMOUS_PAPER_ACK", "KILL_SWITCH_DRILL_ACK", "PAPER_SMOKE_ACK",
              "EXECUTION_LOCK_RESET_ACK",
@@ -107,6 +107,11 @@ async def broker_checks(ib, cfg, *, state_dir: Path, market_data=None, probe_con
     trading_date = datetime.now(ZoneInfo("America/New_York")).date().isoformat()
     lock = persisted_lock_reason(state_dir, account, trading_date)
     checks.append(PreflightCheck("no_persisted_lock", lock is None, lock or "none"))
+    missing = drawdown_state_missing_with_history(state_dir, account, trading_date)
+    checks.append(PreflightCheck(
+        "drawdown_state_initialized", missing is False,
+        "ok" if missing is False else ("unreadable" if missing is None else
+                                       "missing for an account with history: review, then run run_reset_drawdown_lock.py")))
     execution_lock = ExecutionLockStore(Path(state_dir) / "execution_lock.json").read()
     checks.append(PreflightCheck("no_execution_lock", execution_lock is None,
                                  "none" if execution_lock is None else str(execution_lock.get("reason"))))

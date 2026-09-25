@@ -36,8 +36,14 @@ Other valid, fail-closed outcomes added in session 2 (nothing is sent):
 - `PORTFOLIO_REJECTED ... sector_metadata_missing` — IBKR contract details had no industry for the
   candidate or an existing exposure (ETFs often lack it);
 - `correlation_unavailable` / `correlation_limit` — also counts working orders;
-- entries locked by the multi-day drawdown guard (`state/drawdown_state.json`, created on first
-  run; `MAX_DRAWDOWN_PCT` default 15 %). If a lock appears unexpectedly, stop and inspect.
+- entries locked by the multi-day drawdown guard (`state/drawdown_state.json`; `MAX_DRAWDOWN_PCT`
+  default 15 %). On an account that already has daily history in `state/risk_state.json` but no
+  drawdown file (every install upgraded to this code) the guard refuses to invent a high-water
+  mark and locks entries; `run_paper_preflight.py` reports `drawdown_state_initialized` FAIL.
+  Review, then run `DRAWDOWN_RESET_ACK=... python run_reset_drawdown_lock.py` once. If a lock
+  appears unexpectedly, stop and inspect.
+- `execution_lock_present` — a previous run left the broker state uncertain
+  (`state/execution_lock.json`); check TWS, then `run_reset_execution_lock.py` (ACK + flat check).
 Log line `PAPER VERIFICATION | verified=True reason=verified_paper account=DU***xx` must appear;
 if `verified=False`, the run must place nothing — that is the guard working.
 

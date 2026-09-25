@@ -14,8 +14,10 @@ reconciliation.
 
 ## Roles and time
 - One human at the console and in TWS for the whole run, about 15 minutes.
-- Regular US session, after the first 5 minutes and outside the last 15 (the session
-  policy enforces this).
+- Regular US session, **about 10:30–15:45 ET**. The session policy refuses the first 5 and
+  the last 15 minutes. Decisions need a decision bar completed ≤ 75 min earlier: the runtime
+  treats the 09:30 bar as complete at 10:30, so before then every setup is refused as
+  `stale_decision_bar`.
 
 ## Step 0: local configuration (`.env`, never committed)
 - `IBKR_PORT=7497` (TWS paper) or `4002` (Gateway paper).
@@ -25,6 +27,19 @@ reconciliation.
 - `MARKET_DATA_TYPE=1`. The paper account needs live US equity data shared from the live
   account.
 - **No ACK variable in `.env`.** Every ACK is refused if it is persisted there.
+
+## Step 0b: one-time upgrade steps (only if the preflight asks for them)
+- `drawdown_state_initialized` FAIL: the account has daily history but no drawdown record,
+  which is the case after upgrading to this code. Review the equity history, then run once:
+  ```bash
+  DRAWDOWN_RESET_ACK=<literal from risk/drawdown_guard.py> python run_reset_drawdown_lock.py
+  ```
+- `no_execution_lock` FAIL: an earlier run left the broker state uncertain. Check TWS, then
+  run:
+  ```bash
+  EXECUTION_LOCK_RESET_ACK=<literal from risk/execution_lock.py> python run_reset_execution_lock.py
+  ```
+  It clears the lock only if a read-only check shows the account flat, for every client.
 
 ## Step 1: tests
 ```bash
@@ -97,7 +112,9 @@ Valid outcomes:
 4. Check TWS: 0 positions, 0 working orders. Rerun `python run_paper_preflight.py`: flatness
    checks PASS.
 5. If anything unexpected happened: leave the configuration unchanged, keep the logs and
-   journal, and record the anomaly before any new run.
+   journal, and record the anomaly before any new run. If the executor set
+   `state/execution_lock.json`, every later entry is refused until
+   `run_reset_execution_lock.py` confirms the account is flat and the human gives the ACK.
 
 ## Not part of this test
 - The autonomous loop (`paper_alpha.py`).

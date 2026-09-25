@@ -209,7 +209,8 @@ executor-style LIMIT/DAY entries). No parameter may change between now and evalu
 **Exact evaluation (added before any v2 forward data exists, hypotheses unchanged; revised
 once after the quant review of the same day, still before any v2 data):**
 `docs/FWD_PROTOCOL.md` (FWD-v1) fixes the evidence window (v2 decisions only), population,
-leave-one-out benchmark, day-clustered Newey–West inference, K = 3 (|t| ≥ 2.40), sample
+leave-one-out benchmark, day-clustered inference with Hansen–Hodrick lag-1 weights and Student-t
+critical values (K = 3: about 2.50 at 40 days, 2.39 in the limit), binding cutoff, sample
 minimums, KEEP/REJECT/INCONCLUSIVE rules, deadlines and invalidation. It supersedes the
 shorthand rules in this table where they differ (e.g. "t ≥ 2" → 2.40 after the K = 3 correction;
 "t over per-cycle means" → per-day NW, which is more conservative).

@@ -142,3 +142,15 @@ def test_execution_lock_reset_requires_ack_and_a_clean_broker(isolated_state_dir
     dirty._positions = []
     asyncio.run(run_reset_execution_lock.main())
     assert store.read() is None
+
+
+def test_preflight_fails_when_the_drawdown_state_is_missing_for_an_account_with_history(isolated_state_dir):
+    import json
+
+    isolated_state_dir.mkdir(parents=True, exist_ok=True)
+    (isolated_state_dir / "risk_state.json").write_text(json.dumps({"version": 1, "records": {
+        f"{ACCOUNT}:2020-01-02": {"account": ACCOUNT, "trading_date": "2020-01-02", "starting_equity": 100000.0,
+                                  "kill_switch_triggered": False, "trigger_reason": "", "updated_at_utc": ""}}}),
+        encoding="utf-8")
+    _, failed = verdict(run(FakeIB(), Quotes(), isolated_state_dir))
+    assert "drawdown_state_initialized" in failed

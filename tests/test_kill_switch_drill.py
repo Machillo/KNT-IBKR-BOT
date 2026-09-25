@@ -71,3 +71,25 @@ def test_armed_drill_flattens_one_share_through_the_guard():
     out = drill(ib, armed=True, ack=DRILL_ACK)
     assert out.ran and out.armed and out.liquidation_orders == 1 and out.flat_confirmed
     assert ib.placed[0].account == ACCOUNT and ib.placed[0].totalQuantity == 1
+
+
+def test_drill_refuses_open_orders_and_caps_quantity_and_persisted_ack():
+    ib = FakeIB()
+    ib._trades = [SimpleNamespace(isDone=lambda: False, order=SimpleNamespace(account=ACCOUNT))]
+    assert drill(ib, armed=True, ack=DRILL_ACK).reason == "open_orders_present"
+    assert drill(FakeIB(), armed=True, ack=DRILL_ACK, max_qty=1e9).reason == "max_qty_out_of_range"
+    assert drill(FakeIB(), armed=True, ack=DRILL_ACK, persisted_ack=DRILL_ACK).reason == "ack_must_not_be_persisted_in_env"
+    assert ib.placed == []
+
+
+def test_kill_switch_liquidation_limit_skips_oversized_positions():
+    import asyncio as aio
+    from config.config import RiskConfig
+    from core.paper_guard import build_paper_guard
+    from risk.kill_switch import KillSwitch
+
+    ib = FakeIB(qty=50)
+    ks = KillSwitch(ib, RiskConfig(kill_switch_enabled=True, kill_switch_dry_run=False), ACCOUNT,
+                    guard=build_paper_guard(ib, SETTINGS), liquidation_qty_limit=1)
+    result = aio.run(ks.execute("late fill"))
+    assert ib.placed == [] and result.flat_confirmed is False

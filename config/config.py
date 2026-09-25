@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from os import getenv
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -52,6 +53,8 @@ class RiskConfig:
         for name, value in (("MAX_TRADE_RISK_PCT", self.max_trade_risk_pct), ("MAX_DAILY_LOSS_PCT", self.max_daily_loss_pct), ("MAX_POSITION_PCT", self.max_position_pct), ("MAX_DRAWDOWN_PCT", self.max_drawdown_pct)):
             if not 0 < value <= 1:
                 raise ValueError(f"{name} must be between 0 and 1")
+        if self.max_drawdown_pct > 0.5:
+            raise ValueError("MAX_DRAWDOWN_PCT above 0.5 would effectively disable the drawdown lock")
 
 
 @dataclass(frozen=True)
@@ -106,7 +109,14 @@ config = BotConfig()
 def read_only_ibkr_settings(settings: IBKRConfig, client_id_offset: int) -> IBKRConfig:
     """Settings for research/maintenance runners that must never trade.
 
-    ``readonly=True`` asks TWS/Gateway for a read-only API session, and a separate
-    clientId avoids colliding with (or impersonating) the trading bot's session.
+    ``readonly=True`` is enforced by KNT itself: ``core/paper_guard`` refuses to authorize any
+    order on a readonly session (ib_async's flag alone only skips order syncing; true API
+    read-only mode is a TWS/Gateway setting). A separate clientId avoids colliding with — or
+    impersonating — the trading bot's session.
     """
     return replace(settings, readonly=True, client_id=settings.client_id + int(client_id_offset))
+
+
+# Absolute, repo-anchored runtime state directory: persisted risk locks must not depend on the
+# current working directory (starting from another folder would silently start fresh).
+STATE_DIR = Path(__file__).resolve().parents[1] / "state"

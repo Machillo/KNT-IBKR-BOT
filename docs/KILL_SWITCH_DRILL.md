@@ -1,13 +1,16 @@
 # Kill-switch paper drill — runbook (human-run, supervised)
 
-Goal: prove the ARMED kill switch cancels working orders and flattens positions on a verified
-PAPER account, and does nothing on anything else. Until this drill passes, keep
+Goal: prove the ARMED kill switch flattens a tiny position on a verified PAPER account and does
+nothing on anything else. (Cancel-path behaviour is covered by tests; the drill runs on an account
+with no working orders so a late fill cannot be flattened at size.) Until this drill passes, keep
 `KILL_SWITCH_DRY_RUN=true` in `.env`.
 
 ## Preconditions
 - Paper login; `.env`: paper port, `IBKR_ACCOUNT=<DU account>`, `ALLOW_LIVE_TRADING=false`.
 - The account holds **only** a position you opened by hand for the drill: 1 share of a liquid
-  stock (e.g. buy 1 share in TWS). Optionally leave one far-from-market limit order working.
+  stock (e.g. buy 1 share in TWS) and **no working orders** (the drill refuses otherwise, so a
+  late fill cannot be flattened at size). `--max-qty` is capped at 5 shares; the kill switch
+  re-checks each position's size at liquidation time. Don't store the ACK in `.env`.
 - Regular US session, somebody watching TWS.
 
 ## Steps
@@ -21,7 +24,7 @@ PAPER account, and does nothing on anything else. Until this drill passes, keep
    ```bash
    KILL_SWITCH_DRILL_ACK=I_AM_WATCHING_AND_ACCEPT_THE_PAPER_KILL_SWITCH_DRILL python run_kill_switch_paper_drill.py --armed --max-qty 1
    ```
-   Expect: working orders cancelled, one market SELL of 1 share, `flat_confirmed=True`,
+   Expect: one market SELL of 1 share, `flat_confirmed=True`,
    log `KILL SWITCH COMPLETE`.
 
 ## Verify afterwards

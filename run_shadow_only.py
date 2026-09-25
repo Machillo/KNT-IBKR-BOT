@@ -13,7 +13,7 @@ import argparse
 import asyncio
 from dataclasses import replace
 
-from config.config import BotConfig, config, read_only_ibkr_settings
+from config.config import STATE_DIR, BotConfig, config, read_only_ibkr_settings
 
 
 def shadow_only_config(base: BotConfig) -> BotConfig:
@@ -43,7 +43,8 @@ async def main_async(args) -> None:
     connection = IBKRConnection(cfg.ibkr)
     try:
         ib = await connection.connect()
-        supervisor = PaperSupervisor(ib, cfg)
+        # Own state directory: shadow-only never races the trading bot's persisted locks.
+        supervisor = PaperSupervisor(ib, cfg, state_dir=STATE_DIR / "shadow_only")
         context, account = await supervisor.initialize()
         intelligence = MarketIntelligenceService(ib, MarketDataService(ib, cfg.market_data))
         shadow = ShadowTradingEngine(

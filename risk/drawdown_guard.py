@@ -102,10 +102,15 @@ class DrawdownGuard:
         self.account = account
         self.max_drawdown_pct = float(max_drawdown_pct)
 
-    def evaluate(self, equity: float) -> DrawdownStatus:
+    def evaluate(self, equity: float, *, allow_initialize: bool = True) -> DrawdownStatus:
         if equity is None or equity <= 0:
             raise RuntimeError("Drawdown guard requires positive NetLiquidation")
         record = self.store.get(self.account)
+        if record is None and not allow_initialize:
+            # The account has traded on earlier days but its high-water mark is gone (file
+            # deleted/moved). Starting fresh would silently clear a fired lock: refuse.
+            raise RuntimeError("Drawdown state missing for an account with history; "
+                               "a human must re-initialize it with run_reset_drawdown_lock.py")
         if record is None:
             record = DrawdownRecord(self.account, float(equity), _now())
             self.store.put(record)

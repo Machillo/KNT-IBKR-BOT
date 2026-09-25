@@ -58,6 +58,12 @@ class DailyRiskStateStore:
         self._write(data)
         return state, True
 
+    def has_prior_days(self, *, account: str, trading_date: str) -> bool:
+        """True if this account has a persisted baseline from an EARLIER trading date."""
+        records = self._read().get("records", {})
+        prefix = f"{account}:"
+        return any(k.startswith(prefix) and k[len(prefix):] < trading_date for k in records)
+
     def mark_triggered(
         self,
         *,

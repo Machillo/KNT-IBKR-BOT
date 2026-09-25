@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from itertools import combinations
 from types import SimpleNamespace
 from math import sqrt
@@ -15,7 +15,7 @@ from market.session import USStockSessionPolicy
 from portfolio.admission import PortfolioAdmissionCoordinator, RiskDecisionStore
 from portfolio.allocation import PortfolioAllocator
 from portfolio.metadata import ContractMetadataService
-from portfolio.state import PortfolioState
+from portfolio.state import PendingOrderExposure, PortfolioState
 from research.coordinator import ContinuousResearchCoordinator
 from research.performance import StrategyPerformanceStore
 from research.scheduler import ContinuousResearchScheduler
@@ -174,6 +174,18 @@ class ShadowTradingEngine:
     def _series_correlation(a: tuple[float, ...], b: tuple[float, ...]) -> float | None:
         return series_correlation(a, b)
 
+    @staticmethod
+    def _with_pending_entry(state: PortfolioState, candidate, proposal) -> PortfolioState:
+        pending = PendingOrderExposure(
+            symbol=candidate.symbol, asset_class=str(getattr(candidate.contract, "secType", "") or "STK"),
+            quantity=float(proposal.quantity), reference_price=float(proposal.entry_price),
+            notional=float(proposal.proposed_notional),
+            con_id=int(getattr(candidate.contract, "conId", 0) or 0),
+        )
+        snapshot = replace(state.snapshot,
+                           pending_order_notional=state.snapshot.pending_order_notional + pending.notional)
+        return PortfolioState(snapshot, state.positions, state.pending_orders + (pending,))
+
     async def _sectors(self, candidate, state: PortfolioState) -> tuple[str | None, dict[str, str]]:
         """Read-only sector lookup for the candidate and every current exposure (cached)."""
         candidate_meta = await self.metadata.get(candidate.contract)
@@ -203,7 +215,7 @@ class ShadowTradingEngine:
                 contract = Contract(conId=position.con_id, symbol=position.symbol,
                                     secType=position.asset_class, exchange=position.exchange or "SMART",
                                     currency=position.currency or "USD")
-                bars = await self.history.bars(contract)
+                bars = await self.history.bars(contract, complete_only=True)
                 series = self._return_series(bars)
                 if series:
                     returns[position.symbol] = series
@@ -275,6 +287,13 @@ class ShadowTradingEngine:
                                 con_id=int(getattr(candidate.contract, "conId", 0) or 0)))
                         action = "PAPER_SUBMITTED" if result.submitted else "PAPER_BLOCKED"
                         portfolio_reason = result.reason
+                        if result.submitted:
+                            # Later candidates in this cycle must see this entry as exposure
+                            # (gross exposure, correlation, sector), exactly like the replay.
+                            portfolio_state = self._with_pending_entry(
+                                portfolio_state, candidate, proposal)
+                            position_returns = {**position_returns,
+                                                candidate.symbol: self._return_series(bars)}
                 if admission is not None and proposal is not None:
                     self.risk_decisions.record(
                         symbol=candidate.symbol, side=selected.signal.side.value, strategy=selected.strategy,

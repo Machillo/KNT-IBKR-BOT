@@ -18,7 +18,7 @@ T0 = datetime(2026, 1, 5, 10)
 def bars(n=120):
     out, price = [], 100.0
     for i in range(n):
-        price *= 1.002
+        price *= 1.002 + 0.002 * (((i * 7) % 5) - 2) / 2  # deterministic noise, positive drift
         out.append(PriceBar(T0 + timedelta(hours=i), price * 0.999, price * 1.003, price * 0.997, price, 1e6))
     return out
 
@@ -61,15 +61,16 @@ def state(net_liq=100_000.0, locked=False, positions=()):
 CORRELATED = (PositionExposure("B", "STK", 10, 100.0, 1_000.0, con_id=2),)
 
 
-def run_shadow(tmp_path, monkeypatch, side, portfolio_state, risk=True, industry="Technology"):
+def run_shadow(tmp_path, monkeypatch, side, portfolio_state, risk=True, industry="Technology", n_candidates=1):
     monkeypatch.chdir(tmp_path)
     from engine.shadow import ShadowTradingEngine
 
-    candidate = SimpleNamespace(symbol="A", score=90.0, eligible=True,
-                                contract=SimpleNamespace(secType="STK", conId=1, symbol="A"))
+    candidates = [SimpleNamespace(symbol=sym, score=90.0, eligible=True,
+                                  contract=SimpleNamespace(secType="STK", conId=cid, symbol=sym))
+                  for sym, cid in (("A", 1), ("B", 2))[:n_candidates]]
 
     async def ranked(rows_per_plan, quote_budget):
-        return [candidate]
+        return candidates
 
     async def snap(contract, symbol, timeout=3.0):
         return SimpleNamespace(bid=100.0, ask=100.02, last=100.01, market_price=100.01, market_data_type=1)
@@ -146,3 +147,12 @@ def test_sector_concentration_limit_applies_with_metadata():
     assert same.reason == "same_sector_exposure_limit"
     assert other.approved
     assert missing.reason == "sector_metadata_missing"
+
+
+def test_entry_submitted_earlier_in_the_cycle_counts_for_later_candidates(tmp_path, monkeypatch):
+    # A and B have identical bars (correlation 1). Once A is submitted, B must be rejected
+    # in the same cycle instead of being checked against the stale start-of-cycle state.
+    decisions, executor = run_shadow(tmp_path, monkeypatch, SignalSide.LONG, state(), True, n_candidates=2)
+    assert [d.action for d in decisions] == ["PAPER_SUBMITTED", "PORTFOLIO_REJECTED"]
+    assert decisions[1].portfolio_reason == "correlation_limit"
+    assert len(executor.calls) == 1

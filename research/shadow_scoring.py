@@ -34,7 +34,11 @@ from research.shadow_journal import ShadowJournal, score_decision
 
 # v2: bracket fills only for EXECUTABLE decisions (would really have been transmitted),
 # unalignable rows expire to NOT_EVALUABLE, provider recorded, leave-one-out cycle benchmark.
-SCORER_VERSION = "v2"
+# v3: forward returns start at the OPEN of the first bar that starts at/after the decision
+#     (the first tradeable price; never the decision bar's close, never an overnight gap
+#     before the decision existed), exactly h bars from there; DAY limit entries live only in
+#     the session of ``created_at``.
+SCORER_VERSION = "v3"
 FORWARD_HORIZONS = (1, 5, 20)
 MAX_BRACKET_BARS = 60
 UNALIGNED_EXPIRY_DAYS = 14          # ~10 trading days
@@ -146,6 +150,16 @@ def align(row: sqlite3.Row, bars_from: list[PriceBar]) -> list[PriceBar] | None:
     return [b for b in later if _naive(b.time) >= decided_at]
 
 
+def _session_date(created_at):
+    """Exchange (ET) date on which a decision was taken; None if unknown."""
+    from zoneinfo import ZoneInfo
+
+    dt = as_datetime(created_at)
+    if dt is None or dt.tzinfo is None:
+        return None
+    return dt.astimezone(ZoneInfo("America/New_York")).date()
+
+
 def evaluate_row(row: sqlite3.Row, bars_after: list[PriceBar], costs: CostModel = BASELINE) -> ScoredOutcome:
     """Pure evaluation of one decision row against bars that came after the decision."""
     action = str(row["action"] or "")
@@ -159,13 +173,10 @@ def evaluate_row(row: sqlite3.Row, bars_after: list[PriceBar], costs: CostModel 
     else:
         kind = strategy = side = stop = target = limit = None
 
-    # Forward returns are measured from the decision bar's close (known at decision time).
+    # Forward returns start at the first tradeable price: the open of the first bar that
+    # started at/after the decision (``bars_after`` is already cut at created_at by ``align``).
     keys = row.keys()
-    reference = None
-    for key in ("reference_close", "entry", "top_entry"):
-        if key in keys and row[key] is not None:
-            reference = float(row[key])
-            break
+    reference = float(bars_after[0].open) if bars_after and float(bars_after[0].open) > 0 else None
     forward: dict[int, float | None] = {}
     for h in FORWARD_HORIZONS:
         forward[h] = (bars_after[h - 1].close / reference - 1) * 100 if reference and len(bars_after) >= h else None
@@ -189,7 +200,8 @@ def evaluate_row(row: sqlite3.Row, bars_after: list[PriceBar], costs: CostModel 
         return ScoredOutcome(int(row["id"]), status, kind, strategy, side, False, "not_executable",
                              None, None, None, 0, forward, False)
     out = score_decision(side, _tick(float(stop)), _tick(float(target)), bars_after, costs, MAX_BRACKET_BARS,
-                         limit=None if limit is None else _tick(float(limit)))
+                         limit=None if limit is None else _tick(float(limit)),
+                         valid_on=_session_date(row["created_at"]))
     status = "FINAL" if (bars_after and out.resolved and complete_forward) else "PENDING_DATA"
     return ScoredOutcome(int(row["id"]), status, kind, strategy, side, out.filled, out.exit_reason,
                          out.return_pct, out.mae_pct, out.mfe_pct, out.bars_held, forward, executable)

@@ -292,7 +292,7 @@ class DecisionOutcome:
 
 def score_decision(side: str, stop: float, target: float, bars_after: list[PriceBar],
                    costs: CostModel = BASELINE, max_bars: int = 60,
-                   limit: float | None = None) -> DecisionOutcome:
+                   limit: float | None = None, valid_on=None) -> DecisionOutcome:
     """Outcome of a LONG/SHORT bracket evaluated on ``bars_after`` (bars after the decision).
 
     Entry:
@@ -301,6 +301,9 @@ def score_decision(side: str, stop: float, target: float, bars_after: list[Price
       bar's exchange date). An open through the limit fills at the open (capped at the
       limit); otherwise it fills only if price trades strictly through the limit.
       Unfilled by the end of that date -> ``limit_not_filled`` (resolved).
+      ``valid_on`` = the exchange date of the SESSION the order was placed in (the date of
+      ``created_at``). A DAY order placed at 15:05 dies at that day's close: it must never be
+      simulated in the next session (open gap). Default: the first bar's date (legacy).
     Exits: gap-aware stop-market, limit target, stop wins ties. After an INTRABAR limit
     fill the target is not allowed on the fill bar (the high may have come first).
     MAE/MFE are measured from the entry fill and clipped at the exit price on the exit bar.
@@ -319,7 +322,7 @@ def score_decision(side: str, stop: float, target: float, bars_after: list[Price
             return DecisionOutcome(False, "gapped_past_bracket", None, None, None, 0)
         fill_index, entry, at_open = 0, costs.marketable_fill(raw_entry, buy=long), True
     else:
-        day = _bar_date(window[0])
+        day = valid_on or _bar_date(window[0])
         for k, bar in enumerate(window):
             if _bar_date(bar) != day:
                 return DecisionOutcome(False, "limit_not_filled", None, None, None, 0)

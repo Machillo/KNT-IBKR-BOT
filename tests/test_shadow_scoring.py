@@ -250,3 +250,34 @@ def test_candidate_error_rows_are_not_evaluable(tmp_path):
                       entry=None, stop=None, target=None, reason="TimeoutError")
     counts = asyncio.run(ShadowScorer(db, costs=ZERO).score_pending(provider()))
     assert counts["NOT_EVALUABLE"] == 1
+
+
+def test_forward_return_starts_at_the_first_tradeable_price_not_before_the_decision(tmp_path):
+    """Regression (quant review): a decision on yesterday's 15:00 bar taken at 10:05 must not be
+    credited with the overnight gap; its base is the open of the first bar after 10:05."""
+    from datetime import timezone
+
+    db = tmp_path / "s.db"
+    j = ShadowJournal(db)
+    bar = datetime(2026, 3, 2, 20, 0, tzinfo=timezone.utc)              # 15:00 ET bar
+    j.record_decision(j.new_cycle_id(), symbol="AAA", con_id=1, bar_time=bar.isoformat(), timeframe="1 hour",
+                      regime="TRENDING", action="NO_TRADE", strategy=None, side=None, score=None, entry=None,
+                      stop=None, target=None, reason="x", context={"reference_close": 100.0},
+                      created_at=datetime(2026, 3, 3, 15, 5, tzinfo=timezone.utc))   # 10:05 ET next day
+    series = [PriceBar(bar, 100, 100, 100, 100, 1),
+              PriceBar(datetime(2026, 3, 3, 14, 30, tzinfo=timezone.utc), 120, 121, 119, 120, 1),  # gap +20 %
+              ] + [PriceBar(datetime(2026, 3, 3, 16, 0, tzinfo=timezone.utc) + timedelta(hours=i), 120, 121, 119, 120, 1)
+                   for i in range(25)]
+    asyncio.run(ShadowScorer(db, costs=ZERO).score_pending(InMemoryBarsProvider({"AAA": series}),
+                                                           now=datetime(2026, 3, 4, tzinfo=timezone.utc)))
+    with sqlite3.connect(db) as conn:
+        fwd1 = conn.execute("SELECT fwd_1 FROM shadow_outcomes").fetchone()[0]
+    assert fwd1 == pytest.approx(0.0)                                     # not +20 %
+
+
+def test_day_order_placed_late_does_not_live_into_the_next_session():
+    from datetime import date
+
+    nxt = [PriceBar(datetime(2026, 2, 3, 10 + i), 90, 91, 89, 90, 1) for i in range(3)]   # opens through the limit
+    out = score_decision("LONG", 85, 110, nxt, ZERO, limit=100.0, valid_on=date(2026, 2, 2))
+    assert (out.filled, out.exit_reason) == (False, "limit_not_filled")

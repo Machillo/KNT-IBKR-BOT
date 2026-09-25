@@ -13,7 +13,7 @@ ACCOUNT = "DU0000001"
 def cfg(**ibkr):
     base = dict(port=7497, allow_live_trading=False, account=None, readonly=True)
     base.update(ibkr)
-    return BotConfig(ibkr=IBKRConfig(**base), risk=RiskConfig(kill_switch_enabled=True),
+    return BotConfig(ibkr=IBKRConfig(**base), risk=RiskConfig(kill_switch_enabled=True, max_trade_risk_pct=0.01),
                      runtime=RuntimeConfig(require_flat_startup=True, autonomous_trading_enabled=False),
                      market_data=MarketDataConfig(market_data_type=1))
 
@@ -78,11 +78,13 @@ def test_each_broker_failure_blocks(isolated_state_dir):
 
 
 def test_config_failures_and_persisted_acks_block():
-    bad = BotConfig(ibkr=IBKRConfig(port=7496, allow_live_trading=True), risk=RiskConfig(kill_switch_enabled=False),
+    bad = BotConfig(ibkr=IBKRConfig(port=7496, allow_live_trading=True),
+                    risk=RiskConfig(kill_switch_enabled=False, max_trade_risk_pct=0.10),
                     runtime=RuntimeConfig(require_flat_startup=False, autonomous_trading_enabled=True),
                     market_data=MarketDataConfig(market_data_type=3))
     _, failed = verdict(config_checks(bad, {"KNT_SIGNAL_PAPER_ACK": "x"}))
-    assert set(failed) == {"paper_port", "live_trading_disallowed", "kill_switch_enabled", "market_data_type_live",
+    assert set(failed) == {"paper_port", "live_trading_disallowed", "kill_switch_enabled", "per_trade_risk_ceiling",
+                           "market_data_type_live",
                            "require_flat_startup", "autonomous_off", "no_ack_persisted"}
 
 
@@ -154,3 +156,30 @@ def test_preflight_fails_when_the_drawdown_state_is_missing_for_an_account_with_
         encoding="utf-8")
     _, failed = verdict(run(FakeIB(), Quotes(), isolated_state_dir))
     assert "drawdown_state_initialized" in failed
+
+
+def test_preflight_refuses_a_per_trade_risk_ceiling_looser_than_the_allocator():
+    loose = BotConfig(ibkr=IBKRConfig(port=7497, allow_live_trading=False), risk=RiskConfig(max_trade_risk_pct=0.10),
+                      runtime=RuntimeConfig(require_flat_startup=True, autonomous_trading_enabled=False),
+                      market_data=MarketDataConfig(market_data_type=1))
+    _, failed = verdict(config_checks(loose, {}))
+    assert failed == ["per_trade_risk_ceiling"]
+
+
+def test_autonomous_runners_never_use_the_plumbing_exception():
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    for runner in root.glob("*.py"):
+        text = runner.read_text(encoding="utf-8")
+        if "PLUMBING_ONLY" in text:
+            assert runner.name == "run_knt_signal_paper_once.py", runner.name
+
+
+def test_exact_one_percent_sizes_are_not_refused_by_float_rounding():
+    from risk.risk_manager import RiskManager
+
+    risk = RiskManager(RiskConfig(max_trade_risk_pct=0.01, max_position_pct=1.0))
+    # 0.1 + 0.2 style rounding: risk computed as 3 * (1.1 - 1.0) on equity 30
+    decision = risk.evaluate_trade(equity=30.000000000000004, entry_price=1.1, stop_price=1.0, quantity=3)
+    assert decision.approved

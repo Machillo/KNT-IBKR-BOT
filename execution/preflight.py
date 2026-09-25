@@ -38,6 +38,8 @@ def config_checks(cfg, env_file: dict | None) -> list[PreflightCheck]:
                        f"port={ibkr.port}"),
         PreflightCheck("live_trading_disallowed", not ibkr.allow_live_trading, "ALLOW_LIVE_TRADING must be false"),
         PreflightCheck("kill_switch_enabled", bool(risk.kill_switch_enabled), "KILL_SWITCH_ENABLED must be true"),
+        PreflightCheck("per_trade_risk_ceiling", risk.max_trade_risk_pct <= 0.01,
+                       f"MAX_TRADE_RISK_PCT={risk.max_trade_risk_pct} (must be <= 0.01, the allocator's target)"),
         PreflightCheck("market_data_type_live", cfg.market_data.market_data_type == 1,
                        f"MARKET_DATA_TYPE={cfg.market_data.market_data_type} (entries need 1)"),
         PreflightCheck("require_flat_startup", bool(runtime.require_flat_startup), "REQUIRE_FLAT_STARTUP must be true"),

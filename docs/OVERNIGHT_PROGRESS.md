@@ -54,6 +54,24 @@ check, cash reserve, replay liquidity order), plus ad-hoc ones during the round 
 readonly/dry-run, injected cancel, supervisor shielding, UTC keys, virtual book + restore,
 learning freeze, scorer executable gate / LOO, replay drawdown / pretrade, leakage gate).
 
+## Session 2, round 4 — target-architecture audit (commits after 6d8aab4)
+Audit against the target pipeline (docs/ARCHITECTURE_TARGET.md): three independent audits
+(decision flow / multi-strategy, asset-class coupling, capital allocation / evidence) plus a
+descriptive selector census on TRAIN bars (the selector picks a trade 76–86 % of the time;
+momentum_gap_v1 alone 51–57 %; three trend-like strategies ~93 %).
+Implemented (pre-FWD, small, golden-digest-guarded):
+- **safety**: bracket protective children GTC (DAY children left filled entries unprotected
+  overnight); kill switch never market-flattens non-stock / fractional positions;
+- **risk**: hard per-trade risk default 1 % (was 10 %); sizing on tick-rounded prices;
+- **selection hygiene**: online learning OFF by default in every mode; committed strategy
+  lifecycle (all SHADOW), selector evaluates SELECTABLE only, autonomous paper needs PAPER;
+- **evidence**: Opportunity records for every strategy evaluation (exploratory table, embargoed,
+  never read by FWD), IBKR stockType per decision; FWD2 counterfactual pinned;
+- **FWD protection**: restart guard on a registered window; pinned-deployment rule.
+Design only (roadmap PR-B … PR-G): evidence store with pooling, InstrumentSpec, capital
+feasibility, calibrated comparison, lifecycle promotion tooling, other asset classes.
+Mutation check: 19/19 killed (`python tools/mutation_check.py`).
+
 ## Research status
 - Tests on protocol-v1 VALIDATION: **15** (H1–H9, F1–F6) → stop searching this dataset.
 - HOLDOUT [2025-03-01, 2026-09-25): unused.
@@ -63,8 +81,10 @@ learning freeze, scorer executable gate / LOO, replay drawdown / pretrade, leaka
 
 ## Next actions (human)
 1. Review draft PR #3, including the behavior changes listed in its body. Do not merge unreviewed.
-2. From a clean checkout of the reviewed commit: `MARKET_DATA_TYPE=1`, start `python run_shadow_only.py`
-   during market hours (read-only), then `python run_shadow_report.py --register-fwd-window` once.
+2. Local `.env`: `MARKET_DATA_TYPE=1` and `MAX_TRADE_RISK_PCT=0.01` (the local file still says 0.10).
+   From a PINNED worktree of the reviewed commit, start `python run_shadow_only.py` during market
+   hours (read-only), then `python run_shadow_report.py --register-fwd-window` once and commit the
+   printed line to docs/experiments/LOG.md.
 3. Daily/weekly: `python run_fetch_journal_bars.py`, `python run_score_shadow.py`,
    `python run_shadow_report.py --persist`.
 4. After ≥ 10 VALID trading days and a dry-run drill: `python run_paper_preflight.py`, then the

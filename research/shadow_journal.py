@@ -32,7 +32,7 @@ _DECISION_EXTRA_COLUMNS = (
     ("top_entry", "REAL"), ("top_stop", "REAL"), ("top_target", "REAL"),
     ("atr", "REAL"), ("adx", "REAL"), ("volatility_stress", "REAL"),
     ("liquidity_score", "REAL"), ("selector_threshold", "REAL"), ("decision_version", "TEXT"),
-    ("reference_close", "REAL"),
+    ("reference_close", "REAL"), ("duplicate_of", "INTEGER"),
 )
 DECISION_VERSION = "selector_v1+decision_pipeline_v1"
 
@@ -179,7 +179,7 @@ class ShadowJournal:
                         regime: str, action: str, strategy: str | None, side: str | None,
                         score: float | None, entry: float | None, stop: float | None,
                         target: float | None, reason: str | None, top: dict | None = None,
-                        context: dict | None = None) -> int:
+                        context: dict | None = None, created_at: datetime | None = None) -> int:
         """Record one decision (append-only; never updated).
 
         ``top`` = best directional evaluation even when below the threshold (keys strategy,
@@ -188,22 +188,30 @@ class ShadowJournal:
         """
         top = top or {}
         context = context or {}
+        bar_text = None if bar_time is None else str(bar_time)
         with sqlite3.connect(self.path) as conn:
+            # Shadow cycles run more often than bars complete: the first decision on a
+            # completed bar is canonical, later ones are kept for audit but flagged.
+            first = None if bar_text is None else conn.execute(
+                """SELECT id FROM shadow_decisions WHERE symbol=? AND bar_time=? AND timeframe=?
+                   AND decision_version=? AND duplicate_of IS NULL ORDER BY id LIMIT 1""",
+                (symbol, bar_text, timeframe, DECISION_VERSION),
+            ).fetchone()
             cur = conn.execute(
                 """INSERT INTO shadow_decisions (cycle_id, created_at, symbol, con_id, bar_time, timeframe,
                    regime, action, strategy, side, score, entry, stop, target, reason,
                    top_strategy, top_side, top_score, top_entry, top_stop, top_target,
                    atr, adx, volatility_stress, liquidity_score, selector_threshold, decision_version,
-                   reference_close)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (cycle_id, datetime.now(timezone.utc).isoformat(), symbol, int(con_id or 0),
-                 None if bar_time is None else str(bar_time), timeframe, regime, action, strategy, side,
+                   reference_close, duplicate_of)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (cycle_id, (created_at or datetime.now(timezone.utc)).isoformat(), symbol, int(con_id or 0),
+                 bar_text, timeframe, regime, action, strategy, side,
                  score, entry, stop, target, reason,
                  top.get("strategy"), top.get("side"), top.get("score"), top.get("entry"),
                  top.get("stop"), top.get("target"),
                  context.get("atr"), context.get("adx"), context.get("volatility_stress"),
                  context.get("liquidity_score"), context.get("selector_threshold"), DECISION_VERSION,
-                 context.get("reference_close")),
+                 context.get("reference_close"), None if first is None else int(first[0])),
             )
             return int(cur.lastrowid)
 
@@ -222,55 +230,98 @@ class DecisionOutcome:
 
 
 def score_decision(side: str, stop: float, target: float, bars_after: list[PriceBar],
-                   costs: CostModel = BASELINE, max_bars: int = 60) -> DecisionOutcome:
-    """Outcome of a LONG/SHORT bracket placed at the open of ``bars_after[0]``.
+                   costs: CostModel = BASELINE, max_bars: int = 60,
+                   limit: float | None = None) -> DecisionOutcome:
+    """Outcome of a LONG/SHORT bracket evaluated on ``bars_after`` (bars after the decision).
 
-    ``bars_after`` must start with the first bar AFTER the decision bar. Returns net
-    return per share (spread/slippage/fees in bps; commission excluded because it depends
-    on size). Unresolved after ``max_bars`` -> exit at that bar's close ("timeout").
-    If fewer than ``max_bars`` bars exist and nothing triggered, ``resolved`` is False.
+    Entry:
+    * ``limit is None`` — marketable at ``bars_after[0].open`` (legacy research mode);
+    * ``limit`` given — the executor's model: LIMIT, DAY validity (bars of the first
+      bar's exchange date). An open through the limit fills at the open (capped at the
+      limit); otherwise it fills only if price trades strictly through the limit.
+      Unfilled by the end of that date -> ``limit_not_filled`` (resolved).
+    Exits: gap-aware stop-market, limit target, stop wins ties. After an INTRABAR limit
+    fill the target is not allowed on the fill bar (the high may have come first).
+    MAE/MFE are measured from the entry fill and clipped at the exit price on the exit bar.
+    Net return per share after spread/slippage/fees (commission excluded: size-dependent).
     """
     side = side.upper()
     if side not in {"LONG", "SHORT"} or not bars_after:
         return DecisionOutcome(False, "no_data", None, None, None, 0, resolved=bool(bars_after))
     long = side == "LONG"
-    raw_entry = float(bars_after[0].open)
-    if (long and not stop < raw_entry < target) or (not long and not target < raw_entry < stop):
-        return DecisionOutcome(False, "gapped_past_bracket", None, None, None, 0)
-    entry = costs.marketable_fill(raw_entry, buy=long)
-    worst = best = 0.0
     window = bars_after[:max_bars]
-    for k, bar in enumerate(window):
-        low_move = (bar.low / entry - 1) * 100
-        high_move = (bar.high / entry - 1) * 100
-        adverse, favourable = (low_move, high_move) if long else (-high_move, -low_move)
-        worst, best = min(worst, adverse), max(best, favourable)
+
+    fill_index, entry, at_open = None, None, False
+    if limit is None:
+        raw_entry = float(window[0].open)
+        if (long and not stop < raw_entry < target) or (not long and not target < raw_entry < stop):
+            return DecisionOutcome(False, "gapped_past_bracket", None, None, None, 0)
+        fill_index, entry, at_open = 0, costs.marketable_fill(raw_entry, buy=long), True
+    else:
+        day = _bar_date(window[0])
+        for k, bar in enumerate(window):
+            if _bar_date(bar) != day:
+                return DecisionOutcome(False, "limit_not_filled", None, None, None, 0)
+            if long and bar.open <= limit:
+                fill_index, entry, at_open = k, min(limit, costs.marketable_fill(float(bar.open), buy=True)), True
+            elif long and bar.low < limit:
+                fill_index, entry = k, float(limit)
+            elif not long and bar.open >= limit:
+                fill_index, entry, at_open = k, max(limit, costs.marketable_fill(float(bar.open), buy=False)), True
+            elif not long and bar.high > limit:
+                fill_index, entry = k, float(limit)
+            if fill_index is not None:
+                break
+        if fill_index is None:
+            return DecisionOutcome(False, "limit_not_filled", None, None, None, 0,
+                                   resolved=len(window) >= max_bars)
+
+    worst = best = 0.0
+    for k in range(fill_index, len(window)):
+        bar = window[k]
+        target_allowed = k > fill_index or at_open
+        exit_raw, reason, marketable = None, "", True
         if long:
-            if bar.open <= stop:
-                raw, reason, marketable = float(bar.open), "stop_gap", True
+            if bar.open <= stop and (k > fill_index or at_open):
+                exit_raw, reason = float(bar.open), "stop_gap"
             elif bar.low <= stop:
-                raw, reason, marketable = stop, "stop", True
-            elif bar.high >= target:
-                raw, reason, marketable = target, "target", False
-            else:
-                continue
+                exit_raw, reason = stop, "stop"
+            elif target_allowed and bar.high >= target:
+                exit_raw, reason, marketable = target, "target", False
         else:
-            if bar.open >= stop:
-                raw, reason, marketable = float(bar.open), "stop_gap", True
+            if bar.open >= stop and (k > fill_index or at_open):
+                exit_raw, reason = float(bar.open), "stop_gap"
             elif bar.high >= stop:
-                raw, reason, marketable = stop, "stop", True
-            elif bar.low <= target:
-                raw, reason, marketable = target, "target", False
+                exit_raw, reason = stop, "stop"
+            elif target_allowed and bar.low <= target:
+                exit_raw, reason, marketable = target, "target", False
+        low, high = float(bar.low), float(bar.high)
+        if exit_raw is not None:
+            # Clip the exit bar at the exit price: nothing beyond the fill counts as excursion.
+            stopped = reason.startswith("stop")
+            if long:
+                low, high = (max(low, exit_raw), high) if stopped else (low, min(high, exit_raw))
             else:
-                continue
-        exit_ = costs.marketable_fill(raw, buy=not long) if marketable else raw
-        ret = (exit_ / entry - 1) * (1 if long else -1) * 100 - _fee_pct(costs)
-        return DecisionOutcome(True, reason, entry, exit_, ret, k + 1, worst, best)
+                low, high = (low, min(high, exit_raw)) if stopped else (max(low, exit_raw), high)
+        up, down = (high / entry - 1) * 100, (low / entry - 1) * 100
+        adverse, favourable = (down, up) if long else (-up, -down)
+        worst, best = min(worst, adverse), max(best, favourable)
+        if exit_raw is not None:
+            exit_ = costs.marketable_fill(exit_raw, buy=not long) if marketable else exit_raw
+            ret = (exit_ / entry - 1) * (1 if long else -1) * 100 - _fee_pct(costs)
+            return DecisionOutcome(True, reason, entry, exit_, ret, k - fill_index + 1, worst, best)
     last = window[-1]
     exit_ = costs.marketable_fill(float(last.close), buy=not long)
     ret = (exit_ / entry - 1) * (1 if long else -1) * 100 - _fee_pct(costs)
-    return DecisionOutcome(True, "timeout", entry, exit_, ret, len(window), worst, best,
+    return DecisionOutcome(True, "timeout", entry, exit_, ret, len(window) - fill_index, worst, best,
                            resolved=len(window) >= max_bars)
+
+
+def _bar_date(bar: PriceBar):
+    from backtest.metrics import as_datetime
+
+    dt = as_datetime(bar.time)
+    return None if dt is None else dt.date()
 
 
 def _fee_pct(costs: CostModel) -> float:

@@ -37,19 +37,49 @@ multiple-testing correction cannot tell skill from luck or from market drift.
   - Commits that do not touch the decision path (docs, scorer, reports) do not change the
     fingerprint. Any change to the decision path does, and invalidates the window.
   - Rows before the registered start never count.
-  - **Tamper evidence:** registration prints one line. It must be committed to
-    `docs/experiments/LOG.md` (on any branch of this repository) within **3 days**. The
-    evaluator reads the git history of every ref and refuses:
-    - a registration line that was never committed, or was committed outside that delay;
+  - **Tamper evidence (guards against accidents; makes cheating deliberate, cannot prevent
+    it):** registration prints one line. Commit it DIRECTLY to `main`, push it within
+    **3 days**, and never squash, rebase or re-wrap it. The evaluator reads the git history of
+    every local ref and of `origin/main`. Lines are parsed as records (markdown and extra spaces
+    are tolerated) and deduplicated by `start_utc`. It refuses:
+    - a registration line that was never committed, is not reachable from `origin/main`, or was
+      committed outside that delay;
     - a registration line that no longer matches the registration file;
     - **more than one `FWD-v1` registration ever committed**, even one that was later deleted.
       A new window needs a new protocol id and counts in the family.
     - evaluator, scorer or gates code that differs from the protocol fingerprint;
     - shadow-only cycles of the registered decision code more than 1 hour before the start
       (a pre-registration look).
+  - **Git limitations (stated):**
+    - committer dates can be forged;
+    - rewrites of UNPUSHED commits leave no trace;
+    - a pre-registration look run in ANOTHER state directory is invisible.
+    These rules are procedural.
+  - **Registration preconditions** (`run_shadow_only.py --register-fwd-window`, applied after a
+    successful start):
+    - `MAX_TRADE_RISK_PCT ≤ 0.01` and `MARKET_DATA_TYPE = 1`;
+    - `--risk-limits-reviewed`: an explicit acknowledgement of the pinned daily-loss, drawdown
+      and position limits;
+    - `KNT_STATE_DIR` and `KNT_BOT_STATE_DIR` set, and the bot directory existing;
+    - a FRESH journal with no cycle of this code. Smoke tests use a different `KNT_STATE_DIR`,
+      never the FWD one.
   - **Ending a window:** `run_shadow_only.py --end-fwd-window` appends an end record (never
-    deletes it) and logs it at CRITICAL. An ended window is never binding. Its interim state at
-    the end, without outcome statistics, must be reported in LOG.md, and it counts in the family.
+    deletes it) and logs it at CRITICAL.
+    - Rows after the end never count.
+    - A window that ended BEFORE its binding cutoff never binds. Its interim state, without
+      outcome statistics, must be reported in LOG.md, and it counts in the family (a later
+      FWD-v2 counts v1's tests in its K).
+    - A window that had ALREADY bound keeps that result.
+  - **Binding results are stored:** the first binding result of each test is written into the
+    registration file and returned ever after. It can never be re-evaluated away.
+  - **Scores carry their rules:** every outcome row records the protocol fingerprint of the code
+    that scored it, and its provider. Rows scored under other rules (e.g. from the development
+    checkout) block binding until they are rescored from the pinned checkout. The first forward
+    returns written are frozen (no provider shopping); the trade-off is that a bad first value
+    cannot be corrected.
+  - **FWD1 → FWD2 information:** if FWD1 binds first, its unblinded selected arm is also FWD2's
+    selected arm. This is declared here. FWD2's definitions and cutoff are mechanical and
+    pinned, so seeing that arm cannot change FWD2's rules.
   - **Blinding:** until the binding moment the evaluator returns NO outcome statistic (means,
     t, missing shares, breakdowns print as `BLINDED`). `run_score_shadow.py` prints counts only
     unless `--unblind`, and every unblinded run is an interim look that must be recorded in
@@ -79,7 +109,11 @@ Every condition must hold:
 - the decision is canonical (not a duplicate), in `shadow_only` mode, with learning frozen,
   and neither a `CANDIDATE_ERROR` nor an `INSTRUMENT_EXCLUDED` row;
 - **universe:** US common stocks, ADRs and REITs as typed by IBKR (`stockType`). ETFs
-  (leveraged and inverse included), ETNs and unknown types are excluded BEFORE the decision;
+  (leveraged and inverse included), ETNs and unknown types are excluded BEFORE the decision.
+  - Deep analysis takes the first 12 ELIGIBLE names (liquidity order) whose type passes; excluded
+    types do not use up a slot (at most 36 type lookups per cycle).
+  - A FAILED type lookup is a `CANDIDATE_ERROR` (`metadata_unavailable`), never an exclusion. A
+    cycle with more than 5 % candidate errors is BLOCKING;
 - the market was open at the cycle, and the cycle carries no BLOCKING gate;
 - it was decided within 80 minutes of its decision bar completing. This excludes stale-bar
   re-decisions after restarts or overnight;
@@ -142,7 +176,8 @@ sample.
 - **Pre-registered descriptive breakdown (never tested):** at the binding moment, the
   counterfactual arm is reported by NO_TRADE reason (`no_trade_reasons`).
 - **Minimums:** ≥ 300 events in each arm and ≥ 40 paired days.
-- **Missing data:** the 10 % limit applies to EACH arm separately.
+- **Missing data:** the 10 % limit applies to each arm AND to all population rows (the
+  cohort benchmark).
 - **Decisions:**
   - **KEEP:** mean difference > 0 and t ≥ critical.
   - **REJECT** (hypothesis supported): the 95 % t-interval of the difference lies within
@@ -163,8 +198,11 @@ size its window.
 
 ## FWD3: "12-1 cross-sectional momentum works on the point-in-time scanner universe"
 - **Universe at each month-end:** every `ranked_eligible` name of the LAST market-open
-  `shadow_only` cycle of the month. Use `JournalUniverse(run_mode="shadow_only", top_n=None)`;
-  **no** 12-name cap, which exists only for per-cycle deep analysis. Require ≥ 30 members.
+  `shadow_only` cycle of the month whose latest recorded IBKR type (`instrument_types`, at or
+  before that cycle) is COMMON/ADR/REIT.
+  - Names never looked up are excluded. That is a stated bias towards the most liquid names.
+  - There is no 12-name cap; it exists only for per-cycle deep analysis.
+  - Require ≥ 30 members, otherwise that rebalance does not count.
 - **Bars:** `run_fetch_journal_bars.py` (merged history).
 - **Formation:** 12-1 month return. Pre-journal bars may be used for formation only.
 - **Measure:** equal-weight top quintile minus the universe mean, next-month return, net of
@@ -224,7 +262,7 @@ checkout, so the recipe makes them explicit.
      the bot's sticky kill and drawdown lock.
 3. **Start and register, from the worktree:**
    ```bash
-   python run_shadow_only.py --register-fwd-window
+   python run_shadow_only.py --register-fwd-window --risk-limits-reviewed
    ```
    Registration refuses unless `MAX_TRADE_RISK_PCT <= 0.01` and `MARKET_DATA_TYPE = 1`.
 4. **Commit the printed line** to `docs/experiments/LOG.md` on the development checkout (main
@@ -252,7 +290,9 @@ Safety fixes to the decision path found during the window go to the development 
 pinned process keeps running until the window binds or is explicitly ended.
 
 ## Forward replays
-`run_pipeline_backtest.py --segment forward` requires `--confirm-forward`. Comparing variants
+`run_pipeline_backtest.py --segment forward` is refused while a registered window is open and
+FWD1/FWD2 have not both bound. It prints interim statistics, so it would be an unblinded look.
+After that it requires `--confirm-forward`. Comparing variants
 on forward data is selection that uses up the FWD evidence. Only a variant registered in
 `docs/experiments/LOG.md` may be run there.
 

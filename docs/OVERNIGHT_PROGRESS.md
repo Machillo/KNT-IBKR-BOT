@@ -94,7 +94,20 @@ Reviews (6 independent perspectives):
   - quant: 1 (deployment) → fixed;
   - the remaining reviews: should-fix items → fixed or documented.
 - **Re-verification:** see PR #3.
-Mutation check: **29/29 killed** (`python tools/mutation_check.py`). Tests: 485 → 507.
+Second re-verification round (6 reviewers, 2 integrity blockers + ~15 should-fix):
+- **Integrity:**
+  - a binding result is stored and survives ending the window;
+  - outcomes carry the scoring-protocol fingerprint;
+  - registration must be on `origin/main`, with tolerant parsing;
+  - forward replays are refused while a window is open.
+- **Candidates:** failed type lookups are candidate errors (gated); excluded types do not use up
+  slots.
+- **Kill switch:** cancels only its own client's orders; fails closed without the every-client
+  view; retries while not flat.
+- **Day roll:** a failure keeps the guard running.
+- **Registration:** after start, with a risk-limit acknowledgement, both state dirs set and a
+  fresh journal.
+Mutation check: see `tools/mutation_check.py`. Tests: 485 → 518.
 Design only (roadmap PR-B … PR-G, docs/ARCHITECTURE_TARGET.md §11): evidence store with pooling,
 InstrumentSpec, capital feasibility + heat/gap budget, calibrated comparison, lifecycle tooling,
 other asset classes.
@@ -115,8 +128,8 @@ other asset classes.
 3. Deploy FWD-v1 exactly per docs/FWD_PROTOCOL.md §Pinned deployment:
    - a pinned worktree with a copied `.env`;
    - `KNT_STATE_DIR` / `KNT_BOT_STATE_DIR` set;
-   - `python run_shadow_only.py --register-fwd-window` during market hours;
-   - commit the printed line to LOG.md within 3 days.
+   - `python run_shadow_only.py --register-fwd-window --risk-limits-reviewed` during market hours, on a FRESH `KNT_STATE_DIR`;
+   - commit the printed line DIRECTLY to main and push within 3 days (never squash or re-wrap).
 4. Periodically, from the worktree: `run_fetch_journal_bars.py`, `run_score_shadow.py`
    (counts only), `run_shadow_report.py --persist`.
 5. After ≥ 10 VALID days and a dry-run drill: `run_paper_preflight.py`, then the supervised

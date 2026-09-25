@@ -13,6 +13,7 @@ import sqlite3
 from core.order_manager import OrderManager
 from core.paper_guard import PaperGuardError, PaperOrderGuard
 from execution import pretrade
+from risk.execution_lock import ExecutionLockStore
 from utils.logger import logger
 
 # Literal acknowledgement required, in addition to AUTONOMOUS_TRADING_ENABLED=true,
@@ -171,6 +172,7 @@ class PaperExecutionEngine:
         max_entries_per_day: int = 3,
         max_reference_deviation_pct: float = 0.015,
         allow_short: bool = False,
+        execution_lock: ExecutionLockStore | None = None,
     ) -> None:
         self.ib = ib
         self.account = account
@@ -188,6 +190,7 @@ class PaperExecutionEngine:
         # Shorts stay disabled until shortability/borrow/SSR checks exist.
         self.allow_short = bool(allow_short)
         self._in_flight: set[str] = set()
+        self.execution_lock = execution_lock or ExecutionLockStore()
 
     @staticmethod
     def _normalize_stock_price(value: float) -> float:
@@ -365,6 +368,8 @@ class PaperExecutionEngine:
         if self.risk_manager is None:
             return self._reject(request, "BLOCKED", "risk_manager_required")
         today = datetime.now(timezone.utc).date().isoformat()
+        if self.execution_lock.read() is not None:
+            return self._reject(request, "BLOCKED", "execution_lock_present")
         if self.journal.unresolved_failures_on(today):
             return self._reject(request, "BLOCKED", "unresolved_execution_failure_today")
         # Pure checks shared with order-free shadow and replay (execution/pretrade.py).
@@ -484,9 +489,15 @@ class PaperExecutionEngine:
         return PaperExecutionResult(True, "bracket_confirmed", parent_id)
 
     def _lock(self, reason: str) -> None:
+        """Broker state uncertain: lock in memory AND persist a lock that survives restarts and
+        the next day until a human clears it (run_reset_execution_lock.py)."""
         lock = getattr(self.risk_manager, "lock_trading", None)
         if lock is not None:
             lock(reason)
+        try:
+            self.execution_lock.set(reason)
+        except Exception as exc:
+            logger.critical("EXECUTION LOCK NOT PERSISTED | in-memory lock only | %s", type(exc).__name__)
 
     def _record_safely(self, normalized: PaperExecutionRequest, status: str, reason: str,
                        parent_id: int | None) -> None:

@@ -13,9 +13,11 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from core.paper_guard import verify_paper_account
+from risk.execution_lock import ExecutionLockStore
 from risk.persisted_locks import persisted_lock_reason
 
 ACK_NAMES = ("KNT_SIGNAL_PAPER_ACK", "AUTONOMOUS_PAPER_ACK", "KILL_SWITCH_DRILL_ACK", "PAPER_SMOKE_ACK",
+             "EXECUTION_LOCK_RESET_ACK",
              "DRAWDOWN_RESET_ACK")
 MAX_PLUMBING_QTY = 1.0
 
@@ -105,6 +107,9 @@ async def broker_checks(ib, cfg, *, state_dir: Path, market_data=None, probe_con
     trading_date = datetime.now(ZoneInfo("America/New_York")).date().isoformat()
     lock = persisted_lock_reason(state_dir, account, trading_date)
     checks.append(PreflightCheck("no_persisted_lock", lock is None, lock or "none"))
+    execution_lock = ExecutionLockStore(Path(state_dir) / "execution_lock.json").read()
+    checks.append(PreflightCheck("no_execution_lock", execution_lock is None,
+                                 "none" if execution_lock is None else str(execution_lock.get("reason"))))
     return checks, account
 
 

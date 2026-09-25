@@ -263,15 +263,16 @@ class ShadowTradingEngine:
     def _restore_virtual_book(self) -> None:
         """After a restart, today's would-be entries come back from the journal: a restart must
         not free capacity or reset the daily cap (REPLAY_PARITY N1)."""
-        self._virtual_book_restored = True
         if self.journal is None:
+            self._virtual_book_restored = True
             return
         today = datetime.now(timezone.utc).date().isoformat()
         try:
             rows = self.journal.would_be_entries_on(today, self.run_mode)
         except Exception as exc:
-            logger.warning("VIRTUAL BOOK restore failed | error=%s", exc)
+            logger.warning("VIRTUAL BOOK restore failed (retried next cycle) | error=%s", exc)
             return
+        self._virtual_book_restored = True
         known = {o.symbol for _, o in self._virtual_book}
         for r in rows:
             if r["symbol"] in known or not r["quantity"] or not r["notional"]:

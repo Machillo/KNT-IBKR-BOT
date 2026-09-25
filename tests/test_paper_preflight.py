@@ -102,3 +102,43 @@ def test_plumbing_runner_requires_three_confirmations_and_one_share():
     assert "broker_checks(" in text and "MAX_PLUMBING_QTY" in text
     from execution.preflight import MAX_PLUMBING_QTY
     assert MAX_PLUMBING_QTY == 1.0
+
+
+def test_execution_lock_blocks_the_preflight(isolated_state_dir):
+    from risk.execution_lock import ExecutionLockStore
+
+    ExecutionLockStore(isolated_state_dir / "execution_lock.json").set("partial bracket")
+    _, failed = verdict(run(FakeIB(), Quotes(), isolated_state_dir))
+    assert "no_execution_lock" in failed
+
+
+def test_execution_lock_reset_requires_ack_and_a_clean_broker(isolated_state_dir, monkeypatch):
+    import pytest
+    import run_reset_execution_lock
+    from config.config import BotConfig
+    from core.connection import IBKRConnection
+    from risk.execution_lock import RESET_ACK, ExecutionLockStore
+
+    store = ExecutionLockStore(isolated_state_dir / "execution_lock.json")
+    store.set("partial bracket")
+    monkeypatch.setattr("config.config.persisted_env", lambda: {})
+    monkeypatch.setattr("config.config.config", cfg())
+    dirty = FakeIB(positions=[SimpleNamespace(account=ACCOUNT, position=1)])
+
+    async def connect(self):
+        return dirty
+
+    async def disconnect(self):
+        return None
+    monkeypatch.setattr(IBKRConnection, "connect", connect)
+    monkeypatch.setattr(IBKRConnection, "disconnect", disconnect)
+    monkeypatch.delenv("EXECUTION_LOCK_RESET_ACK", raising=False)
+    with pytest.raises(SystemExit):
+        asyncio.run(run_reset_execution_lock.main())               # no ACK
+    monkeypatch.setenv("EXECUTION_LOCK_RESET_ACK", RESET_ACK)
+    with pytest.raises(SystemExit):
+        asyncio.run(run_reset_execution_lock.main())               # broker not flat
+    assert store.read() is not None
+    dirty._positions = []
+    asyncio.run(run_reset_execution_lock.main())
+    assert store.read() is None

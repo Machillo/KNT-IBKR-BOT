@@ -20,6 +20,7 @@ reported as UNAVAILABLE instead of silently passing.
 from __future__ import annotations
 
 import math
+import numbers as numbers_mod
 from dataclasses import dataclass, replace
 from datetime import datetime
 from decimal import ROUND_HALF_UP, Decimal
@@ -96,7 +97,7 @@ def evaluate(request: PreTradeRequest, ctx: PreTradeContext) -> PreTradeResult:
     if ctx.trading_locked:
         return _result("risk_manager_locked", request)
     numbers = (request.quantity, request.entry_price, request.stop_price, request.target_price)
-    if not all(isinstance(x, (int, float)) and math.isfinite(x) for x in numbers) or min(numbers) <= 0:
+    if not all(isinstance(x, numbers_mod.Real) and math.isfinite(float(x)) for x in numbers) or min(numbers) <= 0:
         return _result("invalid_execution_request", request)
     side = request.side.upper()
     if side not in {"LONG", "SHORT"}:

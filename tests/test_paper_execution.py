@@ -503,4 +503,30 @@ def test_unresolved_failure_blocks_entries_after_a_restart(tmp_path):
     restarted = engine(tmp_path, FakeIB(), enabled=True, risk_manager=RiskManager(RiskConfig()),
                        max_entries_per_day=5)
     result = run(restarted.submit(stock("MSFT"), request(symbol="MSFT")))
+    assert (result.submitted, result.reason) == (False, "execution_lock_present")   # persisted lock file
+    # Backstop: even if the lock file were lost, today's FAILED journal row still blocks.
+    from risk.execution_lock import ExecutionLockStore
+    no_file = engine(tmp_path, FakeIB(), enabled=True, risk_manager=RiskManager(RiskConfig()),
+                     max_entries_per_day=5, execution_lock=ExecutionLockStore(tmp_path / "missing.json"))
+    result = run(no_file.submit(stock("MSFT"), request(symbol="MSFT")))
     assert (result.submitted, result.reason) == (False, "unresolved_execution_failure_today")
+
+
+def test_execution_lock_persists_across_days_until_a_human_clears_it(tmp_path):
+    import pytest as _pytest
+    from risk.execution_lock import RESET_ACK, ExecutionLockStore
+
+    store = ExecutionLockStore(tmp_path / "lock.json")
+    e = engine(tmp_path, ExplodingTransmitIB(), enabled=True, risk_manager=RiskManager(RiskConfig()),
+               execution_lock=store)
+    run(e.submit(stock(), request()))
+    assert store.read()["reason"].startswith("paper execution transmission error")
+    fresh = engine(tmp_path / "other_day", FakeIB(), enabled=True, risk_manager=RiskManager(RiskConfig()),
+                   execution_lock=store)                      # new journal = a new day, same lock file
+    assert run(fresh.submit(stock(), request())).reason == "execution_lock_present"
+    with _pytest.raises(PermissionError):
+        store.clear("yes")
+    store.clear(RESET_ACK)
+    assert store.read() is None
+    (tmp_path / "lock.json").write_text("{corrupt", encoding="utf-8")
+    assert store.read() is not None                           # unreadable = locked

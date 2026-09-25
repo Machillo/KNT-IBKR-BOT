@@ -386,8 +386,9 @@ def test_replay_applies_the_executor_pretrade_checks_on_rounded_prices():
     class SubTick(AlwaysLong):
         def evaluate(self, bars):
             p = round(bars[-1].close, 2)
-            # stop 0.004 below entry: rounds to the entry -> invalid geometry after normalization
-            return StrategySignal(SignalSide.LONG, 99, p, p - 0.004, p * 1.03, "subtick")
+            # target 0.004 above entry: rounds to the entry -> invalid geometry after normalization
+            # (the allocator never sees the target, so only the shared pretrade check can refuse it)
+            return StrategySignal(SignalSide.LONG, 99, p, p * 0.97, p + 0.004, "subtick")
     bt = replay({"A": walk(3)})
     bt.selector.strategies = [SubTick()]
     result = bt.run()
@@ -508,3 +509,27 @@ def test_merge_bars_dedupes_the_same_instant_written_differently():
     merged = merge_bars([{"time": "2026-01-02T15:00:00+00:00", "close": 1}],
                         [{"time": "2026-01-02T10:00:00-05:00", "close": 2}])
     assert [r["close"] for r in merged] == [2]
+
+
+def test_pipeline_sizes_on_tick_rounded_prices_and_hard_risk_defaults_to_one_percent():
+    from config.config import RiskConfig as RC
+    from engine.decision import DecisionPipeline as DP
+    from engine.strategy_selector import StrategySelector
+    from portfolio.admission import PortfolioAdmissionCoordinator
+    from portfolio.allocation import PortfolioAllocator
+
+    assert RC().max_trade_risk_pct == 0.01 and PipelineConfig().max_trade_risk_pct == 0.01
+
+    class SubTickEntry(AlwaysLong):
+        def evaluate(self, bars):
+            return StrategySignal(SignalSide.LONG, 99, 142.855, 139.996, 150.0, "subtick")
+
+    selector = StrategySelector(55.0, None, pause_directional_high_volatility=False)
+    selector.strategies = [SubTickEntry()]
+    risk = RiskManager(RC())
+    pipeline = DP(selector, PortfolioAllocator(risk_pct=0.01, max_position_pct=0.10),
+                  PortfolioAdmissionCoordinator(risk))
+    state = PortfolioState(PortfolioSnapshot(10_000, 10_000, 0, 0, 0, 0, 1_000), (), ())
+    decision = pipeline.decide(walk(1), symbol="A", portfolio_state=state)
+    assert decision.proposal.entry_price == 142.86 and decision.proposal.stop_price == 140.0
+    assert decision.proposal.entry_price * decision.proposal.quantity <= 1_000.0     # within the 10 % cap

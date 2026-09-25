@@ -65,7 +65,7 @@ class PipelineConfig:
     allow_short: bool = False                       # live executor refuses shorts today
     risk_pct: float = 0.01                          # allocator: min(1 %, MAX_TRADE_RISK_PCT)
     use_volatility_multiplier: bool = True
-    max_trade_risk_pct: float = 0.10                # RiskConfig default (hard ceiling)
+    max_trade_risk_pct: float = 0.01                # RiskConfig default (hard ceiling)
     max_position_pct: float = 0.10                  # MAX_POSITION_PCT default
     max_gross_exposure_pct: float = 0.80            # PortfolioBrain default
     cash_reserve_pct: float = 0.05

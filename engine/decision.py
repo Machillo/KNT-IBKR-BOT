@@ -21,6 +21,7 @@ from math import sqrt
 from typing import Callable
 
 from engine.strategy_selector import StrategySelection
+from execution.pretrade import tick
 from market.history import PriceBar
 from portfolio.admission import PortfolioAdmissionDecision
 from portfolio.allocation import AllocationProposal
@@ -144,9 +145,12 @@ class DecisionPipeline:
             return TradeDecision(symbol, "PORTFOLIO_REJECTED", "hard_risk_manager_unavailable", selection)
         stress = max(1.0, float(selection.regime.volatility_stress or 1.0))
         volatility_multiplier = max(0.25, min(1.0, 1.0 / stress))
+        # Size on the prices that will actually be transmitted (tick-rounded): sizing on raw
+        # prices could put the rounded notional/risk just over a cap and get the trade refused
+        # by the executor's re-check after the decision had already consumed capacity.
         proposal = self.allocator.propose(
             portfolio_state.snapshot, symbol=symbol, asset_class=asset_class,
-            entry_price=float(signal.entry), stop_price=float(signal.stop),
+            entry_price=tick(float(signal.entry)), stop_price=tick(float(signal.stop)),
             volatility_multiplier=volatility_multiplier,
         )
         if proposal is None:

@@ -51,7 +51,9 @@ class IBKRConfig:
 
 @dataclass(frozen=True)
 class RiskConfig:
-    max_trade_risk_pct: float = field(default_factory=lambda: float(getenv("MAX_TRADE_RISK_PCT", "0.10")))
+    # Hard per-trade risk ceiling. 1 % = what the allocator targets, so the hard layer enforces
+    # the same number instead of a 10x looser one (tightening only; never relax).
+    max_trade_risk_pct: float = field(default_factory=lambda: float(getenv("MAX_TRADE_RISK_PCT", "0.01")))
     max_daily_loss_pct: float = field(default_factory=lambda: float(getenv("MAX_DAILY_LOSS_PCT", "0.10")))
     max_position_pct: float = field(default_factory=lambda: float(getenv("MAX_POSITION_PCT", "0.10")))
     kill_switch_enabled: bool = field(default_factory=lambda: env_bool("KILL_SWITCH_ENABLED", True))

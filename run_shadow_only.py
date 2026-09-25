@@ -16,6 +16,17 @@ from dataclasses import replace
 from config.config import STATE_DIR, BotConfig, config, read_only_ibkr_settings
 
 
+EXPECTED_READONLY_LOCK = "paper_account_unverified:readonly_session"
+
+
+def research_lock(risk) -> bool:
+    """Lock state used for research decisions. The read-only session is (correctly) never
+    verified as paper, which locks entries; in this order-incapable process that lock is
+    expected and would otherwise turn every decision into 'allocation_unavailable'. Any
+    other lock (daily loss, drawdown, monitoring error) is kept."""
+    return bool(risk.trading_locked) and str(risk.lock_reason) != EXPECTED_READONLY_LOCK
+
+
 def shadow_only_config(base: BotConfig) -> BotConfig:
     """Same runtime settings, but a read-only session, own clientId, dry-run kill switch and
     autonomous trading disabled — nothing in this process can send an order."""
@@ -61,7 +72,7 @@ async def main_async(args) -> None:
                 snapshot = await supervisor.accounts.snapshot(context.account, log=False)
                 state = states.build(snapshot, starting_equity=context.starting_equity,
                                      daily_loss_limit_pct=cfg.risk.max_daily_loss_pct,
-                                     trading_locked=context.risk.trading_locked)
+                                     trading_locked=research_lock(context.risk))
                 await shadow.run_once(cfg.runtime.discovery_rows, portfolio_state=state)
             except Exception as exc:
                 logger.exception("SHADOW-ONLY cycle failed | error=%s", exc)

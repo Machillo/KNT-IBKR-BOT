@@ -19,6 +19,7 @@ reported as UNAVAILABLE instead of silently passing.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, replace
 from datetime import datetime
 from decimal import ROUND_HALF_UP, Decimal
@@ -51,8 +52,11 @@ class PreTradeContext:
     allow_short: bool = False
     max_reference_deviation_pct: float = 0.015
     reference_available: bool = True
-    now: datetime | None = None                # None = freshness not checkable (replay: fresh by construction)
+    now: datetime | None = None                # the clock; required unless freshness_checked=False
     max_bar_age_seconds: float = 4500.0        # bar size (1 h) + cadence (15 min)
+    # Only an explicit False (the intraday replay, where orders are placed at the decision
+    # bar's completion) skips the freshness check; a missing clock is otherwise refused.
+    freshness_checked: bool = True
 
 
 @dataclass(frozen=True)
@@ -91,7 +95,8 @@ def evaluate(request: PreTradeRequest, ctx: PreTradeContext) -> PreTradeResult:
         return _result("market_session_closed", request)
     if ctx.trading_locked:
         return _result("risk_manager_locked", request)
-    if min(request.quantity, request.entry_price, request.stop_price, request.target_price) <= 0:
+    numbers = (request.quantity, request.entry_price, request.stop_price, request.target_price)
+    if not all(isinstance(x, (int, float)) and math.isfinite(x) for x in numbers) or min(numbers) <= 0:
         return _result("invalid_execution_request", request)
     side = request.side.upper()
     if side not in {"LONG", "SHORT"}:
@@ -100,7 +105,9 @@ def evaluate(request: PreTradeRequest, ctx: PreTradeContext) -> PreTradeResult:
         return _result("short_entries_disabled", request)
     if ctx.entries_today >= ctx.max_entries_per_day:
         return _result("daily_entry_limit_reached", request)
-    if ctx.now is not None:
+    if ctx.freshness_checked:
+        if ctx.now is None:
+            return _result("freshness_clock_missing", request)
         done = request.bar_completed_at
         if done is None or done.tzinfo is None:
             return _result("decision_bar_time_missing", request)
@@ -118,7 +125,7 @@ def evaluate(request: PreTradeRequest, ctx: PreTradeContext) -> PreTradeResult:
     if normalized.market_data_type not in FRESH_MARKET_DATA_TYPES:
         return _result("reference_not_live_market_data", normalized)
     ref = normalized.reference_price
-    if ref is None or ref <= 0:
+    if ref is None or not math.isfinite(ref) or ref <= 0:
         return _result("fresh_reference_price_missing", normalized)
     if abs(normalized.entry_price - ref) / ref > ctx.max_reference_deviation_pct:
         return _result("entry_far_from_fresh_reference", normalized)

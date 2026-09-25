@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import signal
 
-from dotenv import dotenv_values
+from config.config import persisted_env
 
 from config.config import config
 from core.connection import IBKRConnection
@@ -93,7 +93,7 @@ async def main() -> None:
         # session verified as PAPER by account prefix (not just by port).
         armed = autonomous_paper_armed(
             config.runtime.autonomous_trading_enabled,
-            persisted_ack=dotenv_values(".env").get("AUTONOMOUS_PAPER_ACK"),
+            persisted_ack=persisted_env().get("AUTONOMOUS_PAPER_ACK"),
         )
         if config.runtime.autonomous_trading_enabled and not armed:
             logger.warning("AUTONOMOUS_TRADING_ENABLED=true but AUTONOMOUS_PAPER_ACK missing | executor disabled")

@@ -558,7 +558,7 @@ class PipelineBacktest:
                 session_open=not (self.intraday[symbol] and times[i + 1].date() != t.date()),
                 trading_locked=self.risk.trading_locked, entries_today=entries_today,
                 max_entries_per_day=cfg.max_entries_per_day, allow_short=cfg.allow_short,
-                reference_available=False),
+                reference_available=False, freshness_checked=False),
         )
         if check.reason == "market_session_closed":
             stats["session_closed"] += 1

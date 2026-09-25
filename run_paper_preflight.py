@@ -12,16 +12,15 @@ import asyncio
 
 
 async def main_async(args) -> int:
-    from dotenv import dotenv_values
     from ib_async import Stock
 
-    from config.config import STATE_DIR, config, read_only_ibkr_settings
+    from config.config import STATE_DIR, config, persisted_env, read_only_ibkr_settings
     from core.connection import IBKRConnection
     from core.market_data import MarketDataService
     from execution.preflight import broker_checks, config_checks, verdict
     from market.session import BrokerCalendarSessionPolicy
 
-    checks = config_checks(config, dotenv_values(".env"))
+    checks = config_checks(config, persisted_env())
     settings = read_only_ibkr_settings(config.ibkr, 55)
     connection = IBKRConnection(settings)
     try:

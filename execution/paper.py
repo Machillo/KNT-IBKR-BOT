@@ -407,14 +407,16 @@ class PaperExecutionEngine:
                 adaptive_parent=True,
             )
         except PaperGuardError:
+            # The guard can refuse between legs (e.g. a disconnect after the parent was placed
+            # untransmitted): the broker state is unknown, so lock new entries as well.
+            self._lock("paper guard refused during bracket transmission; broker state must be checked")
             return self._reject(normalized, "BLOCKED", "paper_guard_refused")
         except Exception as exc:
             # Transport/broker failure mid-transmission: legs may be partially sent.
+            # Lock FIRST: a journal failure must never leave trading unlocked.
             reason = f"transmission_error_manual_check:{type(exc).__name__}"
-            self.journal.record(normalized, status="FAILED", reason=reason)
-            lock = getattr(self.risk_manager, "lock_trading", None)
-            if lock is not None:
-                lock("paper execution transmission error; broker state must be checked")
+            self._lock("paper execution transmission error; broker state must be checked")
+            self._record_safely(normalized, "FAILED", reason, None)
             return PaperExecutionResult(False, reason)
         parent_id = int(trades[0].order.orderId)
         self._record_after_transmit(normalized, "PENDING", "bracket_sent", parent_id)
@@ -428,10 +430,8 @@ class PaperExecutionEngine:
             # Could not confirm or unwind (e.g. disconnect / guard refusal while
             # flattening). Fail closed: record it and lock all new entries.
             reason = f"unwind_failed_manual_intervention:{type(exc).__name__}"
-            self.journal.record(normalized, status="FAILED", reason=reason, parent_order_id=parent_id)
-            lock = getattr(self.risk_manager, "lock_trading", None)
-            if lock is not None:
-                lock(f"paper execution unwind failed for parent {parent_id}")
+            self._lock(f"paper execution unwind failed for parent {parent_id}")
+            self._record_safely(normalized, "FAILED", reason, parent_id)
             return PaperExecutionResult(False, reason, parent_id)
 
     def _confirm_or_unwind(self, contract, normalized: PaperExecutionRequest, trades,
@@ -470,6 +470,17 @@ class PaperExecutionEngine:
         lock = getattr(self.risk_manager, "lock_trading", None)
         if lock is not None:
             lock(reason)
+
+    def _record_safely(self, normalized: PaperExecutionRequest, status: str, reason: str,
+                       parent_id: int | None) -> None:
+        try:
+            if parent_id is None:
+                self.journal.record(normalized, status=status, reason=reason)
+            else:
+                self.journal.record(normalized, status=status, reason=reason, parent_order_id=parent_id)
+        except Exception as exc:
+            logger.critical("TRADE JOURNAL WRITE FAILED on failure path | status=%s error=%s",
+                            status, type(exc).__name__)
 
     def _record_after_transmit(self, normalized: PaperExecutionRequest, status: str, reason: str,
                                parent_id: int) -> None:

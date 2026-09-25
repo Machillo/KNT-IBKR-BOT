@@ -97,7 +97,8 @@ def test_plumbing_runner_requires_three_confirmations_and_one_share():
     from pathlib import Path
 
     text = (Path(__file__).resolve().parents[1] / "run_knt_signal_paper_once.py").read_text(encoding="utf-8")
-    assert "--confirm-paper-plumbing" in text and 'dotenv_values(".env").get("KNT_SIGNAL_PAPER_ACK")' in text
+    assert "--confirm-paper-plumbing" in text and 'persisted_env().get("KNT_SIGNAL_PAPER_ACK")' in text
+    assert "math.isfinite(max_qty)" in text
     assert "broker_checks(" in text and "MAX_PLUMBING_QTY" in text
     from execution.preflight import MAX_PLUMBING_QTY
     assert MAX_PLUMBING_QTY == 1.0

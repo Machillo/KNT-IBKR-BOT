@@ -15,7 +15,9 @@ def _req(**kw):
 
 
 def _ctx(**kw):
-    base = dict(session_open=True, trading_locked=False, entries_today=0, max_entries_per_day=3)
+    # Freshness is tested separately (test_decision_bar_freshness); the table covers the rest.
+    base = dict(session_open=True, trading_locked=False, entries_today=0, max_entries_per_day=3,
+                freshness_checked=False)
     base.update(kw)
     return PreTradeContext(**base)
 
@@ -76,9 +78,17 @@ def test_decision_bar_freshness():
 
     now = datetime(2026, 3, 2, 14, 40, tzinfo=timezone.utc)
     fresh = _req(bar_completed_at=now - timedelta(minutes=10))
-    assert pretrade.evaluate(fresh, _ctx(now=now)).passed
+    assert pretrade.evaluate(fresh, _ctx(now=now, freshness_checked=True)).passed
     stale = _req(bar_completed_at=now - timedelta(hours=17))
-    assert pretrade.evaluate(stale, _ctx(now=now)).reason == "stale_decision_bar"
-    assert pretrade.evaluate(_req(), _ctx(now=now)).reason == "decision_bar_time_missing"
-    # Replay (now=None): fresh by construction, not checked.
-    assert pretrade.evaluate(_req(), _ctx()).passed
+    assert pretrade.evaluate(stale, _ctx(now=now, freshness_checked=True)).reason == "stale_decision_bar"
+    assert pretrade.evaluate(_req(), _ctx(now=now, freshness_checked=True)).reason == "decision_bar_time_missing"
+    # Default context: a missing clock is REFUSED, never a silent skip.
+    assert pretrade.evaluate(fresh, PreTradeContext(session_open=True, trading_locked=False, entries_today=0,
+                                                    max_entries_per_day=3)).reason == "freshness_clock_missing"
+
+
+def test_non_finite_numbers_are_refused():
+    nan = float("nan")
+    assert pretrade.evaluate(_req(quantity=nan), _ctx()).reason == "invalid_execution_request"
+    assert pretrade.evaluate(_req(entry_price=float("inf")), _ctx()).reason == "invalid_execution_request"
+    assert pretrade.evaluate(_req(reference_price=nan), _ctx()).reason == "fresh_reference_price_missing"

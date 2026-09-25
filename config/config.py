@@ -6,7 +6,17 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv()
+# Absolute, repo-anchored .env: loading AND the "ACK must not be persisted" refusals read the same
+# file, whatever the current directory is.
+ENV_FILE = Path(__file__).resolve().parents[1] / ".env"
+load_dotenv(ENV_FILE)
+
+
+def persisted_env() -> dict:
+    """Values stored in the repo .env (never the process environment)."""
+    from dotenv import dotenv_values
+
+    return dict(dotenv_values(ENV_FILE)) if ENV_FILE.exists() else {}
 
 
 def env_bool(name: str, default: bool = False) -> bool:

@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 from os import getenv
 
-from dotenv import dotenv_values
+from config.config import persisted_env
 
 from config.config import STATE_DIR, config, read_only_ibkr_settings
 from core.account import AccountService
@@ -20,7 +20,7 @@ from risk.drawdown_guard import RESET_ACK, DrawdownStateStore
 
 
 async def main(state_dir=None) -> None:
-    if dotenv_values(".env").get("DRAWDOWN_RESET_ACK"):
+    if persisted_env().get("DRAWDOWN_RESET_ACK"):
         raise SystemExit("DRAWDOWN_RESET_ACK must not be stored in .env; export it for this run only")
     if getenv("DRAWDOWN_RESET_ACK", "") != RESET_ACK:
         raise SystemExit(f"Set DRAWDOWN_RESET_ACK={RESET_ACK} to reset the drawdown lock")

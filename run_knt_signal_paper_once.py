@@ -36,8 +36,10 @@ class OneShotCappedPaperExecutor:
     """
 
     def __init__(self, executor: PaperExecutionEngine, *, max_quantity: float = 1.0) -> None:
-        if max_quantity <= 0:
-            raise ValueError("max_quantity must be > 0")
+        import math
+
+        if not math.isfinite(float(max_quantity)) or max_quantity <= 0:
+            raise ValueError("max_quantity must be a finite number > 0")
         self.executor = executor
         self.max_quantity = float(max_quantity)
         self.submitted = 0
@@ -60,7 +62,7 @@ class OneShotCappedPaperExecutor:
 
 
 async def main(args) -> None:
-    from dotenv import dotenv_values
+    from config.config import persisted_env
     from ib_async import Stock
 
     from config.config import STATE_DIR
@@ -68,7 +70,7 @@ async def main(args) -> None:
 
     if not args.confirm_paper_plumbing:
         raise RuntimeError("Pass --confirm-paper-plumbing (second confirmation) for this one run")
-    if dotenv_values(".env").get("KNT_SIGNAL_PAPER_ACK"):
+    if persisted_env().get("KNT_SIGNAL_PAPER_ACK"):
         raise RuntimeError("KNT_SIGNAL_PAPER_ACK must not be stored in .env; set it for this run only")
     config.validate()
     if config.ibkr.port not in config.ibkr.paper_ports:
@@ -84,10 +86,12 @@ async def main(args) -> None:
     if getenv("KNT_SIGNAL_PAPER_ACK", "") != ACK:
         raise RuntimeError(f"Set KNT_SIGNAL_PAPER_ACK={ACK} for this one run")
 
+    import math
+
     max_qty = float(getenv("KNT_SIGNAL_PAPER_MAX_QTY", "1"))
-    if max_qty <= 0 or max_qty > MAX_PLUMBING_QTY:
+    if not math.isfinite(max_qty) or max_qty <= 0 or max_qty > MAX_PLUMBING_QTY:
         raise RuntimeError(f"KNT_SIGNAL_PAPER_MAX_QTY must be > 0 and <= {MAX_PLUMBING_QTY:g} for plumbing")
-    failed_config = [c.name for c in config_checks(config, dotenv_values(".env")) if c.required and not c.ok]
+    failed_config = [c.name for c in config_checks(config, persisted_env()) if c.required and not c.ok]
     if failed_config:
         raise RuntimeError(f"Paper plumbing preflight (config) failed: {failed_config}")
 

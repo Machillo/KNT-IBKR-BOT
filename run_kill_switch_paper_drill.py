@@ -73,7 +73,7 @@ async def run_drill(ib, settings: IBKRConfig, *, armed: bool, ack: str, max_qty:
 async def main_async(args) -> None:
     from dataclasses import replace
 
-    from dotenv import dotenv_values
+    from config.config import persisted_env
 
     from config.config import config
     from core.connection import IBKRConnection
@@ -84,7 +84,7 @@ async def main_async(args) -> None:
         ib = await connection.connect()
         outcome = await run_drill(ib, settings, armed=args.armed, ack=getenv("KILL_SWITCH_DRILL_ACK", ""),
                                   max_qty=args.max_qty,
-                                  persisted_ack=dotenv_values(".env").get("KILL_SWITCH_DRILL_ACK"))
+                                  persisted_ack=persisted_env().get("KILL_SWITCH_DRILL_ACK"))
         print(f"KILL SWITCH DRILL | account={mask_account(config.ibkr.account)} {outcome}")
     finally:
         await connection.disconnect()

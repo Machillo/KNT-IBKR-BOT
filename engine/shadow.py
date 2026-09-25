@@ -137,6 +137,7 @@ class ShadowTradingEngine:
             "adx": regime.adx, "volatility_stress": regime.volatility_stress,
             "liquidity_score": getattr(candidate, "score", None),
             "selector_threshold": getattr(self.selector, "minimum_score", None),
+            "reference_close": bars[-1].close if bars else None,
         }
         try:
             self.journal.record_decision(

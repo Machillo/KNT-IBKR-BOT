@@ -32,6 +32,7 @@ _DECISION_EXTRA_COLUMNS = (
     ("top_entry", "REAL"), ("top_stop", "REAL"), ("top_target", "REAL"),
     ("atr", "REAL"), ("adx", "REAL"), ("volatility_stress", "REAL"),
     ("liquidity_score", "REAL"), ("selector_threshold", "REAL"), ("decision_version", "TEXT"),
+    ("reference_close", "REAL"),
 )
 DECISION_VERSION = "selector_v1+decision_pipeline_v1"
 
@@ -192,15 +193,17 @@ class ShadowJournal:
                 """INSERT INTO shadow_decisions (cycle_id, created_at, symbol, con_id, bar_time, timeframe,
                    regime, action, strategy, side, score, entry, stop, target, reason,
                    top_strategy, top_side, top_score, top_entry, top_stop, top_target,
-                   atr, adx, volatility_stress, liquidity_score, selector_threshold, decision_version)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   atr, adx, volatility_stress, liquidity_score, selector_threshold, decision_version,
+                   reference_close)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (cycle_id, datetime.now(timezone.utc).isoformat(), symbol, int(con_id or 0),
                  None if bar_time is None else str(bar_time), timeframe, regime, action, strategy, side,
                  score, entry, stop, target, reason,
                  top.get("strategy"), top.get("side"), top.get("score"), top.get("entry"),
                  top.get("stop"), top.get("target"),
                  context.get("atr"), context.get("adx"), context.get("volatility_stress"),
-                 context.get("liquidity_score"), context.get("selector_threshold"), DECISION_VERSION),
+                 context.get("liquidity_score"), context.get("selector_threshold"), DECISION_VERSION,
+                 context.get("reference_close")),
             )
             return int(cur.lastrowid)
 
@@ -213,6 +216,9 @@ class DecisionOutcome:
     exit: float | None
     return_pct: float | None
     bars_held: int
+    mae_pct: float | None = None  # worst adverse excursion from the entry fill, % (<= 0)
+    mfe_pct: float | None = None  # best favourable excursion from the entry fill, % (>= 0)
+    resolved: bool = True         # False when the bracket is still open at the end of the data
 
 
 def score_decision(side: str, stop: float, target: float, bars_after: list[PriceBar],
@@ -220,18 +226,25 @@ def score_decision(side: str, stop: float, target: float, bars_after: list[Price
     """Outcome of a LONG/SHORT bracket placed at the open of ``bars_after[0]``.
 
     ``bars_after`` must start with the first bar AFTER the decision bar. Returns net
-    return per share (entry/exit costs in bps; commission excluded because it depends on
-    size). Unresolved after ``max_bars`` -> exit at that bar's close ("timeout").
+    return per share (spread/slippage/fees in bps; commission excluded because it depends
+    on size). Unresolved after ``max_bars`` -> exit at that bar's close ("timeout").
+    If fewer than ``max_bars`` bars exist and nothing triggered, ``resolved`` is False.
     """
     side = side.upper()
     if side not in {"LONG", "SHORT"} or not bars_after:
-        return DecisionOutcome(False, "no_data", None, None, None, 0)
+        return DecisionOutcome(False, "no_data", None, None, None, 0, resolved=bool(bars_after))
     long = side == "LONG"
     raw_entry = float(bars_after[0].open)
     if (long and not stop < raw_entry < target) or (not long and not target < raw_entry < stop):
         return DecisionOutcome(False, "gapped_past_bracket", None, None, None, 0)
     entry = costs.marketable_fill(raw_entry, buy=long)
-    for k, bar in enumerate(bars_after[:max_bars]):
+    worst = best = 0.0
+    window = bars_after[:max_bars]
+    for k, bar in enumerate(window):
+        low_move = (bar.low / entry - 1) * 100
+        high_move = (bar.high / entry - 1) * 100
+        adverse, favourable = (low_move, high_move) if long else (-high_move, -low_move)
+        worst, best = min(worst, adverse), max(best, favourable)
         if long:
             if bar.open <= stop:
                 raw, reason, marketable = float(bar.open), "stop_gap", True
@@ -251,9 +264,15 @@ def score_decision(side: str, stop: float, target: float, bars_after: list[Price
             else:
                 continue
         exit_ = costs.marketable_fill(raw, buy=not long) if marketable else raw
-        ret = (exit_ / entry - 1) * (1 if long else -1) * 100
-        return DecisionOutcome(True, reason, entry, exit_, ret, k + 1)
-    last = bars_after[:max_bars][-1]
+        ret = (exit_ / entry - 1) * (1 if long else -1) * 100 - _fee_pct(costs)
+        return DecisionOutcome(True, reason, entry, exit_, ret, k + 1, worst, best)
+    last = window[-1]
     exit_ = costs.marketable_fill(float(last.close), buy=not long)
-    ret = (exit_ / entry - 1) * (1 if long else -1) * 100
-    return DecisionOutcome(True, "timeout", entry, exit_, ret, len(bars_after[:max_bars]))
+    ret = (exit_ / entry - 1) * (1 if long else -1) * 100 - _fee_pct(costs)
+    return DecisionOutcome(True, "timeout", entry, exit_, ret, len(window), worst, best,
+                           resolved=len(window) >= max_bars)
+
+
+def _fee_pct(costs: CostModel) -> float:
+    """Sell-side regulatory fee in % of price (sells happen on long exit / short entry)."""
+    return costs.sell_fee_bps / 100

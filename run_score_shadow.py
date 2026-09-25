@@ -23,16 +23,24 @@ class IBKRHistoryBarsProvider:
         self.history = HistoricalDataService(ib)
         self.contract_cls = Contract
 
-    async def bars_after(self, symbol, con_id, after, timeframe):
+    async def bars_from(self, symbol, con_id, at, timeframe):
+        """Bars from the decision bar onward; the request span covers the decision's age so the
+        decision bar is included (the scorer refuses series that do not start with it)."""
+        from datetime import datetime
+
         from research.shadow_scoring import _naive
 
         if not con_id:
             return []
+        start = _naive(at)
+        if start is None:
+            return []
+        age_days = (datetime.utcnow() - start).days
+        days = min(365, max(2, age_days + 3))
         contract = self.contract_cls(conId=int(con_id), exchange="SMART")
-        bars = await self.history.bars(contract, duration="30 D", bar_size=timeframe or "1 hour",
+        bars = await self.history.bars(contract, duration=f"{days} D", bar_size=timeframe or "1 hour",
                                        complete_only=True)
-        cutoff = _naive(after)
-        return [b for b in bars if cutoff is not None and _naive(b.time) > cutoff]
+        return [b for b in bars if _naive(b.time) >= start]
 
 
 async def main_async(args) -> None:

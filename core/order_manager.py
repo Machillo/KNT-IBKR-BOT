@@ -6,16 +6,33 @@ from typing import Iterable
 from ib_async import Contract, IB, LimitOrder, MarketOrder, TagValue, Trade
 
 from core.order_templates import adaptive_entry_order
+from core.paper_guard import PaperGuardError, PaperOrderGuard
 from utils.logger import logger
 
 
 class OrderManager:
-    """Broker execution layer. Strategies must pass risk checks before using it."""
+    """Broker execution layer. Strategies must pass risk checks before using it.
 
-    def __init__(self, ib: IB, account: str | None = None) -> None:
+    Every transmission goes through ``_transmit``, which requires a
+    ``PaperOrderGuard`` that re-verifies the paper session immediately before
+    ``ib.placeOrder``. Without a guard nothing is ever sent (fail closed).
+    """
+
+    def __init__(self, ib: IB, account: str | None = None, *, guard: PaperOrderGuard | None = None) -> None:
         self.ib = ib
-        self.account = account
+        self.guard = guard
+        if guard is not None and account and account != guard.account:
+            raise PaperGuardError("OrderManager account differs from the verified paper account")
+        self.account = guard.account if guard is not None else account
         self._callback_order_ids: set[int] = set()
+
+    def _transmit(self, contract: Contract, order) -> Trade:
+        if self.guard is None:
+            raise PaperGuardError("No paper guard configured; order transmission refused")
+        if not getattr(order, "account", ""):
+            order.account = self.guard.account
+        self.guard.assert_can_transmit(order)
+        return self.ib.placeOrder(contract, order)
 
     def _attach_trade_callbacks(self, trade: Trade) -> Trade:
         order_id = trade.order.orderId
@@ -51,7 +68,7 @@ class OrderManager:
         order = MarketOrder(action.upper(), quantity, tif="DAY", outsideRth=False)
         if self.account:
             order.account = self.account
-        trade = self.ib.placeOrder(contract, order)
+        trade = self._transmit(contract, order)
         logger.info("MARKET ORDER submitted | id=%s action=%s qty=%s tif=%s",
                     trade.order.orderId, action.upper(), quantity, trade.order.tif)
         return self._attach_trade_callbacks(trade)
@@ -72,7 +89,7 @@ class OrderManager:
             priority=priority,
             account=self.account,
         )
-        trade = self.ib.placeOrder(contract, order)
+        trade = self._transmit(contract, order)
         logger.info(
             "ADAPTIVE ORDER submitted | id=%s action=%s qty=%s type=%s priority=%s",
             trade.order.orderId, action.upper(), quantity, trade.order.orderType, priority,
@@ -100,8 +117,14 @@ class OrderManager:
         for order in bracket:
             if self.account:
                 order.account = self.account
+        # Validate every leg before transmitting any of them, so a guard refusal can
+        # never leave a parent without its protective children.
+        if self.guard is None:
+            raise PaperGuardError("No paper guard configured; order transmission refused")
+        for order in bracket:
+            self.guard.assert_can_transmit(order)
         trades = tuple(
-            self._attach_trade_callbacks(self.ib.placeOrder(contract, order))
+            self._attach_trade_callbacks(self._transmit(contract, order))
             for order in bracket
         )
         logger.info(
@@ -115,7 +138,7 @@ class OrderManager:
         order = LimitOrder(action.upper(), quantity, limit_price, tif="DAY", outsideRth=False)
         if self.account:
             order.account = self.account
-        trade = self.ib.placeOrder(contract, order)
+        trade = self._transmit(contract, order)
         logger.info("LIMIT ORDER submitted | id=%s action=%s qty=%s limit=%s tif=%s",
                     trade.order.orderId, action.upper(), quantity, limit_price, trade.order.tif)
         return self._attach_trade_callbacks(trade)
@@ -129,7 +152,7 @@ class OrderManager:
             order.totalQuantity = quantity
         if limit_price is not None:
             order.lmtPrice = limit_price
-        updated_trade = self.ib.placeOrder(contract, order)
+        updated_trade = self._transmit(contract, order)
         logger.info("ORDER MODIFICATION requested | id=%s qty=%s limit=%s tif=%s",
                     order.orderId, order.totalQuantity, getattr(order, "lmtPrice", None), order.tif)
         return self._attach_trade_callbacks(updated_trade)
@@ -161,6 +184,12 @@ class OrderManager:
         return trade
 
     def cancel_all_open_orders(self) -> None:
+        """Cancel this manager's account orders only; never another account's orders."""
+        if not self.account:
+            raise PaperGuardError("cancel_all_open_orders requires an explicit account")
         for trade in list(self.ib.openTrades()):
-            if not trade.isDone():
-                self.ib.cancelOrder(trade.order)
+            if trade.isDone():
+                continue
+            if (getattr(trade.order, "account", "") or "").strip() != self.account:
+                continue
+            self.ib.cancelOrder(trade.order)

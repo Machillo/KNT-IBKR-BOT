@@ -65,7 +65,7 @@ def test_no_private_files_are_tracked():
     assert forbidden == []
 
 
-# IBKR account identifiers: individual (U1234567), paper (DU1234567), advisor/FA
+# IBKR account identifiers: individual (U + digits), paper (DU + digits), advisor/FA
 # variants (F/DF/I/DI prefixes). Tests/docs may use obviously synthetic IDs with
 # the reserved suffix pattern *000000* (e.g. DU0000001) which are allowed.
 ACCOUNT_RE = re.compile(r"\b(?:DU|DF|DI|U|F|I)\d{6,9}\b")

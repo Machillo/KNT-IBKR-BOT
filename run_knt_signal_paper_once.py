@@ -102,13 +102,18 @@ async def main() -> None:
             trading_locked=context.risk.trading_locked,
         )
 
+        guard = supervisor.paper_guard
+        if guard is None or not guard.verification.verified:
+            reason = "missing" if guard is None else guard.verification.reason
+            raise RuntimeError(f"KNT signal probe requires a verified PAPER account; reason={reason}")
         raw_executor = PaperExecutionEngine(
             ib,
             account=account.account,
             enabled=True,
-            paper_authorized=True,
+            paper_guard=guard,
             risk_manager=context.risk,
             session_policy=session_policy,
+            max_entries_per_day=1,
         )
         executor = OneShotCappedPaperExecutor(raw_executor, max_quantity=max_qty)
         shadow = ShadowTradingEngine(

@@ -9,6 +9,7 @@ from config.config import config
 from core.connection import IBKRConnection
 from core.market_data import MarketDataService
 from core.order_manager import OrderManager
+from core.paper_guard import build_paper_guard, mask_account
 from utils.logger import logger
 
 ACK = "I_UNDERSTAND_THIS_SUBMITS_A_PAPER_ORDER"
@@ -30,10 +31,10 @@ async def main() -> None:
     connection = IBKRConnection(config.ibkr)
     try:
         ib = await connection.connect()
-        accounts = list(ib.managedAccounts())
-        if not accounts:
-            raise RuntimeError("IBKR returned no managed Paper accounts")
-        account = config.ibkr.account or accounts[0]
+        guard = build_paper_guard(ib, config.ibkr)
+        if not guard.verification.verified:
+            raise RuntimeError(f"Session not verified as PAPER: {guard.verification.reason}")
+        account = guard.account
 
         contract = Stock(symbol, "SMART", "USD")
         qualified = await ib.qualifyContractsAsync(contract)
@@ -55,10 +56,10 @@ async def main() -> None:
 
         logger.info(
             "PAPER BRACKET SMOKE | account=%s symbol=%s market=%.2f qty=1 entry=%.2f target=%.2f stop=%.2f",
-            account, symbol, market_price, entry, target, stop,
+            mask_account(account), symbol, market_price, entry, target, stop,
         )
 
-        orders = OrderManager(ib, account=account)
+        orders = OrderManager(ib, account=account, guard=guard)
         trades = orders.bracket_limit(
             contract,
             "BUY",

@@ -66,6 +66,26 @@ class ShadowTradingEngine:
         self.quote_budget = quote_budget
         self.research_budget = max(0, min(research_budget, max_candidates))
 
+    async def _fresh_reference(self, candidate) -> tuple[float | None, int | None]:
+        """Read-only quote taken right before a paper submission.
+
+        Returns (price, configured IBKR market-data type). The executor refuses
+        anything that is not live data, so delayed/frozen feeds fail closed.
+        """
+        market_data = getattr(self.intelligence, "market_data", None)
+        if market_data is None:
+            return None, None
+        data_type = getattr(getattr(market_data, "settings", None), "market_data_type", None)
+        try:
+            snapshot = await market_data.snapshot_contract(candidate.contract, candidate.symbol, timeout=3.0)
+        except Exception as exc:
+            logger.warning("FRESH REFERENCE unavailable | symbol=%s error=%s", candidate.symbol, exc)
+            return None, data_type
+        bid, ask = snapshot.bid, snapshot.ask
+        if bid and ask and 0 < bid <= ask:
+            return (bid + ask) / 2.0, data_type
+        return (snapshot.last or snapshot.market_price), data_type
+
     @staticmethod
     def _return_series(bars: list[PriceBar], lookback: int = 60) -> tuple[float, ...]:
         closes = [float(b.close) for b in bars[-(lookback + 1):] if float(b.close) > 0]
@@ -138,7 +158,7 @@ class ShadowTradingEngine:
 
         for candidate in candidates:
             try:
-                bars = await self.history.bars(candidate.contract)
+                bars = await self.history.bars(candidate.contract, complete_only=True)
                 history_by_symbol[candidate.symbol] = bars
                 candidate_returns = self._return_series(bars)
                 asset_class = candidate.contract.secType or "STK"
@@ -182,13 +202,17 @@ class ShadowTradingEngine:
                                     if target is None or target <= 0:
                                         action, portfolio_reason = "PAPER_REJECTED", "invalid_target_price"
                                     else:
+                                        reference_price, data_type = await self._fresh_reference(candidate)
                                         result = await self.paper_executor.submit(
                                             candidate.contract,
                                             PaperExecutionRequest(
                                                 symbol=candidate.symbol, strategy=selected.strategy,
                                                 side=signal.side.value, quantity=proposal.quantity,
                                                 entry_price=proposal.entry_price, stop_price=proposal.stop_price,
-                                                target_price=float(target), regime=selection.regime.regime.value))
+                                                target_price=float(target), regime=selection.regime.regime.value,
+                                                account_equity=float(portfolio_state.snapshot.net_liquidation),
+                                                reference_price=reference_price, market_data_type=data_type,
+                                                con_id=int(getattr(candidate.contract, "conId", 0) or 0)))
                                         action = "PAPER_SUBMITTED" if result.submitted else "PAPER_BLOCKED"
                                         portfolio_reason = result.reason
                             self.risk_decisions.record(

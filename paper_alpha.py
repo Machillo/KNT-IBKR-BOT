@@ -8,7 +8,8 @@ from core.connection import IBKRConnection
 from core.market_data import MarketDataService
 from engine.shadow import ShadowTradingEngine
 from engine.supervisor import PaperSupervisor
-from execution.paper import PaperExecutionEngine
+from core.paper_guard import mask_account
+from execution.paper import PaperExecutionEngine, autonomous_paper_armed
 from market.intelligence import MarketIntelligenceService
 from market.session import USStockSessionPolicy
 from portfolio.history import PortfolioHistoryStore
@@ -34,10 +35,10 @@ async def shadow_loop(
                 daily_loss_limit_pct=supervisor.context.risk.settings.max_daily_loss_pct,
                 trading_locked=supervisor.context.risk.trading_locked,
             )
-            portfolio_history.record(account=account.account, state=state)
+            portfolio_history.record(account=mask_account(account.account), state=state)
             logger.info(
                 "PORTFOLIO SNAPSHOT | account=%s net_liq=%.2f cash=%.2f committed=%.2f pending=%.2f exposure=%.2f%% daily_loss_used=%.2f/%.2f locked=%s positions=%s orders=%s",
-                account.account,
+                mask_account(account.account),
                 state.snapshot.net_liquidation,
                 state.snapshot.cash,
                 state.snapshot.committed_notional,
@@ -84,14 +85,16 @@ async def main() -> None:
             raise RuntimeError(f"Risk supervisor locked: {context.risk.lock_reason}")
 
         intelligence = MarketIntelligenceService(ib, market_data)
+        # Orders need BOTH the config flag and the literal per-session ACK, plus a
+        # session verified as PAPER by account prefix (not just by port).
+        armed = autonomous_paper_armed(config.runtime.autonomous_trading_enabled)
+        if config.runtime.autonomous_trading_enabled and not armed:
+            logger.warning("AUTONOMOUS_TRADING_ENABLED=true but AUTONOMOUS_PAPER_ACK missing | executor disabled")
         paper_executor = PaperExecutionEngine(
             ib,
             account=account.account,
-            enabled=config.runtime.autonomous_trading_enabled,
-            paper_authorized=(
-                config.ibkr.port in config.ibkr.paper_ports
-                and not config.ibkr.allow_live_trading
-            ),
+            enabled=armed,
+            paper_guard=supervisor.paper_guard,
             risk_manager=context.risk,
             session_policy=USStockSessionPolicy(),
         )
@@ -107,12 +110,12 @@ async def main() -> None:
         portfolio_history = PortfolioHistoryStore()
         logger.info(
             "PAPER ALPHA running | account=%s interval=%ss scanners=4 rows_per_scanner=%s quote_budget=%s deep_candidates=%s | HARD RISK + PORTFOLIO GATES ACTIVE | autonomous_paper=%s",
-            account.account,
+            mask_account(account.account),
             config.runtime.shadow_interval_seconds,
             config.runtime.discovery_rows,
             config.runtime.universe_quote_budget,
             config.runtime.shadow_max_candidates,
-            config.runtime.autonomous_trading_enabled,
+            armed,
         )
         supervisor_task = asyncio.create_task(supervisor.run(stop))
         if config.runtime.shadow_trading_enabled:

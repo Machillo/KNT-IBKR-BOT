@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 from ib_async import IB
 
+from core.paper_guard import mask_account
 from utils.logger import logger
 
 
@@ -38,7 +39,8 @@ class AccountService:
         account = configured_account or accounts[0]
         if account not in accounts:
             raise RuntimeError(
-                f"Configured account {account!r} is not available. Managed accounts: {accounts}"
+                f"Configured account {mask_account(account)} is not available. "
+                f"Managed accounts: {[mask_account(a) for a in accounts]}"
             )
 
         # accountSummaryAsync requests/refreshes the account summary and leaves
@@ -95,7 +97,7 @@ class AccountService:
         return f"{value:,.2f}{suffix}"
 
     def log_snapshot(self, snapshot: AccountSnapshot) -> None:
-        logger.info("ACCOUNT SNAPSHOT | account=%s", snapshot.account)
+        logger.info("ACCOUNT SNAPSHOT | account=%s", mask_account(snapshot.account))
         logger.info(
             "ACCOUNT SNAPSHOT | net_liquidation=%s",
             self._money(snapshot.net_liquidation, snapshot.currency),

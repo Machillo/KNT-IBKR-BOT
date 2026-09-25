@@ -37,6 +37,7 @@ async def main() -> None:
             account.net_liquidation,
             context.risk,
             account.account,
+            guard=supervisor.paper_guard,
         )
     finally:
         await connection.disconnect()

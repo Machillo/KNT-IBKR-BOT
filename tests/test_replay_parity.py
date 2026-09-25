@@ -149,10 +149,24 @@ def test_point_in_time_csv_honours_delisting(tmp_path):
     path.write_text("date,symbol,identifier,in_universe,delisted_on\n"
                     "2020-01-01,AAA,1,1,\n2020-01-01,BBB,2,1,2020-06-01\n"
                     "2020-07-01,AAA,1,1,\n2020-07-01,BBB,2,1,2020-06-01\n", encoding="utf-8")
-    u = PointInTimeCsvUniverse(path)
+    u = PointInTimeCsvUniverse(path, max_age_days=365)
+    assert u.members_at(datetime(2020, 1, 1, 12)) == frozenset()          # same-day snapshot not yet effective
     assert u.members_at(datetime(2020, 3, 1)) == {"AAA", "BBB"}
+    assert u.members_at(datetime(2020, 6, 15)) == {"AAA"}                  # delisting enforced against t
     assert u.members_at(datetime(2020, 8, 1)) == {"AAA"}
     assert u.members_at(datetime(2019, 1, 1)) == frozenset()
+    assert PointInTimeCsvUniverse(path, max_age_days=30).members_at(datetime(2020, 12, 1)) == frozenset()
+
+
+def test_journal_universe_empty_cycle_fails_closed(tmp_path):
+    import sqlite3
+    db = tmp_path / "j.db"
+    ShadowJournal(db)
+    with sqlite3.connect(db) as conn:
+        conn.execute("INSERT INTO discovery_cycles (cycle_id, created_at) VALUES ('c1', '2026-03-02T15:00:00+00:00')")
+        conn.execute("INSERT INTO discovery_cycles (cycle_id, created_at) VALUES ('c2', '2026-03-02T16:00:00+00:00')")
+        conn.execute("INSERT INTO discovery_funnel (cycle_id, created_at, symbol, status) VALUES ('c1', '', 'OLD', 'ranked_eligible')")
+    assert JournalUniverse(db).members_at(datetime(2026, 3, 2, 12, 30)) == frozenset()  # c2 empty replaces c1
 
 
 def test_replay_correlation_inputs_are_aligned_not_lagged():

@@ -35,7 +35,14 @@ shadow_loop (interval): PortfolioStateService → MarketIntelligenceService
 | Simulator / costs / metrics | `backtest/engine.py`, `backtest/costs.py`, `backtest/metrics.py` |
 | Validation / splits | `backtest/validation.py`, `research/walkforward.py`, `research/splits.py` |
 | Learning / promotions | `research/learning.py`, `research/context_promotions.py`, `research/performance.py` |
-| Pipeline (selector) backtest | `research/pipeline_backtest.py` |
+| Shared decision path (runtime = replay) | `engine/decision.py` (`DecisionPipeline`) |
+| Pipeline replay (v3, LIMIT/DAY entries) | `research/pipeline_backtest.py` |
+| Point-in-time universes | `research/universe_provider.py` |
+| Shadow journal / scorer | `research/shadow_journal.py`, `research/shadow_scoring.py`, `run_score_shadow.py` |
+| Cohort-neutral event studies / families | `research/event_study.py`, `research/families.py`, `run_event_families.py` |
+| Multi-day drawdown lock | `risk/drawdown_guard.py` (reset: `run_reset_drawdown_lock.py`) |
+| Sector metadata | `portfolio/metadata.py` (runtime admission requires it) |
+| Kill-switch paper drill | `run_kill_switch_paper_drill.py`, `docs/KILL_SWITCH_DRILL.md` |
 | Persistence | `state/strategy_performance.db` (SQLite, local only), `state/risk_state.json` |
 
 ## Conventions
@@ -54,6 +61,10 @@ shadow_loop (interval): PortfolioStateService → MarketIntelligenceService
 IBKR-connected (read-only): `run_universe_probe`, `run_backtest`, `run_strategy_suite`, `run_research`,
 `run_bulk_research`, `run_validation_suite`, `run_monthly_target_suite`, `run_growth_projection`.
 Order-capable (paper, ACK-gated): `paper_alpha` (autonomous ACK), `main` (smoke flag),
-`run_broker_smoke_once`, `run_paper_bracket_smoke`, `run_knt_signal_paper_once`.
+`run_broker_smoke_once`, `run_paper_bracket_smoke`, `run_knt_signal_paper_once`,
+`run_kill_switch_paper_drill` (dry-run default; armed needs `--armed` + ACK).
+Read-only IBKR maintenance (readonly session, separate clientId): `run_score_shadow --source ibkr`,
+`run_reset_drawdown_lock` (ACK; writes local state only).
 Offline (cache only): `run_backtest_analysis`, `run_import_context_promotions`, `run_confluence_*`,
-`run_pipeline_backtest`, `run_holdout_study`.
+`run_pipeline_backtest`, `run_experiments`, `run_null_benchmark`, `run_event_families`,
+`run_score_shadow` (default `--source cache`).

@@ -138,11 +138,11 @@ still hindsight-selected and the HOLDOUT stays unused until a frozen implementat
 
 ## Round 3 results — CORRECTED (after the quant-methodology review)
 
-The first version of this table (commit 5b6d511) had two methodological bugs found by the
+The first version of this table (commit 677f985) had two methodological bugs found by the
 independent review: (1) the Newey–West lag was set in BARS (horizon − 1) but applied to a series of
 event DATES, which for monthly F1 (≈17 dates, lag 20) collapsed the variance — the reported
 "t = 4.64 / 8.96" were artefacts; (2) F5 subtracted the same SPY return from every symbol, which
-cannot change the ranking, so it silently re-ran F2. Fixed in fd395ff: lag = median overlap of
+cannot change the ranking, so it silently re-ran F2. Fixed in cd587a5: lag = median overlap of
 event windows in date units, no t below 30 dates, per-date means reported, beta-adjusted F5,
 holdout bars removed from memory. Decisions did not change. The re-run F5 is the pre-registered
 hypothesis correctly implemented, not a new test (K stays 15).
@@ -174,7 +174,7 @@ Reading (worded per the review):
 
 ## Diagnostic: baseline under replay v3 (not a test, no selection)
 
-Replay v3 (commit 955edc2+) mirrors the executor: LIMIT at the signal close with DAY validity,
+Replay v3 (commit 6bd561b+) mirrors the executor: LIMIT at the signal close with DAY validity,
 strict trade-through, 3 entries/day, score-ordered cycles, working orders in correlation. The
 unchanged `live_default` now shows positive absolute results (daily TRAIN +48.2 %, PF 1.18;
 daily VAL +10.7 %; 4h VAL +19.4 %, Sharpe 1.16) — while the cohort's buy-and-hold made +304 % /

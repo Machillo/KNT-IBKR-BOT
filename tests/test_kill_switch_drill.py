@@ -209,6 +209,19 @@ def test_kill_switch_fails_closed_when_the_every_client_view_is_unavailable():
     ib.reqAllOpenOrdersAsync = broken
     result = _armed(ib)
     assert ib.placed == [] and result.flat_confirmed is False
+    # The view answers before the cancels but not in the re-check after them: still no flatten.
+    later = GtcIB([("AAA", 11, 1, "STK")], own=(11,))
+    calls = []
+    first_view = later.reqAllOpenOrdersAsync
+
+    async def fails_on_recheck():
+        calls.append(1)
+        if len(calls) > 1:
+            raise TimeoutError("no answer")
+        return await first_view()
+    later.reqAllOpenOrdersAsync = fails_on_recheck
+    result = _armed(later)
+    assert later.placed == [] and result.flat_confirmed is False and len(calls) >= 2
 
 
 def test_kill_switch_never_cancels_another_clients_order_ids():
@@ -216,7 +229,7 @@ def test_kill_switch_never_cancels_another_clients_order_ids():
     # another namespace, so cancelling one could hit OUR order with the same number.
     ib = GtcIB([("AAA", 11, 1, "STK")], own=(11,))
     ib.client = SimpleNamespace(port=7497, clientId=901)
-    foreign = GtcIB._order(11)
+    foreign = GtcIB._order(55)                  # cached foreign order on a contract we do not hold
     foreign.order.clientId = 7
     ib._trades[0].order.clientId = 901
     ib._trades.append(foreign)
@@ -252,7 +265,7 @@ def test_kill_switch_keeps_own_stop_when_the_every_client_view_is_unavailable():
     # position unprotected. Entries without a position may still be cancelled.
     import asyncio as aio
 
-    ib = GtcIB([("AAA", 11, 1, "STK")], own=(11, 12))
+    ib = GtcIB([("AAA", 11, 1, "STK")], own=(11, 12, 0))      # 0: an order whose contract is unknown
 
     async def blind():
         raise TimeoutError("no answer")
@@ -282,6 +295,7 @@ def test_kill_switch_rerun_never_cancels_or_duplicates_its_own_pending_liquidati
         def placeOrder(self, contract, order):
             self.placed.append((contract, order))
             order.orderId = 500
+            order.clientId = self.client.clientId           # ib_async stamps our clientId on it
             trade = SimpleNamespace(order=order, contract=contract, done=False)
             trade.isDone = lambda: False
             self._trades.append(trade)                      # working, position not yet gone

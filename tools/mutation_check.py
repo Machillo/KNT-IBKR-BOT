@@ -57,7 +57,7 @@ MUTATIONS = [
      '        bracket.stopLoss.tif = "GTC"', '        bracket.stopLoss.tif = "DAY"',
      "tests/test_paper_execution.py::test_bracket_entry_is_day_but_protective_children_are_gtc"),
     ("kill switch never market-flattens non-stock", "risk/kill_switch.py",
-     '            if sec_type != "STK" or qty != int(qty):', "            if False:",
+     '            elif sec_type != "STK" or qty != int(qty):', "            elif False:",
      "tests/test_kill_switch_drill.py::test_kill_switch_never_market_flattens_non_stock_positions"),
     ("executor lifecycle gate", "execution/paper.py",
      "        if status not in self.allowed_strategy_statuses:", "        if False:",
@@ -136,9 +136,9 @@ MUTATIONS = [
     ("kill switch keeps own stop without the every-client view", "risk/kill_switch.py",
      " or (all_orders is None and (cid == 0 or cid in position_ids)):", ":",
      "tests/test_kill_switch_drill.py::test_kill_switch_keeps_own_stop_when_the_every_client_view_is_unavailable"),
-    ("kill switch: no flatten decision without the every-client view", "risk/kill_switch.py",
-     '                reason_skip = "every-client view unavailable"', "                pass",
-     "tests/test_kill_switch_drill.py::test_kill_switch_keeps_own_stop_when_the_every_client_view_is_unavailable"),
+    # Not listed: 'reason_skip = "every-client view unavailable"' is defence in depth. Removing it
+    # alone changes nothing observable: the cancel loop keeps position-linked orders and the
+    # post-cancel re-check (None) vetoes every flatten; both of those layers have entries here.
     ("kill switch keeps own stop under a foreign order", "risk/kill_switch.py",
      "            elif con_id(position) == 0 or 0 in foreign_con_ids or con_id(position) in foreign_con_ids:",
      "            elif False:",

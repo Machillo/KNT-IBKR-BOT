@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from ib_async import IB, ScannerSubscription
 
@@ -45,6 +45,7 @@ class IBKRDiscoveryService:
                     exchange=contract.primaryExchange or contract.exchange,
                     currency=contract.currency,
                     contract=contract,
+                    sources=((plan.name, int(item.rank)),),
                 )
             )
         logger.info(
@@ -63,8 +64,12 @@ class IBKRDiscoveryService:
                     con_id = getattr(candidate.contract, "conId", 0)
                     key = (candidate.sec_type, con_id or candidate.symbol)
                     current = merged.get(key)
-                    if current is None or candidate.rank < current.rank:
+                    if current is None:
                         merged[key] = candidate
+                    else:
+                        # Keep the best rank but remember every scanner that returned it.
+                        best = candidate if candidate.rank < current.rank else current
+                        merged[key] = replace(best, sources=current.sources + candidate.sources)
             except Exception as exc:
                 logger.warning("DISCOVERY adapter skipped | adapter=%s error=%s", plan.name, exc)
         return list(merged.values())

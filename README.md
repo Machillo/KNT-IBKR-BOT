@@ -51,6 +51,27 @@ python run_pipeline_backtest.py --profile long_10y --segment validation
 
 Research protocol v1 (`research/protocol.py`): TRAIN < 2023-09-01 ≤ VALIDATION < 2025-03-01 ≤
 HOLDOUT. The holdout is single-use per frozen candidate and requires `--confirm-holdout`.
+15 hypotheses have been tested on that VALIDATION set (all rejected); new research needs new
+data — see `docs/experiments/LOG.md` and `docs/POINT_IN_TIME_DATA.md`.
+
+## Forward evidence (point-in-time, no orders)
+
+```bash
+python run_shadow_only.py            # read-only session, no executor; journals discovery + every decision
+python run_score_shadow.py --source ibkr    # score TRADE and NO_TRADE decisions once bars exist
+python run_fetch_journal_bars.py     # bars for every name the scanners surfaced (incl. later delistings)
+```
+
+Replaying the journal universe (`run_pipeline_backtest.py --universe files --cache-dir reports/pit_cache
+--universe-source journal`) requires a protocol v2 time split written down BEFORE looking at
+results; forward data must not be reinterpreted through the v1 holdout flags.
+
+## Supervised human procedures
+- First paper plumbing test: `docs/PAPER_RUN_PLAN.md`.
+- Kill-switch paper drill: `docs/KILL_SWITCH_DRILL.md`.
+- Multi-day drawdown lock (`MAX_DRAWDOWN_PCT`, default 15 %, sticky): reset only with
+  `run_reset_drawdown_lock.py` and its literal ACK.
+- Runtime vs replay differences: `docs/REPLAY_PARITY.md`.
 
 ## Status
 

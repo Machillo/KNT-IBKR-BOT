@@ -17,7 +17,7 @@ ACCOUNT = "DU0000001"
 class FakeIB:
     def __init__(self, accounts=(ACCOUNT,), port=7497, connected=True):
         self.accounts = list(accounts)
-        self.client = SimpleNamespace(port=port)
+        self.client = SimpleNamespace(port=port, clientId=1)
         self.connected = connected
         self.placed = []
         self.cancelled = []
@@ -42,6 +42,9 @@ class FakeIB:
 
     def openTrades(self):
         return list(self._trades)
+
+    async def reqAllOpenOrdersAsync(self):
+        return [t for t in self._trades if not t.isDone()]
 
     def positions(self):
         return list(self._positions)
@@ -157,10 +160,11 @@ def test_forged_verification_is_still_reverified():
 
 
 def _armed_kill_switch(ib, guard):
-    trade = SimpleNamespace(order=SimpleNamespace(account=ACCOUNT), isDone=lambda: False)
+    trade = SimpleNamespace(order=SimpleNamespace(account=ACCOUNT), contract=SimpleNamespace(conId=5),
+                            isDone=lambda: False)
     ib._trades = [trade]
     ib._positions = [SimpleNamespace(account=ACCOUNT, position=3,
-                                     contract=SimpleNamespace(localSymbol="ABC", symbol="ABC"))]
+                                     contract=SimpleNamespace(localSymbol="ABC", symbol="ABC", secType="STK", conId=5))]
     cfg = RiskConfig(kill_switch_enabled=True, kill_switch_dry_run=False)
     return KillSwitch(ib, cfg, ACCOUNT, guard=guard)
 

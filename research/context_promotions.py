@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from config.config import state_path
+
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -31,8 +33,8 @@ class ContextPromotionStore:
     kill-switches, live authorization, or hard risk limits.
     """
 
-    def __init__(self, path: str | Path = "state/strategy_performance.db") -> None:
-        self.path = Path(path)
+    def __init__(self, path: str | Path | None = None) -> None:
+        self.path = Path(path) if path is not None else state_path("strategy_performance.db")
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
             conn.execute(
@@ -133,7 +135,7 @@ def _group_contexts(rows: list[ContextRobustness]) -> dict[str, list[ContextRobu
 def import_validation_promotions(
     report_path: str | Path = "reports/backtests/ALL_RESULTS.csv",
     *,
-    db_path: str | Path = "state/strategy_performance.db",
+    db_path: str | Path | None = None,
 ) -> int:
     path = Path(report_path)
     if not path.exists():

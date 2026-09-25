@@ -25,6 +25,7 @@ class PendingOrderExposure:
     quantity: float
     reference_price: float
     notional: float
+    con_id: int = 0
 
 
 @dataclass(frozen=True)
@@ -102,6 +103,7 @@ class PortfolioStateService:
                 quantity=remaining_qty,
                 reference_price=max(0.0, reference_price),
                 notional=max(0.0, notional),
+                con_id=int(getattr(trade.contract, "conId", 0) or 0),
             ))
         return tuple(results)
 

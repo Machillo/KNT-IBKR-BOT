@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from core.market_data import MarketDataService
 from market.discovery import IBKRDiscoveryService, ScannerPlan
+from market.models import FunnelRow
 from market.ranker import LiquidityRanker, RankedCandidate
 from market.universe import US_STOCK_OPPORTUNITY_UNIVERSE, UniversePlan
 from utils.logger import logger
@@ -14,6 +15,9 @@ class MarketIntelligenceService:
         self.discovery = IBKRDiscoveryService(ib)
         self.market_data = market_data
         self.ranker = LiquidityRanker()
+        # Full point-in-time funnel of the last cycle (read by the shadow journal).
+        self.last_funnel: list[FunnelRow] = []
+        self.universe: UniversePlan | None = None
 
     @staticmethod
     def _is_common_stock_candidate(candidate) -> bool:
@@ -31,6 +35,19 @@ class MarketIntelligenceService:
         if " " in symbol:
             return False
         return True
+
+    @staticmethod
+    def _funnel_row(candidate, status: str, reason: str, evaluation=None) -> FunnelRow:
+        return FunnelRow(
+            symbol=str(candidate.symbol), con_id=int(getattr(candidate.contract, "conId", 0) or 0),
+            sec_type=str(candidate.sec_type or ""), exchange=str(candidate.exchange or ""),
+            currency=str(candidate.currency or ""), best_rank=int(candidate.rank),
+            sources=tuple(getattr(candidate, "sources", ()) or ()), status=status, reason=reason,
+            reference_price=None if evaluation is None else evaluation.reference_price,
+            spread_bps=None if evaluation is None else evaluation.spread_bps,
+            volume=None if evaluation is None else evaluation.volume,
+            liquidity_score=None if evaluation is None else evaluation.score,
+        )
 
     @classmethod
     def _discovery_shortlist(cls, candidates, quote_budget: int):
@@ -60,6 +77,13 @@ class MarketIntelligenceService:
         )
 
         evaluations: list[RankedCandidate] = []
+        funnel: list[FunnelRow] = []
+        shortlisted_ids = {id(c) for c in shortlist}
+        for candidate in candidates:
+            if not self._is_common_stock_candidate(candidate):
+                funnel.append(self._funnel_row(candidate, "subtype_rejected", "not_common_stock_or_ambiguous_symbol"))
+            elif id(candidate) not in shortlisted_ids:
+                funnel.append(self._funnel_row(candidate, "not_quoted_budget", f"quote_budget={quote_budget}"))
         # Sequential subscriptions are deliberately conservative with IBKR pacing/data lines.
         for candidate in shortlist:
             try:
@@ -68,9 +92,16 @@ class MarketIntelligenceService:
                     candidate.symbol,
                     timeout=3.0,
                 )
-                evaluations.append(self.ranker.evaluate(candidate, snapshot))
+                evaluation = self.ranker.evaluate(candidate, snapshot)
+                evaluations.append(evaluation)
+                funnel.append(self._funnel_row(
+                    candidate, "ranked_eligible" if evaluation.eligible else "ranked_rejected",
+                    evaluation.reason, evaluation,
+                ))
             except Exception as exc:
                 logger.warning("INTELLIGENCE candidate skipped | symbol=%s error=%s", candidate.symbol, exc)
+                funnel.append(self._funnel_row(candidate, "quote_error", type(exc).__name__))
+        self.last_funnel = funnel
 
         ranked = self.ranker.rank(evaluations)
         eligible = [item for item in ranked if item.eligible]
@@ -114,6 +145,7 @@ class MarketIntelligenceService:
     async def ranked_us_opportunity_universe(
         self, rows_per_plan: int = 25, quote_budget: int = 40
     ) -> list[RankedCandidate]:
+        self.universe = US_STOCK_OPPORTUNITY_UNIVERSE
         return await self.ranked_universe(
             US_STOCK_OPPORTUNITY_UNIVERSE,
             rows_per_plan=rows_per_plan,

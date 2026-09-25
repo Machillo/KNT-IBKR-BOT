@@ -99,3 +99,156 @@ robust edge. The long-only daily "returns" are largely beta + survivorship, not 
   hindsight-selected cohort with no delisted names and no point-in-time universe. Long-biased
   results on it are not interpretable as edge. Next research cycle should start with a
   point-in-time universe (or scanner-snapshot history recorded going forward by shadow mode).
+
+## Round 3 pre-registration — new families, cohort-neutral event study (written before any run)
+
+Why a different instrument: rounds 1–2 measured absolute P&L of long-only trading on a cohort
+whose buy-and-hold gained 64 % in VALIDATION, so any long signal "earned" beta + survivorship.
+`research/event_study.py` measures each signal's forward return from the NEXT open minus the
+same-window equal-weight return of the other 37 names, minus round-trip costs (baseline: 2×3.5 bps
+marketable + 0.3 bps fee + 2 bps commission allowance ≈ 9.3 bps). This removes the common drift;
+it does NOT remove survivorship inside the cross-section (winners chosen with hindsight may look
+like "momentum"), which is disclosed per family.
+
+Data: `long_10y` (daily) is primary; `swing_5y` (4h, horizons in bars) is the robustness profile.
+Segments: protocol v1 calendar (TRAIN < 2023-09-01 ≤ VALIDATION < 2025-03-01); a window counts in a
+segment only if entry AND exit fall inside it. HOLDOUT untouched.
+
+| id | family | economic rationale | signal (sees bars ≤ t only) | side | horizon |
+|---|---|---|---|---|---|
+| F1 | Cross-sectional momentum 12-1 | under-reaction / slow diffusion of information (Jegadeesh–Titman) | first bar of each month: return from t−252 to t−21 in the top quintile of the cohort | long | 21 bars |
+| F2 | Short-term reversal | liquidity provision: short-horizon overshoots mean-revert | 5-bar return in the bottom quintile of the cohort (every bar) | long | 5 bars |
+| F3 | Volatility contraction breakout | volatility clusters; a breakout from compression with volume signals information arrival | ATR(5)/ATR(50) in its lowest 10 % of the last 250 bars within the last 5 bars, AND close > prior 20-bar high, AND volume > 1.5 × 20-bar average | long | 10 bars |
+| F4 | Gap-down reversal | overnight overreaction reverses over days | open ≤ −3 % vs prior close AND close < prior close | long | 5 bars |
+| F5 | Market-residual reversal | idiosyncratic (not market) overshoots revert | 5-bar return minus SPY 5-bar return in the bottom decile (SPY/QQQ/IWM/DIA excluded as events) | long | 5 bars |
+| F6 | Live selector signal (diagnostic) | does the current selector carry cross-sectional information at all? | `StrategySelector` (all strategies, threshold 55, no learning) selects LONG | long | 5 bars |
+
+**Multiple testing.** Tests on VALIDATION so far: 9 (rounds 1–2) + 6 here = K = 15. One-sided
+Bonferroni at α = 0.05 → VALIDATION requires Newey–West t ≥ 2.71.
+
+**KEEP rule (fixed in advance)** — all of:
+1. daily TRAIN: mean net excess > 0 and NW t ≥ 2.0;
+2. daily VALIDATION: mean net excess > 0 and NW t ≥ 2.71, ≥ 100 events (F1: ≥ 12 rebalance dates);
+3. 4h VALIDATION: same sign (F1: instead, both halves of daily TRAIN positive);
+4. survives destruction tests: cost × 3, entry delay 2 bars, horizon × 0.5 and × 1.5, removing the
+   best 5 % of events, removing the best symbol, both halves of VALIDATION positive.
+Otherwise REJECT; INCONCLUSIVE if steps 1–2 pass on fewer events than required. A KEEP here is
+"worth a pipeline implementation and forward shadow evidence", not an edge claim: the cohort is
+still hindsight-selected and the HOLDOUT stays unused until a frozen implementation exists.
+
+## Round 3 results — CORRECTED (after the quant-methodology review)
+
+The first version of this table (commit 677f985) had two methodological bugs found by the
+independent review: (1) the Newey–West lag was set in BARS (horizon − 1) but applied to a series of
+event DATES, which for monthly F1 (≈17 dates, lag 20) collapsed the variance — the reported
+"t = 4.64 / 8.96" were artefacts; (2) F5 subtracted the same SPY return from every symbol, which
+cannot change the ranking, so it silently re-ran F2. Fixed in cd587a5: lag = median overlap of
+event windows in date units, no t below 30 dates, per-date means reported, beta-adjusted F5,
+holdout bars removed from memory. Decisions did not change. The re-run F5 is the pre-registered
+hypothesis correctly implemented, not a new test (K stays 15).
+
+Net excess = per-date mean after ≈ 9.3 bps round trip (per-event mean in brackets).
+
+| family | daily TRAIN (events / net bps / NW t) | daily VAL | 4h VAL | decision |
+|---|---|---|---|---|
+| F1 XS momentum 12-1 | 553 / −12.0 [−9.0] / −0.21 | 136 / +523.7 / n/a (17 dates < 30) | 4h is a different (~6-month) signal | REJECT (TRAIN fails; VAL not testable) |
+| F2 short-term reversal | 13 634 / −8.4 / −1.04 | 2 960 / +2.9 / 0.16 | 7 240 / −0.4 / −0.05 | REJECT |
+| F3 vol-compression breakout | 201 / −10.7 [+22.6] / −0.21 | 55 / +220.8 / 1.57 | 174 / −31.0 / −0.71 | REJECT |
+| F4 gap-down reversal | 1 010 / +23.1 / 0.61 | 191 / +224.0 / 2.63 | 198 / +13.3 / 0.31 | REJECT (VAL t < 2.71, TRAIN fails) |
+| F5 beta-residual reversal | 6 720 / −8.2 / −0.63 | 1 480 / +9.7 / 0.33 | 3 620 / +7.0 / 0.63 | REJECT |
+| F6 selector-logic LONG | 29 546 / −8.0 / −1.24 | 6 841 / **−37.0** / **−3.64** | 17 632 / −14.8 / −3.42 | REJECT (negative) |
+
+Reading (worded per the review):
+- **F1**: nothing in seven TRAIN years; the large VALIDATION mean comes from 17 monthly dates in
+  2023-09 → 2025-03, when the hindsight-picked winners led. Not testable here; re-test only on a
+  point-in-time universe (FWD3).
+- **F6**: the selector's logic, run on DAILY and 4h bars (the live system runs it on 1-hour bars),
+  picks LONG setups that underperform the rest of the cohort after costs in VALIDATION on both
+  profiles; two-sided Bonferroni (K = 15 → 30 tails) needs |t| ≥ 2.94 and both clear it. TRAIN is
+  ≈ −1 bps gross (t −1.24): no information there, not anti-predictive. Supported conclusion: the
+  current selector logic shows no positive cross-sectional information and should not be trusted
+  with capital. It says nothing definitive about the live 1-hour configuration (FWD1 will).
+- Near misses (F3, F4 in VALIDATION) fail TRAIN and/or the other profile.
+- "Net excess" is not a tradeable long/short return: the benchmark leg carries no cost, and the
+  flat 2 bps commission allowance understates IBKR minimums for small orders.
+
+## Diagnostic: baseline under replay v3 (not a test, no selection)
+
+Replay v3 (commit 6bd561b+) mirrors the executor: LIMIT at the signal close with DAY validity,
+strict trade-through, 3 entries/day, score-ordered cycles, working orders in correlation. The
+unchanged `live_default` now shows positive absolute results (daily TRAIN +48.2 %, PF 1.18;
+daily VAL +10.7 %; 4h VAL +19.4 %, Sharpe 1.16) — while the cohort's buy-and-hold made +304 % /
++64 % in the same windows.
+
+Null model under the SAME v3 mechanics (`run_null_benchmark.py --segment development`, 6 seeds):
+
+| profile | live_default | null mean (sd) | nulls ≥ live |
+|---|---|---|---|
+| 4h DEVELOPMENT | +6.97 % / PF 1.03 | +6.96 % (9.49) / PF 1.03 | 3 / 6 |
+| 1d DEVELOPMENT | +62.3 % / PF 1.17 | +47.6 % (29.6) / PF 1.14 | 2 / 6 |
+
+Reading: the improvement versus replay v1 comes from execution mechanics (buying pullbacks to
+the signal close with limit orders, in a cohort that rose strongly), not from the selector —
+random entries with the same brackets earn the same. Consistent with F6. No claim of edge.
+
+## Stop condition reached on this dataset
+Tests on the protocol-v1 VALIDATION set: **15** (H1–H9 pipeline variants + F1–F6), plus
+diagnostics (baseline, null models) not used for selection. Further searching on the same 38-name,
+hindsight-selected sample would mostly manufacture false discoveries. The HOLDOUT (≥ 2025-03-01)
+remains unused. Research continues on NEW data only.
+
+## Forward-only hypotheses (pre-registered now; evaluated ONLY on shadow data recorded after 2026-09-24)
+Scored with `run_score_shadow.py` on journaled decisions (point-in-time universe, 1-hour bars,
+executor-style LIMIT/DAY entries). No parameter may change between now and evaluation.
+| id | hypothesis | measurement | decision rule |
+|---|---|---|---|
+| FWD1 | Selected LONG setups are not better than the cohort (replication of F6 on 1-hour bars) | GROSS 5-bar forward return of SELECTED decisions minus the same-cycle mean (`selected_vs_cycle_fwd5`), t over per-cycle means | after ≥ 300 non-duplicate selected decisions: a mean above the ≈ 9 bps round-trip cost with t ≥ 2 would contradict F6 |
+| FWD2 | NO_TRADE passes on setups as good as the ones it takes | `counterfactual_vs_cycle_fwd5` vs `selected_vs_cycle_fwd5` (same measure) | difference of per-cycle means with t; ≥ 300 each |
+| FWD3 | Cross-sectional 12-1 momentum works on the point-in-time scanner universe | F1 signal on `JournalUniverse` + `reports/pit_cache` bars | needs ≥ 12 monthly rebalances of journal data; same KEEP rule as round 3 |
+
+**Exact evaluation (added before any v2 forward data exists, hypotheses unchanged; revised
+twice after the quant reviews of the same day, still before any v2 data):**
+`docs/FWD_PROTOCOL.md` (FWD-v1) fixes the evidence window (v2 decisions only), population,
+leave-one-out benchmark, day-clustered inference with Hansen–Hodrick lag-1 weights and Student-t
+critical values (K = 3: about 2.50 at 40 days, 2.39 in the limit), binding cutoff, sample
+minimums, KEEP/REJECT/INCONCLUSIVE rules, deadlines and invalidation. It supersedes the
+shorthand rules in this table where they differ (e.g. "t ≥ 2" → the K = 3 Student-t critical
+value; "t over per-cycle means" → per-trading-day means with Hansen–Hodrick lag-1 standard
+errors, which is more conservative). The window registration line is appended below when the
+human registers it.
+
+**FWD-v1 r3 (2026-09-25, before any registration or v2 forward row; no shadow row looked at):**
+- **Registration integrity:** protocol fingerprint; one committed registration per id, read from
+  git history; no backdating; pre-registration looks refused; ended windows recorded and
+  reported.
+- **Blinding:** interim statistics are blinded until the binding moment.
+- **Population:** missing data gated per arm; the universe is limited to IBKR `stockType`
+  COMMON/ADR/REIT.
+- **FWD2 labelling:** FWD2 is stated honestly as a test of the NO_TRADE rule as it occurs
+  (mostly the high-volatility pause, regime-confounded), with a descriptive breakdown by
+  NO_TRADE reason. The counterfactual definition (`top_*`) is unchanged from the registered
+  `counterfactual_vs_cycle_fwd5`.
+- **Exploration:** TRAIN only.
+
+**FWD-v1 r3 amendment (2026-09-25, same day, still before any registration or forward row; no
+shadow row looked at):**
+- **Cohort:** per cycle, deep analysis takes the first 12 eligible names (liquidity order) whose
+  IBKR type is COMMON/ADR/REIT. Type-excluded names use no slot; at most 36 type lookups.
+- **Failed type lookups** are `CANDIDATE_ERROR` rows, never exclusions.
+  - A cycle is BLOCKING at ≥ 2 candidate errors AND > 10 % of the analysable candidates
+    (attempted − type-excluded).
+  - These thresholds are PROVISIONAL. They are confirmed in a scratch run (separate state
+    directory) before registration, and pinned by the protocol fingerprint from then on.
+- **Missing data:** the 10 % limit applies to each arm and to all population rows.
+- **Binding results are stored** in the registration file, returned ever after, and copied to
+  this log the day they bind.
+- **Acceptance ref:** the registration line must be reachable from `origin/feature/paper-alpha`.
+  The ref is pinned in the protocol code (not the editable local file); this repository never
+  merges to `main`. The commit delay is always measured on git history.
+- **Scoring:** outcome rows carry the scoring-rules fingerprint. The scorer refuses to write
+  inside a registered window under other rules.
+- **Forward replays** are refused while a registered window is open and unbound.
+- **FWD3 universe** is filtered through the recorded `instrument_types`. Names never looked up
+  are excluded, a stated bias towards the most liquid names.
+- **FWD1 → FWD2 disclosure:** if FWD1 binds first, its unblinded selected arm is also FWD2's
+  selected arm. FWD2's rules are mechanical and pinned.

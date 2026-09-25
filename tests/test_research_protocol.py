@@ -12,7 +12,9 @@ def test_calendar_segments_are_ordered_and_contiguous():
     assert SEGMENTS["train"] == (None, VALIDATION_START)
     assert SEGMENTS["validation"] == (VALIDATION_START, HOLDOUT_START)
     assert SEGMENTS["development"] == (None, HOLDOUT_START)
-    assert SEGMENTS["holdout"] == (HOLDOUT_START, None)
+    from research.protocol import FORWARD_START, HOLDOUT_END
+    assert SEGMENTS["holdout"] == (HOLDOUT_START, HOLDOUT_END)
+    assert SEGMENTS["forward"] == (FORWARD_START, None) and HOLDOUT_END == FORWARD_START
 
 
 def _run(*args):

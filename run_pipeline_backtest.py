@@ -15,7 +15,7 @@ from statistics import mean, median
 
 from backtest.costs import BASELINE, SEVERE, STRESSED
 from backtest.universes import VALIDATION_UNIVERSES, universe_symbols
-from research.pipeline_backtest import PipelineBacktest, PipelineConfig, time_split
+from research.pipeline_backtest import PIPELINE_VERSION, PipelineBacktest, PipelineConfig, time_split
 from research.pipeline_variants import VARIANTS
 from research.protocol import PROTOCOL, SEGMENTS
 from run_monthly_target_suite import PROFILES, _cache_path, _load_bars
@@ -24,8 +24,14 @@ COSTS = {"baseline": BASELINE, "stressed": STRESSED, "severe": SEVERE}
 
 
 def load(universe: str, profile: str, cache_dir: str) -> dict:
+    """Cached bars for a validation cohort, or every file of the profile when universe == 'files'
+    (e.g. reports/pit_cache built from the discovery journal)."""
     p = PROFILES[profile]
     data = {}
+    if universe == "files":
+        for path in sorted(Path(cache_dir).glob(f"*_{p.name}.json")):
+            data[path.name[: -len(f"_{p.name}.json")]] = _load_bars(path)
+        return data
     for symbol in universe_symbols(universe):
         path = _cache_path(Path(cache_dir), symbol, p)
         if path.exists():
@@ -72,23 +78,73 @@ def summarize(result, *, detail: bool = True) -> str:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--profile", choices=list(PROFILES), default="long_10y")
-    ap.add_argument("--universe", choices=[*VALIDATION_UNIVERSES, "all"], default="all")
-    ap.add_argument("--segment", choices=["train", "validation", "development", "holdout"], default="train")
+    ap.add_argument("--universe", choices=[*VALIDATION_UNIVERSES, "all", "files"], default="all",
+                    help="validation cohort, or 'files' = every cached file in --cache-dir")
+    ap.add_argument("--segment", choices=["train", "validation", "development", "holdout", "forward"], default="train",
+                    help="forward = data recorded after the FWD-v1 registration (journal universe)")
     ap.add_argument("--variant", choices=list(VARIANTS), default="live_default")
     ap.add_argument("--cost", choices=list(COSTS), default="baseline")
     ap.add_argument("--equity", type=float, default=100_000.0)
-    ap.add_argument("--cache-dir", default="reports/history_cache")
+    ap.add_argument("--cache-dir", default=None, help="default: <repo>/reports/history_cache")
     ap.add_argument("--confirm-holdout", action="store_true")
+    ap.add_argument("--confirm-forward", action="store_true",
+                    help="forward replays consume FWD evidence: only a variant registered in docs/experiments")
     ap.add_argument("--split", choices=["calendar", "fraction"], default="calendar")
+    ap.add_argument("--universe-source", choices=["cohort", "journal", "csv"], default="cohort",
+                    help="cohort = static cache cohort (survivorship-biased); journal = KNT shadow "
+                         "discovery journal; csv = external point-in-time membership file")
+    ap.add_argument("--universe-path", default=None,
+                    help="default: the shadow-only journal <repo>/state/shadow_only/strategy_performance.db")
+    ap.add_argument("--journal-top-n", type=int, default=None,
+                    help="journal universe: runtime deep-analysis cap (default SHADOW_MAX_CANDIDATES; 0 = no cap)")
+    ap.add_argument("--config-from-env", action="store_true",
+                    help="live_default risk limits from .env (BotConfig) instead of code defaults")
     a = ap.parse_args()
+    if a.split == "fraction" and not a.confirm_holdout:
+        ap.error("--split fraction mixes holdout-calendar data into every segment; it counts as a holdout use "
+                 "(pass --confirm-holdout only for a frozen candidate).")
+    if a.segment == "forward":
+        import json
+
+        from config.config import shadow_journal_path
+        from research.fwd_protocol import window_file
+        target = window_file(shadow_journal_path())
+        if target.exists():
+            record = json.loads(target.read_text(encoding="utf-8"))
+            if "ended_at_utc" not in record and len(record.get("binding_results", {})) < 2:
+                ap.error("A registered FWD window is open: forward replays are interim looks. Wait until "
+                         "FWD1 and FWD2 bind (or the window ends).")
+    if a.segment == "forward" and not a.confirm_forward:
+        ap.error("FORWARD data is the evidence of FWD1-FWD3. Comparing variants on it is selection; run only a "
+                 "variant registered in docs/experiments/LOG.md, then pass --confirm-forward.")
     if a.segment == "holdout" and not a.confirm_holdout:
         ap.error("HOLDOUT is single-use. Freeze the configuration in docs/experiments first, then pass --confirm-holdout.")
-    data = load(a.universe, a.profile, a.cache_dir)
+    from config.config import reports_path
+    data = load(a.universe, a.profile, a.cache_dir or str(reports_path("history_cache")))
     config: PipelineConfig = VARIANTS[a.variant].variant(cost_model=COSTS[a.cost], initial_equity=a.equity)
-    bt = PipelineBacktest(data, config)
+    if a.config_from_env:
+        from config.config import config as bot_config
+        if a.variant != "live_default":
+            ap.error("--config-from-env only applies to the live_default variant")
+        config = PipelineConfig.from_bot_config(bot_config, cost_model=COSTS[a.cost], initial_equity=a.equity)
+    universe = None
+    if a.universe_source == "journal":
+        from research.universe_provider import JournalUniverse
+        from config.config import config as bot_config
+        top_n = bot_config.runtime.shadow_max_candidates if a.journal_top_n is None else (a.journal_top_n or None)
+        from config.config import shadow_journal_path
+        universe = JournalUniverse(a.universe_path or shadow_journal_path(), top_n=top_n, run_mode="shadow_only")
+    elif a.universe_source == "csv":
+        from research.universe_provider import PointInTimeCsvUniverse
+        universe = PointInTimeCsvUniverse(a.universe_path)
+    bt = PipelineBacktest(data, config, universe=universe)
     start, end = segment_bounds(bt, a.segment, a.split)
     print(f"PIPELINE | protocol={PROTOCOL if a.split == 'calendar' else 'fraction'} profile={a.profile} universe={a.universe} symbols={len(data)} segment={a.segment.upper()} "
           f"cost={a.cost} equity={a.equity:.0f} window=[{start or 'begin'} .. {end or 'end'})")
+    biased = universe is None or getattr(universe, "survivorship_biased", True)
+    print(f"UNIVERSE | source={a.universe_source} survivorship_biased={biased}")
+    print(f"REPLAY | pipeline_version={PIPELINE_VERSION} runtime_equivalent={config.runtime_equivalent} "
+          f"context_bars={config.context_bars}")
     if a.segment == "holdout":
         print("*** HOLDOUT EVALUATION — record the result; do not tune against it. ***")
     print(summarize(bt.run(start, end)))

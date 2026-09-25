@@ -55,7 +55,10 @@ class RiskManager:
         max_trade_risk = equity * self.settings.max_trade_risk_pct
         max_position_value = equity * self.settings.max_position_pct
 
-        if capital_at_risk > max_trade_risk:
+        # A relative 1e-9 tolerance: a size computed as floor(budget / risk_per_share) must not be
+        # refused by float rounding (budget and ceiling are now equal at 1 %). It is not a loosening:
+        # 1e-9 of equity is far below one cent for any account size.
+        if capital_at_risk > max_trade_risk * (1 + 1e-9):
             return RiskDecision(
                 False,
                 capital_at_risk,
@@ -63,7 +66,7 @@ class RiskManager:
                 f"Trade risk {capital_at_risk:.2f} exceeds {max_trade_risk:.2f}",
             )
 
-        if position_value > max_position_value:
+        if position_value > max_position_value * (1 + 1e-9):
             return RiskDecision(
                 False,
                 capital_at_risk,

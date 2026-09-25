@@ -97,22 +97,15 @@ class AccountService:
         return f"{value:,.2f}{suffix}"
 
     def log_snapshot(self, snapshot: AccountSnapshot) -> None:
+        # Balances are private: logs record only whether each value was available.
+        def present(value) -> str:
+            return "available" if value is not None else "N/A"
+
         logger.info("ACCOUNT SNAPSHOT | account=%s", mask_account(snapshot.account))
         logger.info(
-            "ACCOUNT SNAPSHOT | net_liquidation=%s",
-            self._money(snapshot.net_liquidation, snapshot.currency),
-        )
-        logger.info(
-            "ACCOUNT SNAPSHOT | total_cash=%s",
-            self._money(snapshot.total_cash_value, snapshot.currency),
-        )
-        logger.info(
-            "ACCOUNT SNAPSHOT | available_funds=%s",
-            self._money(snapshot.available_funds, snapshot.currency),
-        )
-        logger.info(
-            "ACCOUNT SNAPSHOT | buying_power=%s",
-            self._money(snapshot.buying_power, snapshot.currency),
+            "ACCOUNT SNAPSHOT | net_liquidation=%s total_cash=%s available_funds=%s buying_power=%s",
+            present(snapshot.net_liquidation), present(snapshot.total_cash_value),
+            present(snapshot.available_funds), present(snapshot.buying_power),
         )
         logger.info(
             "ACCOUNT SNAPSHOT | positions=%s open_orders=%s",

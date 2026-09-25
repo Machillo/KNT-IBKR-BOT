@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import signal
 
-from dotenv import dotenv_values
+from config.config import persisted_env
 
 from config.config import config
 from core.connection import IBKRConnection
@@ -38,16 +38,13 @@ async def shadow_loop(
                 trading_locked=supervisor.context.risk.trading_locked,
             )
             portfolio_history.record(account=account.account, state=state)
+            # Balances are private: log ratios and counts only.
             logger.info(
-                "PORTFOLIO SNAPSHOT | account=%s net_liq=%.2f cash=%.2f committed=%.2f pending=%.2f exposure=%.2f%% daily_loss_used=%.2f/%.2f locked=%s positions=%s orders=%s",
+                "PORTFOLIO SNAPSHOT | account=%s exposure=%.2f%% daily_loss_used=%.2f%% locked=%s positions=%s orders=%s",
                 mask_account(account.account),
-                state.snapshot.net_liquidation,
-                state.snapshot.cash,
-                state.snapshot.committed_notional,
-                state.snapshot.pending_order_notional,
                 state.snapshot.gross_exposure_pct * 100,
-                state.snapshot.daily_loss_used,
-                state.snapshot.daily_loss_limit,
+                (state.snapshot.daily_loss_used / state.snapshot.daily_loss_limit * 100)
+                if state.snapshot.daily_loss_limit else 0.0,
                 state.snapshot.trading_locked,
                 len(state.positions),
                 len(state.pending_orders),
@@ -93,7 +90,7 @@ async def main() -> None:
         # session verified as PAPER by account prefix (not just by port).
         armed = autonomous_paper_armed(
             config.runtime.autonomous_trading_enabled,
-            persisted_ack=dotenv_values(".env").get("AUTONOMOUS_PAPER_ACK"),
+            persisted_ack=persisted_env().get("AUTONOMOUS_PAPER_ACK"),
         )
         if config.runtime.autonomous_trading_enabled and not armed:
             logger.warning("AUTONOMOUS_TRADING_ENABLED=true but AUTONOMOUS_PAPER_ACK missing | executor disabled")

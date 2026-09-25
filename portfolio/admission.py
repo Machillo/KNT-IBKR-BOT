@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from config.config import state_path
+
 from dataclasses import dataclass
 from pathlib import Path
 from datetime import datetime, timezone
@@ -24,8 +26,8 @@ class PortfolioAdmissionDecision:
 class RiskDecisionStore:
     """Append-only audit trail for portfolio admission decisions."""
 
-    def __init__(self, path: str | Path = "state/strategy_performance.db") -> None:
-        self.path = Path(path)
+    def __init__(self, path: str | Path | None = None) -> None:
+        self.path = Path(path) if path is not None else state_path("strategy_performance.db")
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(self.path) as conn:
             conn.execute(
@@ -99,8 +101,12 @@ class PortfolioAdmissionCoordinator:
         *,
         portfolio_brain: PortfolioBrain | None = None,
         exposure_guard: CrossExposureGuard | None = None,
+        require_sector_metadata: bool = False,
     ) -> None:
         self.risk = risk
+        # Runtime sets this True: without sector metadata for the candidate AND every
+        # current exposure, the sector-concentration limit cannot be enforced -> reject.
+        self.require_sector_metadata = bool(require_sector_metadata)
         self.portfolio_brain = portfolio_brain or PortfolioBrain(
             max_single_position_pct=risk.settings.max_position_pct
         )
@@ -122,6 +128,7 @@ class PortfolioAdmissionCoordinator:
         position_returns: dict[str, tuple[float, ...]],
         correlation_to_portfolio: float | None,
         sector: str = "UNKNOWN",
+        sectors: dict[str, str] | None = None,
     ) -> PortfolioAdmissionDecision:
         hard = self.risk.evaluate_trade(
             equity=state.snapshot.net_liquidation,
@@ -132,7 +139,14 @@ class PortfolioAdmissionCoordinator:
         if not hard.approved:
             return PortfolioAdmissionDecision(False, f"hard_risk:{hard.reason}", hard, None, None, correlation_to_portfolio)
 
-        if state.positions and correlation_to_portfolio is None:
+        sectors = sectors or {}
+        exposure_symbols = {p.symbol for p in state.positions} | {o.symbol for o in state.pending_orders}
+        if self.require_sector_metadata and (
+            _unknown(sector) or any(_unknown(sectors.get(sym)) for sym in exposure_symbols)
+        ):
+            return PortfolioAdmissionDecision(False, "sector_metadata_missing", hard, None, None, correlation_to_portfolio)
+
+        if (state.positions or state.pending_orders) and correlation_to_portfolio is None:
             return PortfolioAdmissionDecision(False, "correlation_unavailable", hard, None, None, None)
 
         opportunity = __import__("portfolio.brain", fromlist=["PortfolioOpportunity"]).PortfolioOpportunity(
@@ -151,10 +165,20 @@ class PortfolioAdmissionCoordinator:
                 symbol=p.symbol,
                 side="LONG" if p.quantity > 0 else "SHORT",
                 notional=p.notional,
-                sector="UNKNOWN",
+                sector=sectors.get(p.symbol) or "UNKNOWN",
                 returns=position_returns.get(p.symbol, ()),
             )
             for p in state.positions
+        ) + tuple(
+            # Working entry orders count toward concentration as same-side exposure (conservative).
+            ExposurePosition(
+                symbol=o.symbol,
+                side=side.upper(),
+                notional=o.notional,
+                sector=sectors.get(o.symbol) or "UNKNOWN",
+                returns=position_returns.get(o.symbol, ()),
+            )
+            for o in state.pending_orders if o.symbol not in {p.symbol for p in state.positions}
         )
         exposure = self.exposure_guard.evaluate(
             net_liquidation=state.snapshot.net_liquidation,
@@ -171,3 +195,7 @@ class PortfolioAdmissionCoordinator:
             return PortfolioAdmissionDecision(False, exposure.reason, hard, portfolio, exposure, correlation_to_portfolio)
 
         return PortfolioAdmissionDecision(True, "portfolio_risk_approved", hard, portfolio, exposure, correlation_to_portfolio)
+
+
+def _unknown(sector: str | None) -> bool:
+    return not sector or not str(sector).strip() or str(sector).strip().upper() == "UNKNOWN"

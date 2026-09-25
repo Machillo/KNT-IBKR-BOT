@@ -1,4 +1,6 @@
 import asyncio
+from datetime import datetime, timedelta, timezone
+import sqlite3
 from types import SimpleNamespace
 
 import pytest
@@ -10,6 +12,7 @@ from execution.paper import (
     autonomous_paper_armed,
 )
 from risk.risk_manager import RiskManager
+from strategies.lifecycle import PLUMBING_ONLY
 
 ACCOUNT = "DU0000001"
 PAPER_SETTINGS = IBKRConfig(port=7497, allow_live_trading=False, account=None)
@@ -108,9 +111,10 @@ class FakeSessionPolicy:
 
 def request(**overrides):
     values = dict(
-        symbol="AAPL", strategy="momentum_v1", side="LONG", quantity=10,
+        symbol="AAPL", strategy="breakout_v1", side="LONG", quantity=10,
         entry_price=100, stop_price=95, target_price=110, regime="TRENDING",
         account_equity=100_000.0, reference_price=100.0, market_data_type=1,
+        bar_completed_at=datetime.now(timezone.utc) - timedelta(minutes=5),
     )
     values.update(overrides)
     return PaperExecutionRequest(**values)
@@ -121,6 +125,9 @@ def engine(tmp_path, ib=None, **kwargs):
     kwargs.setdefault("paper_guard", build_paper_guard(ib, PAPER_SETTINGS, ACCOUNT))
     kwargs.setdefault("risk_manager", RiskManager(RiskConfig()))
     kwargs.setdefault("session_policy", FakeSessionPolicy(True))
+    # These tests exercise the order path (like the supervised plumbing runner); the default
+    # executor gate is tested on its own below.
+    kwargs.setdefault("allowed_strategy_statuses", PLUMBING_ONLY)
     return PaperExecutionEngine(
         ib,
         account=ACCOUNT,
@@ -412,3 +419,180 @@ def test_transmission_error_counts_toward_cap_and_locks(tmp_path):
     assert risk.trading_locked is True
     from datetime import datetime, timezone
     assert e.journal.submitted_count_on(datetime.now(timezone.utc).date().isoformat()) == 1
+
+
+class PartialFillThenRejectIB(FakeIB):
+    """Parent fills, a child leg is rejected: the executor flattens the parent fill."""
+
+    def placeOrder(self, contract, order):
+        trade = super().placeOrder(contract, order)
+        if len(self.submitted) == 1:
+            trade.orderStatus.filled = 10
+        return trade
+
+
+def test_flattened_partial_bracket_locks_new_entries(tmp_path):
+    ib = PartialFillThenRejectIB(reject_index=1)
+    risk = RiskManager(RiskConfig())
+    result = run(engine(tmp_path, ib, enabled=True, risk_manager=risk).submit(stock(), request()))
+    assert result.submitted is False and result.reason.endswith("_flatten_requested")
+    assert risk.trading_locked is True
+
+
+def test_journal_failure_after_transmit_still_confirms_and_locks(tmp_path):
+    ib = FakeIB()
+    risk = RiskManager(RiskConfig())
+    e = engine(tmp_path, ib, enabled=True, risk_manager=risk)
+    original = e.journal.record
+
+    def flaky(req, *, status, reason, **kw):
+        if status in {"PENDING", "SUBMITTED"}:
+            raise sqlite3.OperationalError("database is locked")
+        return original(req, status=status, reason=reason, **kw)
+    e.journal.record = flaky
+    result = run(e.submit(stock(), request()))
+    assert result.submitted is True and result.reason == "bracket_confirmed"   # broker state is the truth
+    assert risk.trading_locked is True and "journal write failed" in risk.lock_reason
+
+
+
+@pytest.mark.parametrize("completed,reason", [
+    (None, "decision_bar_time_missing"),
+    (datetime(2026, 1, 5, 16), "decision_bar_time_missing"),                         # naive: unprovable
+    (datetime.now(timezone.utc) - timedelta(hours=17), "stale_decision_bar"),        # yesterday's last bar at the open
+    (datetime.now(timezone.utc) + timedelta(minutes=30), "stale_decision_bar"),      # bar not complete yet
+])
+def test_paper_execution_refuses_stale_or_unknown_decision_bars(tmp_path, completed, reason):
+    ib = FakeIB()
+    result = run(engine(tmp_path, ib, enabled=True).submit(stock(), request(bar_completed_at=completed)))
+    assert (result.submitted, result.reason) == (False, reason)
+    assert ib.submitted == []
+
+
+@pytest.mark.parametrize("ib_cls,prefix", [
+    ("ExplodingTransmitIB", "transmission_error_manual_check"),
+    ("ExplodingFlattenIB", "unwind_failed_manual_intervention"),
+])
+def test_failure_paths_lock_even_when_the_journal_is_down(tmp_path, ib_cls, prefix):
+    ib = globals()[ib_cls](reject_index=1) if ib_cls == "ExplodingFlattenIB" else globals()[ib_cls]()
+    risk = RiskManager(RiskConfig())
+    e = engine(tmp_path, ib, enabled=True, risk_manager=risk)
+    original = e.journal.record
+
+    def flaky(req, *, status, reason, **kw):
+        if status == "FAILED":
+            raise sqlite3.OperationalError("database is locked")
+        return original(req, status=status, reason=reason, **kw)
+    e.journal.record = flaky
+    result = run(e.submit(stock(), request()))
+    assert result.reason.startswith(prefix)
+    assert risk.trading_locked is True
+
+
+def test_ack_refusals_read_the_repo_env_from_any_directory(tmp_path, monkeypatch):
+    import config.config as cfg
+
+    env = tmp_path / "repo.env"
+    env.write_text("KNT_SIGNAL_PAPER_ACK=stored\n", encoding="utf-8")
+    monkeypatch.setattr(cfg, "ENV_FILE", env)
+    monkeypatch.chdir(tmp_path / ".." )  # a different working directory
+    assert cfg.persisted_env().get("KNT_SIGNAL_PAPER_ACK") == "stored"
+
+
+def test_unresolved_failure_blocks_entries_after_a_restart(tmp_path):
+    ib = ExplodingTransmitIB()
+    first = engine(tmp_path, ib, enabled=True, risk_manager=RiskManager(RiskConfig()), max_entries_per_day=5)
+    assert run(first.submit(stock(), request())).reason.startswith("transmission_error_manual_check")
+    # "Restart": fresh engine + fresh (unlocked) risk manager, same journal.
+    restarted = engine(tmp_path, FakeIB(), enabled=True, risk_manager=RiskManager(RiskConfig()),
+                       max_entries_per_day=5)
+    result = run(restarted.submit(stock("MSFT"), request(symbol="MSFT")))
+    assert (result.submitted, result.reason) == (False, "execution_lock_present")   # persisted lock file
+    # Backstop: even if the lock file were lost, today's FAILED journal row still blocks.
+    from risk.execution_lock import ExecutionLockStore
+    no_file = engine(tmp_path, FakeIB(), enabled=True, risk_manager=RiskManager(RiskConfig()),
+                     max_entries_per_day=5, execution_lock=ExecutionLockStore(tmp_path / "missing.json"))
+    result = run(no_file.submit(stock("MSFT"), request(symbol="MSFT")))
+    assert (result.submitted, result.reason) == (False, "unresolved_execution_failure_today")
+
+
+def test_execution_lock_persists_across_days_until_a_human_clears_it(tmp_path):
+    import pytest as _pytest
+    from risk.execution_lock import RESET_ACK, ExecutionLockStore
+
+    store = ExecutionLockStore(tmp_path / "lock.json")
+    e = engine(tmp_path, ExplodingTransmitIB(), enabled=True, risk_manager=RiskManager(RiskConfig()),
+               execution_lock=store)
+    run(e.submit(stock(), request()))
+    assert store.read()["reason"].startswith("paper execution transmission error")
+    fresh = engine(tmp_path / "other_day", FakeIB(), enabled=True, risk_manager=RiskManager(RiskConfig()),
+                   execution_lock=store)                      # new journal = a new day, same lock file
+    assert run(fresh.submit(stock(), request())).reason == "execution_lock_present"
+    with _pytest.raises(PermissionError):
+        store.clear("yes")
+    store.clear(RESET_ACK)
+    assert store.read() is None
+    (tmp_path / "lock.json").write_text("{corrupt", encoding="utf-8")
+    assert store.read() is not None                           # unreadable = locked
+
+
+def test_bracket_entry_is_day_but_protective_children_are_gtc(tmp_path):
+    """Regression: DAY children expire at the close and leave a filled position unprotected."""
+    from ib_async import LimitOrder, StopOrder
+
+    class RealBracketIB(FakeIB):
+        def bracketOrder(self, action, quantity, entry, target, stop, **kwargs):
+            reverse = "SELL" if action == "BUY" else "BUY"
+            parent = LimitOrder(action, quantity, entry, orderId=101, transmit=False, **kwargs)
+            tp = LimitOrder(reverse, quantity, target, orderId=102, transmit=False, parentId=101, **kwargs)
+            sl = StopOrder(reverse, quantity, stop, orderId=103, transmit=True, parentId=101, **kwargs)
+            return FakeBracketOrder(parent, tp, sl)
+
+    ib = RealBracketIB()
+    result = run(engine(tmp_path, ib, enabled=True).submit(stock(), request()))
+    assert result.submitted
+    tifs = [order.tif for _, order, _ in ib.submitted]
+    assert tifs == ["DAY", "GTC", "GTC"]
+
+
+
+def test_autonomous_executor_refuses_strategies_without_paper_status(tmp_path):
+    """Default gate: only committed PAPER/LIVE_ELIGIBLE strategies; today there are none."""
+    ib = FakeIB()
+    e = PaperExecutionEngine(ib, account=ACCOUNT, enabled=True, paper_guard=build_paper_guard(ib, PAPER_SETTINGS, ACCOUNT),
+                             risk_manager=RiskManager(RiskConfig()), session_policy=FakeSessionPolicy(True),
+                             journal=TradeJournalStore(tmp_path / "j.db"), acceptance_delay_seconds=0)
+    result = run(e.submit(stock(), request()))
+    assert (result.submitted, result.reason) == (False, "strategy_not_paper_eligible:SHADOW")
+    unknown = run(engine(tmp_path, ib, enabled=True).submit(stock(), request(strategy="invented_v9")))
+    assert unknown.reason == "strategy_not_paper_eligible:RESEARCH"            # even for plumbing
+    assert ib.submitted == []
+
+
+def test_lifecycle_registry_is_read_only_and_covers_every_selectable_strategy():
+    import pytest
+    from pathlib import Path
+
+    from strategies.library import SINGLE_ASSET_STRATEGIES
+    from strategies.lifecycle import REGISTRY, StrategyStatus
+
+    names = {f().name for f in SINGLE_ASSET_STRATEGIES}
+    assert names <= set(REGISTRY)
+    assert set(REGISTRY.values()) == {StrategyStatus.SHADOW}           # nothing validated yet
+    with pytest.raises(TypeError):
+        REGISTRY["breakout_v1"] = StrategyStatus.PAPER                 # no runtime promotion
+    root = Path(__file__).resolve().parents[1]
+    offenders = [str(p.relative_to(root)) for p in root.rglob("*.py")
+                 if "tests" not in p.parts and p.name != "lifecycle.py"
+                 and "_REGISTRY" in p.read_text(encoding="utf-8")]
+    assert offenders == []
+
+
+def test_selector_never_evaluates_research_or_retired_strategies(monkeypatch):
+    from engine.strategy_selector import StrategySelector
+    from strategies import lifecycle
+
+    monkeypatch.setitem(lifecycle._REGISTRY, "momentum_gap_v1", lifecycle.StrategyStatus.RETIRED)
+    monkeypatch.setitem(lifecycle._REGISTRY, "breakout_v1", lifecycle.StrategyStatus.RESEARCH)
+    names = {s.name for s in StrategySelector(55.0, None).strategies}
+    assert "momentum_gap_v1" not in names and "breakout_v1" not in names and "trend_following_v1" in names

@@ -35,11 +35,7 @@ class DailyLossGuard:
             )
             self.risk.lock_trading(reason)
             logger.critical(
-                "DAILY LOSS GUARD TRIGGERED | starting_equity=%.2f current_equity=%.2f "
-                "pnl=%.2f loss_pct=%.2f%% | new entries locked",
-                state.starting_equity,
-                state.current_equity,
-                state.pnl,
+                "DAILY LOSS GUARD TRIGGERED | loss_pct=%.2f%% | new entries locked",
                 state.loss_pct * 100,
             )
 

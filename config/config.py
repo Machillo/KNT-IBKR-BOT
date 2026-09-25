@@ -1,11 +1,22 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from os import getenv
+from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv()
+# Absolute, repo-anchored .env: loading AND the "ACK must not be persisted" refusals read the same
+# file, whatever the current directory is.
+ENV_FILE = Path(__file__).resolve().parents[1] / ".env"
+load_dotenv(ENV_FILE)
+
+
+def persisted_env() -> dict:
+    """Values stored in the repo .env (never the process environment)."""
+    from dotenv import dotenv_values
+
+    return dict(dotenv_values(ENV_FILE)) if ENV_FILE.exists() else {}
 
 
 def env_bool(name: str, default: bool = False) -> bool:
@@ -40,16 +51,22 @@ class IBKRConfig:
 
 @dataclass(frozen=True)
 class RiskConfig:
-    max_trade_risk_pct: float = field(default_factory=lambda: float(getenv("MAX_TRADE_RISK_PCT", "0.10")))
+    # Hard per-trade risk ceiling. 1 % = what the allocator targets, so the hard layer enforces
+    # the same number instead of a 10x looser one (tightening only; never relax).
+    max_trade_risk_pct: float = field(default_factory=lambda: float(getenv("MAX_TRADE_RISK_PCT", "0.01")))
     max_daily_loss_pct: float = field(default_factory=lambda: float(getenv("MAX_DAILY_LOSS_PCT", "0.10")))
     max_position_pct: float = field(default_factory=lambda: float(getenv("MAX_POSITION_PCT", "0.10")))
     kill_switch_enabled: bool = field(default_factory=lambda: env_bool("KILL_SWITCH_ENABLED", True))
     kill_switch_dry_run: bool = field(default_factory=lambda: env_bool("KILL_SWITCH_DRY_RUN", True))
+    # Multi-day drawdown from the persisted high-water mark that locks new entries (sticky).
+    max_drawdown_pct: float = field(default_factory=lambda: float(getenv("MAX_DRAWDOWN_PCT", "0.15")))
 
     def validate(self) -> None:
-        for name, value in (("MAX_TRADE_RISK_PCT", self.max_trade_risk_pct), ("MAX_DAILY_LOSS_PCT", self.max_daily_loss_pct), ("MAX_POSITION_PCT", self.max_position_pct)):
+        for name, value in (("MAX_TRADE_RISK_PCT", self.max_trade_risk_pct), ("MAX_DAILY_LOSS_PCT", self.max_daily_loss_pct), ("MAX_POSITION_PCT", self.max_position_pct), ("MAX_DRAWDOWN_PCT", self.max_drawdown_pct)):
             if not 0 < value <= 1:
                 raise ValueError(f"{name} must be between 0 and 1")
+        if self.max_drawdown_pct > 0.5:
+            raise ValueError("MAX_DRAWDOWN_PCT above 0.5 would effectively disable the drawdown lock")
 
 
 @dataclass(frozen=True)
@@ -99,3 +116,54 @@ class BotConfig:
 
 
 config = BotConfig()
+
+
+def read_only_ibkr_settings(settings: IBKRConfig, client_id_offset: int) -> IBKRConfig:
+    """Settings for research/maintenance runners that must never trade.
+
+    ``readonly=True`` is enforced by KNT itself: ``core/paper_guard`` refuses to authorize any
+    order on a readonly session (ib_async's flag alone only skips order syncing; true API
+    read-only mode is a TWS/Gateway setting). A separate clientId avoids colliding with — or
+    impersonating — the trading bot's session.
+    """
+    return replace(settings, readonly=True, client_id=settings.client_id + int(client_id_offset))
+
+
+# Absolute, repo-anchored runtime state directory: persisted risk locks must not depend on the
+# current working directory (starting from another folder would silently start fresh).
+def _state_dir_from_env(name: str, default: Path) -> Path:
+    """Absolute state directory shared across checkouts (pinned FWD worktree + dev checkout).
+    A relative override is refused: it would silently depend on the working directory."""
+    raw = getenv(name)
+    if not raw:
+        return default
+    path = Path(raw)
+    if not path.is_absolute():
+        raise RuntimeError(f"{name} must be an absolute path")
+    return path
+
+
+STATE_DIR = _state_dir_from_env("KNT_STATE_DIR", Path(__file__).resolve().parents[1] / "state")
+# The TRADING BOT's state directory, read-only, for shadow-only's lock mirror. Defaults to
+# STATE_DIR (same checkout); a pinned FWD worktree must point it at the bot's real state.
+BOT_STATE_DIR = _state_dir_from_env("KNT_BOT_STATE_DIR", STATE_DIR)
+
+
+REPORTS_DIR = Path(__file__).resolve().parents[1] / "reports"
+
+
+def reports_path(*parts: str) -> Path:
+    """Path inside the repo-anchored reports directory (never CWD-relative)."""
+    return REPORTS_DIR.joinpath(*parts)
+
+
+def shadow_journal_path() -> Path:
+    """The forward-evidence journal written by run_shadow_only.py."""
+    return state_path("shadow_only", "strategy_performance.db")
+
+
+def state_path(*parts: str) -> Path:
+    """Path inside the runtime state directory, resolved at call time (never CWD-relative)."""
+    import config.config as module  # late lookup so an override of STATE_DIR is honoured
+
+    return Path(module.STATE_DIR).joinpath(*parts)

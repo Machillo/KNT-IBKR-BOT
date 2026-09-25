@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from config.config import state_path
+
 import asyncio
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -8,9 +10,12 @@ from os import getenv
 from pathlib import Path
 import sqlite3
 
-from core.exceptions import RiskRejectedError
 from core.order_manager import OrderManager
 from core.paper_guard import PaperGuardError, PaperOrderGuard
+from execution import pretrade
+from risk.execution_lock import ExecutionLockStore
+from strategies.lifecycle import PAPER_TRADABLE, status_of
+from utils.logger import logger
 
 # Literal acknowledgement required, in addition to AUTONOMOUS_TRADING_ENABLED=true,
 # before the long-running loop may hand setups to the paper executor.
@@ -50,6 +55,8 @@ class PaperExecutionRequest:
     reference_price: float | None = None
     market_data_type: int | None = None
     con_id: int = 0
+    # Completion time (tz-aware) of the bar the signal was computed on; required.
+    bar_completed_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -62,8 +69,8 @@ class PaperExecutionResult:
 class TradeJournalStore:
     """Append-only paper execution journal."""
 
-    def __init__(self, path: str | Path = "state/strategy_performance.db") -> None:
-        self.path = Path(path)
+    def __init__(self, path: str | Path | None = None) -> None:
+        self.path = Path(path) if path is not None else state_path("strategy_performance.db")
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(self.path) as conn:
             conn.execute(
@@ -112,6 +119,21 @@ class TradeJournalStore:
             )
             return int(cur.lastrowid)
 
+    def unresolved_failures_on(self, utc_date: str) -> int:
+        """FAILED rows of a UTC date that required a human (partial transmission, unwind failure,
+        flattened partial fill). They keep entries refused after a restart, where the in-memory
+        lock would be gone; the next UTC date starts clean after the human's check."""
+        with sqlite3.connect(self.path) as conn:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) FROM paper_trade_journal
+                WHERE substr(created_at, 1, 10)=? AND status='FAILED'
+                  AND (reason LIKE '%manual%' OR reason LIKE '%flatten_requested%')
+                """,
+                (utc_date,),
+            ).fetchone()
+        return int(row[0] or 0)
+
     def submitted_count_on(self, utc_date: str) -> int:
         """Transmission attempts on a UTC date.
 
@@ -151,6 +173,8 @@ class PaperExecutionEngine:
         max_entries_per_day: int = 3,
         max_reference_deviation_pct: float = 0.015,
         allow_short: bool = False,
+        execution_lock: ExecutionLockStore | None = None,
+        allowed_strategy_statuses: frozenset = PAPER_TRADABLE,
     ) -> None:
         self.ib = ib
         self.account = account
@@ -168,6 +192,10 @@ class PaperExecutionEngine:
         # Shorts stay disabled until shortability/borrow/SSR checks exist.
         self.allow_short = bool(allow_short)
         self._in_flight: set[str] = set()
+        self.execution_lock = execution_lock or ExecutionLockStore()
+        # Default: only strategies whose committed status is PAPER or LIVE_ELIGIBLE. The supervised
+        # plumbing runner passes PLUMBING_ONLY explicitly (it tests the order path, not a strategy).
+        self.allowed_strategy_statuses = frozenset(allowed_strategy_statuses)
 
     @staticmethod
     def _normalize_stock_price(value: float) -> float:
@@ -269,27 +297,14 @@ class PaperExecutionEngine:
         return min(candidates) if candidates else None
 
     def _hard_risk_refusal(self, request: PaperExecutionRequest) -> str | None:
-        if self.risk_manager is None:
-            return "risk_manager_required"
-        evaluate = getattr(self.risk_manager, "evaluate_trade", None)
-        if evaluate is None:
+        if self.risk_manager is None or getattr(self.risk_manager, "evaluate_trade", None) is None:
             return "risk_manager_required"
         broker_equity = self._broker_equity()
         if broker_equity is None:
             return "broker_equity_unavailable"
-        equity = min(float(request.account_equity), broker_equity)
-        try:
-            decision = evaluate(
-                equity=equity,
-                entry_price=float(request.entry_price),
-                stop_price=float(request.stop_price),
-                quantity=float(request.quantity),
-            )
-        except RiskRejectedError:
-            return "hard_risk:invalid_inputs"
-        if not getattr(decision, "approved", False):
-            return f"hard_risk:{getattr(decision, 'reason', 'rejected')}"
-        return None
+        return pretrade.hard_risk_refusal(
+            self.risk_manager, equity=min(float(request.account_equity), broker_equity),
+            entry_price=request.entry_price, stop_price=request.stop_price, quantity=request.quantity)
 
     def _has_duplicate(self, symbol: str, con_id: int = 0) -> bool:
         target = symbol.upper()
@@ -355,31 +370,42 @@ class PaperExecutionEngine:
             return self._reject(request, "BLOCKED", guard_reason)
         if not self._connected():
             return self._reject(request, "BLOCKED", "broker_disconnected")
-        if not self._session_allows(contract):
-            return self._reject(request, "BLOCKED", "market_session_closed")
         if self.risk_manager is None:
             return self._reject(request, "BLOCKED", "risk_manager_required")
-        if bool(getattr(self.risk_manager, "trading_locked", False)):
-            return self._reject(request, "BLOCKED", "risk_manager_locked")
-        if request.quantity <= 0 or request.entry_price <= 0 or request.stop_price <= 0 or request.target_price <= 0:
-            return self._reject(request, "REJECTED", "invalid_execution_request")
-        side = request.side.upper()
-        if side not in {"LONG", "SHORT"}:
-            return self._reject(request, "REJECTED", "unsupported_side")
-        if side == "SHORT" and not self.allow_short:
-            return self._reject(request, "REJECTED", "short_entries_disabled")
+        status = status_of(request.strategy)
+        if status not in self.allowed_strategy_statuses:
+            return self._reject(request, "REJECTED", f"strategy_not_paper_eligible:{status.value}")
         today = datetime.now(timezone.utc).date().isoformat()
-        if self.journal.submitted_count_on(today) >= self.max_entries_per_day:
-            return self._reject(request, "BLOCKED", "daily_entry_limit_reached")
-
-        normalized = self._normalize_request(contract, request)
-        if normalized is None:
-            return self._reject(request, "REJECTED", "unsupported_instrument_or_quantity")
-        if not self._valid_geometry(normalized):
-            return self._reject(normalized, "REJECTED", "invalid_price_geometry")
-        reference_reason = self._reference_refusal(normalized)
-        if reference_reason is not None:
-            return self._reject(normalized, "REJECTED", reference_reason)
+        if self.execution_lock.read() is not None:
+            return self._reject(request, "BLOCKED", "execution_lock_present")
+        if self.journal.unresolved_failures_on(today):
+            return self._reject(request, "BLOCKED", "unresolved_execution_failure_today")
+        # Pure checks shared with order-free shadow and replay (execution/pretrade.py).
+        check = pretrade.evaluate(
+            pretrade.PreTradeRequest(
+                side=request.side, quantity=float(request.quantity), entry_price=float(request.entry_price),
+                stop_price=float(request.stop_price), target_price=float(request.target_price),
+                sec_type=str(getattr(contract, "secType", "") or ""), reference_price=request.reference_price,
+                market_data_type=request.market_data_type, bar_completed_at=request.bar_completed_at,
+            ),
+            pretrade.PreTradeContext(
+                session_open=self._session_allows(contract),
+                trading_locked=bool(getattr(self.risk_manager, "trading_locked", False)),
+                entries_today=self.journal.submitted_count_on(today),
+                max_entries_per_day=self.max_entries_per_day,
+                allow_short=self.allow_short,
+                max_reference_deviation_pct=self.max_reference_deviation_pct,
+                reference_available=True,
+                now=datetime.now(timezone.utc),
+            ),
+        )
+        normalized = replace(request, entry_price=check.request.entry_price, stop_price=check.request.stop_price,
+                             target_price=check.request.target_price)
+        if not check.passed:
+            reported = normalized if check.reason in ("invalid_price_geometry",) or check.reason.startswith(
+                ("reference_", "fresh_", "entry_far")) else request
+            return self._reject(reported, check.status, check.reason)
+        side = request.side.upper()
         risk_reason = self._hard_risk_refusal(normalized)
         if risk_reason is not None:
             return self._reject(normalized, "REJECTED", risk_reason)
@@ -411,17 +437,19 @@ class PaperExecutionEngine:
                 adaptive_parent=True,
             )
         except PaperGuardError:
+            # The guard can refuse between legs (e.g. a disconnect after the parent was placed
+            # untransmitted): the broker state is unknown, so lock new entries as well.
+            self._lock("paper guard refused during bracket transmission; broker state must be checked")
             return self._reject(normalized, "BLOCKED", "paper_guard_refused")
         except Exception as exc:
             # Transport/broker failure mid-transmission: legs may be partially sent.
+            # Lock FIRST: a journal failure must never leave trading unlocked.
             reason = f"transmission_error_manual_check:{type(exc).__name__}"
-            self.journal.record(normalized, status="FAILED", reason=reason)
-            lock = getattr(self.risk_manager, "lock_trading", None)
-            if lock is not None:
-                lock("paper execution transmission error; broker state must be checked")
+            self._lock("paper execution transmission error; broker state must be checked")
+            self._record_safely(normalized, "FAILED", reason, None)
             return PaperExecutionResult(False, reason)
         parent_id = int(trades[0].order.orderId)
-        self.journal.record(normalized, status="PENDING", reason="bracket_sent", parent_order_id=parent_id)
+        self._record_after_transmit(normalized, "PENDING", "bracket_sent", parent_id)
 
         if self.acceptance_delay_seconds:
             await asyncio.sleep(self.acceptance_delay_seconds)
@@ -432,10 +460,8 @@ class PaperExecutionEngine:
             # Could not confirm or unwind (e.g. disconnect / guard refusal while
             # flattening). Fail closed: record it and lock all new entries.
             reason = f"unwind_failed_manual_intervention:{type(exc).__name__}"
-            self.journal.record(normalized, status="FAILED", reason=reason, parent_order_id=parent_id)
-            lock = getattr(self.risk_manager, "lock_trading", None)
-            if lock is not None:
-                lock(f"paper execution unwind failed for parent {parent_id}")
+            self._lock(f"paper execution unwind failed for parent {parent_id}")
+            self._record_safely(normalized, "FAILED", reason, parent_id)
             return PaperExecutionResult(False, reason, parent_id)
 
     def _confirm_or_unwind(self, contract, normalized: PaperExecutionRequest, trades,
@@ -448,7 +474,8 @@ class PaperExecutionEngine:
             reason = rejected[0] or "bracket_leg_rejected"
             if flattened > 0:
                 reason = f"{reason}_flatten_requested"
-            self.journal.record(normalized, status="FAILED", reason=reason, parent_order_id=parent_id)
+                self._lock(f"paper bracket {parent_id} partially filled and flattened; broker state must be checked")
+            self._record_after_transmit(normalized, "FAILED", reason, parent_id)
             return PaperExecutionResult(False, reason, parent_id)
 
         accepted_statuses = {"PendingSubmit", "PreSubmitted", "Submitted", "Filled"}
@@ -462,8 +489,43 @@ class PaperExecutionEngine:
             reason = "bracket_acceptance_unconfirmed"
             if flattened > 0:
                 reason += "_flatten_requested"
-            self.journal.record(normalized, status="FAILED", reason=reason, parent_order_id=parent_id)
+                self._lock(f"paper bracket {parent_id} partially filled and flattened; broker state must be checked")
+            self._record_after_transmit(normalized, "FAILED", reason, parent_id)
             return PaperExecutionResult(False, reason, parent_id)
 
-        self.journal.record(normalized, status="SUBMITTED", reason="bracket_confirmed", parent_order_id=parent_id)
+        self._record_after_transmit(normalized, "SUBMITTED", "bracket_confirmed", parent_id)
         return PaperExecutionResult(True, "bracket_confirmed", parent_id)
+
+    def _lock(self, reason: str) -> None:
+        """Broker state uncertain: lock in memory AND persist a lock that survives restarts and
+        the next day until a human clears it (run_reset_execution_lock.py)."""
+        lock = getattr(self.risk_manager, "lock_trading", None)
+        if lock is not None:
+            lock(reason)
+        try:
+            self.execution_lock.set(reason)
+        except Exception as exc:
+            logger.critical("EXECUTION LOCK NOT PERSISTED | in-memory lock only | %s", type(exc).__name__)
+
+    def _record_safely(self, normalized: PaperExecutionRequest, status: str, reason: str,
+                       parent_id: int | None) -> None:
+        try:
+            if parent_id is None:
+                self.journal.record(normalized, status=status, reason=reason)
+            else:
+                self.journal.record(normalized, status=status, reason=reason, parent_order_id=parent_id)
+        except Exception as exc:
+            logger.critical("TRADE JOURNAL WRITE FAILED on failure path | status=%s error=%s",
+                            status, type(exc).__name__)
+
+    def _record_after_transmit(self, normalized: PaperExecutionRequest, status: str, reason: str,
+                               parent_id: int) -> None:
+        """Journal write AFTER orders reached the broker. A failure here (SQLite locked, disk)
+        must never skip confirmation/unwind; it locks new entries instead, because the daily
+        entry cap and the audit trail are no longer trustworthy."""
+        try:
+            self.journal.record(normalized, status=status, reason=reason, parent_order_id=parent_id)
+        except Exception as exc:
+            self._lock(f"paper trade journal write failed after transmission ({status}); entries locked")
+            logger.critical("TRADE JOURNAL WRITE FAILED after transmit | parent=%s status=%s error=%s",
+                            parent_id, status, type(exc).__name__)

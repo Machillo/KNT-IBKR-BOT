@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from config.config import state_path
+
 import json
 import os
 from dataclasses import asdict, dataclass
@@ -20,8 +22,8 @@ class PersistedDailyRiskState:
 class DailyRiskStateStore:
     """Small fail-closed JSON store for the sticky daily risk baseline/state."""
 
-    def __init__(self, path: str | Path = "state/risk_state.json") -> None:
-        self.path = Path(path)
+    def __init__(self, path: str | Path | None = None) -> None:
+        self.path = Path(path) if path is not None else state_path("risk_state.json")
 
     @staticmethod
     def _key(account: str, trading_date: str) -> str:
@@ -57,6 +59,17 @@ class DailyRiskStateStore:
         data.setdefault("records", {})[key] = asdict(state)
         self._write(data)
         return state, True
+
+    def get(self, *, account: str, trading_date: str) -> PersistedDailyRiskState | None:
+        """Read-only lookup (never creates a baseline)."""
+        raw = self._read().get("records", {}).get(self._key(account, trading_date))
+        return None if raw is None else self._decode(raw)
+
+    def has_prior_days(self, *, account: str, trading_date: str) -> bool:
+        """True if this account has a persisted baseline from an EARLIER trading date."""
+        records = self._read().get("records", {})
+        prefix = f"{account}:"
+        return any(k.startswith(prefix) and k[len(prefix):] < trading_date for k in records)
 
     def mark_triggered(
         self,

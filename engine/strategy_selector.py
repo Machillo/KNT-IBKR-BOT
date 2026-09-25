@@ -7,6 +7,7 @@ from market.regime import MarketRegime, RegimeDetector, RegimeSnapshot
 from research.learning import LearningAssessment, LearningEngine, LearningStatus
 from research.performance import PerformanceEvidence, StrategyPerformanceStore
 from strategies.library import SINGLE_ASSET_STRATEGIES
+from strategies.lifecycle import SELECTABLE, status_of
 from strategies.momentum import SignalSide, StrategySignal
 
 
@@ -73,7 +74,10 @@ class StrategySelector:
     ) -> None:
         self.minimum_score = minimum_score
         self.regime_detector = RegimeDetector()
-        self.strategies = [factory() for factory in SINGLE_ASSET_STRATEGIES]
+        # Only strategies whose committed lifecycle status is selectable (strategies/lifecycle.py);
+        # RESEARCH and RETIRED strategies are never evaluated for decisions.
+        self.strategies = [s for s in (factory() for factory in SINGLE_ASSET_STRATEGIES)
+                           if status_of(s.name) in SELECTABLE]
         self.performance_store = performance_store
         # Operational selector: admissible OOS evidence only, never full-sample promotions.
         self.learning_engine = (

@@ -1,5 +1,14 @@
+"""Supervised PAPER plumbing test: at most ONE strategy-originated bracket of at most 1 share.
+
+Three independent confirmations are required (docs/PAPER_PLUMBING_TEST.md):
+1. ``KNT_SIGNAL_PAPER_ACK`` set to the literal below for this run (refused if stored in .env);
+2. the ``--confirm-paper-plumbing`` command-line flag;
+3. an in-process read-only preflight that passes: verified paper account, live two-sided
+   quote, flat account (positions and EVERY client's open orders), no persisted lock.
+"""
 from __future__ import annotations
 
+import argparse
 import asyncio
 from dataclasses import replace
 from os import getenv
@@ -14,6 +23,7 @@ from execution.paper import PaperExecutionEngine, PaperExecutionRequest, PaperEx
 from market.intelligence import MarketIntelligenceService
 from market.session import BrokerCalendarSessionPolicy
 from portfolio.state import PortfolioStateService
+from strategies.lifecycle import PLUMBING_ONLY
 from utils.logger import logger
 
 ACK = "I_UNDERSTAND_KNT_WILL_SUBMIT_ONE_PAPER_SIGNAL"
@@ -27,8 +37,10 @@ class OneShotCappedPaperExecutor:
     """
 
     def __init__(self, executor: PaperExecutionEngine, *, max_quantity: float = 1.0) -> None:
-        if max_quantity <= 0:
-            raise ValueError("max_quantity must be > 0")
+        import math
+
+        if not math.isfinite(float(max_quantity)) or max_quantity <= 0:
+            raise ValueError("max_quantity must be a finite number > 0")
         self.executor = executor
         self.max_quantity = float(max_quantity)
         self.submitted = 0
@@ -50,7 +62,17 @@ class OneShotCappedPaperExecutor:
         return result
 
 
-async def main() -> None:
+async def main(args) -> None:
+    from config.config import persisted_env
+    from ib_async import Stock
+
+    from config.config import STATE_DIR
+    from execution.preflight import MAX_PLUMBING_QTY, broker_checks, config_checks, verdict
+
+    if not args.confirm_paper_plumbing:
+        raise RuntimeError("Pass --confirm-paper-plumbing (second confirmation) for this one run")
+    if persisted_env().get("KNT_SIGNAL_PAPER_ACK"):
+        raise RuntimeError("KNT_SIGNAL_PAPER_ACK must not be stored in .env; set it for this run only")
     config.validate()
     if config.ibkr.port not in config.ibkr.paper_ports:
         raise RuntimeError(f"KNT signal probe requires an IBKR Paper port; got {config.ibkr.port}")
@@ -65,9 +87,14 @@ async def main() -> None:
     if getenv("KNT_SIGNAL_PAPER_ACK", "") != ACK:
         raise RuntimeError(f"Set KNT_SIGNAL_PAPER_ACK={ACK} for this one run")
 
+    import math
+
     max_qty = float(getenv("KNT_SIGNAL_PAPER_MAX_QTY", "1"))
-    if max_qty <= 0 or max_qty > 10:
-        raise RuntimeError("KNT_SIGNAL_PAPER_MAX_QTY must be > 0 and <= 10")
+    if not math.isfinite(max_qty) or max_qty <= 0 or max_qty > MAX_PLUMBING_QTY:
+        raise RuntimeError(f"KNT_SIGNAL_PAPER_MAX_QTY must be > 0 and <= {MAX_PLUMBING_QTY:g} for plumbing")
+    failed_config = [c.name for c in config_checks(config, persisted_env()) if c.required and not c.ok]
+    if failed_config:
+        raise RuntimeError(f"Paper plumbing preflight (config) failed: {failed_config}")
 
     connection = IBKRConnection(config.ibkr)
     try:
@@ -95,6 +122,13 @@ async def main() -> None:
             )
 
         market_data = MarketDataService(ib, config.market_data)
+        market_data.configure()
+        checks, _ = await broker_checks(ib, config, state_dir=STATE_DIR, market_data=market_data,
+                                        probe_contract=Stock("SPY", "SMART", "USD"), session_policy=session_policy)
+        result, failed = verdict(checks)
+        if failed:
+            raise RuntimeError(f"Paper plumbing preflight (broker) failed: {failed}")
+        logger.warning("KNT PAPER PLUMBING PREFLIGHT | %s", result)
         intelligence = MarketIntelligenceService(ib, market_data)
         portfolio_state = PortfolioStateService(ib).build(
             account,
@@ -115,6 +149,8 @@ async def main() -> None:
             risk_manager=context.risk,
             session_policy=session_policy,
             max_entries_per_day=1,
+            # Plumbing validates the ORDER PATH with 1 share; no strategy is PAPER-eligible yet.
+            allowed_strategy_statuses=PLUMBING_ONLY,
         )
         executor = OneShotCappedPaperExecutor(raw_executor, max_quantity=max_qty)
         shadow = ShadowTradingEngine(
@@ -163,10 +199,9 @@ async def main() -> None:
         await asyncio.sleep(1.0)
         after = broker.snapshot(account.account)
         logger.warning(
-            "KNT SIGNAL PAPER BROKER STATE | positions=%s open_orders=%s details=%s",
+            "KNT SIGNAL PAPER BROKER STATE | positions=%s open_orders=%s",
             after.position_count,
             after.open_order_count,
-            after.nonzero_positions,
         )
 
         if not submitted:
@@ -182,4 +217,6 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--confirm-paper-plumbing", action="store_true")
+    asyncio.run(main(parser.parse_args()))

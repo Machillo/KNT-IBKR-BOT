@@ -71,3 +71,42 @@ def test_portfolio_brain_rejects_cash_reserve_breach():
     )
     assert decision.approved is False
     assert decision.reason == "cash_reserve_limit"
+
+
+def test_pending_entries_count_against_the_cash_reserve():
+    """Two same-cycle entries must not each pass the reserve on the same (unreserved) cash."""
+    from portfolio.brain import PortfolioBrain, PortfolioOpportunity, PortfolioSnapshot
+
+    brain = PortfolioBrain(max_gross_exposure_pct=1.0, max_single_position_pct=1.0, cash_reserve_pct=0.05)
+    opp = PortfolioOpportunity("B", "STK", proposed_notional=50_000, proposed_risk=100)
+    free = PortfolioSnapshot(100_000, 100_000, 0, 0, 0, 0, 10_000)
+    assert brain.evaluate(free, opp).approved
+    with_pending = PortfolioSnapshot(100_000, 100_000, 0, 0, 50_000, 0, 10_000)
+    decision = brain.evaluate(with_pending, opp)
+    assert (decision.approved, decision.reason) == (False, "cash_reserve_limit")
+
+
+def test_sector_metadata_expires_and_ambiguous_details_fail_closed():
+    import asyncio
+    from types import SimpleNamespace
+
+    from portfolio.metadata import ContractMetadataService
+
+    calls, now = [], [0.0]
+
+    async def details(contract):
+        calls.append(contract.conId)
+        if contract.conId == 2:
+            return [SimpleNamespace(industry="A"), SimpleNamespace(industry="B")]
+        return [SimpleNamespace(industry="Technology", category="x")]
+
+    svc = ContractMetadataService(SimpleNamespace(reqContractDetailsAsync=details), ttl_seconds=100,
+                                  clock=lambda: now[0])
+    one = SimpleNamespace(conId=1)
+    assert asyncio.run(svc.get(one)).sector == "Technology"
+    asyncio.run(svc.get(one))
+    assert calls == [1]                        # cached
+    now[0] = 101.0
+    asyncio.run(svc.get(one))
+    assert calls == [1, 1]                     # expired -> refreshed
+    assert asyncio.run(svc.get(SimpleNamespace(conId=2))) is None

@@ -88,6 +88,8 @@ def verify_paper_account(ib, settings: IBKRConfig, account: str | None = None) -
 
     if settings.allow_live_trading:
         return refuse("live_trading_allowed_in_config")
+    if settings.readonly:
+        return refuse("readonly_session")
     if settings.port not in settings.paper_ports or settings.port in settings.live_ports:
         return refuse("configured_port_not_paper")
     try:

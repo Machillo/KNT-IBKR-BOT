@@ -16,18 +16,96 @@ live decisions directly.
 """
 from __future__ import annotations
 
+from config.config import state_path
+
 from dataclasses import dataclass
+from functools import lru_cache
 from datetime import datetime, timezone
 from pathlib import Path
+import json
 import sqlite3
 
 from backtest.costs import BASELINE, CostModel
 from market.history import PriceBar
 
 
+# Context stored with every decision so NO_TRADE can be evaluated counterfactually later.
+_DECISION_EXTRA_COLUMNS = (
+    ("top_strategy", "TEXT"), ("top_side", "TEXT"), ("top_score", "REAL"),
+    ("top_entry", "REAL"), ("top_stop", "REAL"), ("top_target", "REAL"),
+    ("atr", "REAL"), ("adx", "REAL"), ("volatility_stress", "REAL"),
+    ("liquidity_score", "REAL"), ("selector_threshold", "REAL"), ("decision_version", "TEXT"),
+    ("reference_close", "REAL"), ("duplicate_of", "INTEGER"),
+    # v2: reproducibility + execution-model context (see docs/SHADOW_EVIDENCE.md).
+    ("run_mode", "TEXT"), ("learning_mode", "TEXT"), ("selector_bonus", "REAL"),
+    ("bar_count", "INTEGER"), ("first_bar_time", "TEXT"), ("session_open", "INTEGER"),
+    ("sector", "TEXT"), ("correlation", "REAL"), ("quantity", "REAL"), ("notional", "REAL"),
+    ("risk_amount", "REAL"), ("volatility_multiplier", "REAL"), ("reference_price", "REAL"),
+    ("reference_data_type", "INTEGER"), ("conflict_with", "INTEGER"), ("input_hash", "TEXT"),
+    ("stock_type", "TEXT"),
+)
+_CYCLE_EXTRA_COLUMNS = (
+    ("cycle_end", "TEXT"), ("eligible_count", "INTEGER"), ("candidates_attempted", "INTEGER"),
+    ("candidate_errors", "INTEGER"), ("max_candidates", "INTEGER"), ("run_mode", "TEXT"),
+    ("learning_mode", "TEXT"), ("code_version", "TEXT"), ("decision_version", "TEXT"),
+    ("scanner_rows", "TEXT"), ("scanner_errors", "TEXT"), ("config_hash", "TEXT"),
+    ("decision_fingerprint", "TEXT"),
+)
+# v2: frozen-learning shadow-only, pretrade execution model (SHADOW_SUBMIT/SHADOW_BLOCKED),
+# duplicates keyed by conId + run mode, conflicting re-decisions flagged.
+DECISION_VERSION = "selector_v1+decision_pipeline_v2"
+
+
+DECISION_PATH = ("engine", "execution", "market", "portfolio", "risk", "strategies", "core",
+                 "config/config.py", "research/shadow_journal.py", "run_shadow_only.py", "backtest/costs.py")
+
+
+@lru_cache(maxsize=1)
+def decision_fingerprint() -> str:
+    """Content hash of every file on the decision path, read from disk (tracked, modified or
+    untracked alike). Commits that do not touch the decision path (docs, scorer, reports) do
+    not change it; any change to what decides does. The FWD window requires one value."""
+    import hashlib
+
+    root = Path(__file__).resolve().parents[1]
+    digest = hashlib.sha256()
+    files: list[Path] = []
+    for entry in DECISION_PATH:
+        path = root / entry
+        files += sorted(path.rglob("*.py")) if path.is_dir() else ([path] if path.exists() else [])
+    for path in sorted(set(files)):
+        if "__pycache__" in path.parts:
+            continue
+        digest.update(str(path.relative_to(root)).replace("\\", "/").encode("utf-8"))
+        digest.update(path.read_bytes().replace(b"\r\n", b"\n"))
+    return digest.hexdigest()[:16]
+
+
+@lru_cache(maxsize=1)
+def code_version() -> str | None:
+    """Git commit of the running code (read-only; None when unavailable)."""
+    import subprocess
+
+    try:
+        out = subprocess.run(["git", "rev-parse", "--short=12", "HEAD"], cwd=Path(__file__).resolve().parents[1],
+                             capture_output=True, text=True, timeout=5, check=False)
+    except Exception:
+        return None
+    sha = (out.stdout or "").strip()
+    if not sha:
+        return None
+    try:
+        dirty = subprocess.run(["git", "diff", "--quiet", "HEAD", "--", "."], cwd=Path(__file__).resolve().parents[1],
+                               capture_output=True, timeout=5, check=False).returncode != 0
+    except Exception:
+        dirty = True
+    # A modified tracked tree is NOT the commit: the invalidation gate treats "+dirty" as a change.
+    return sha + ("+dirty" if dirty else "")
+
+
 class ShadowJournal:
-    def __init__(self, path: str | Path = "state/strategy_performance.db") -> None:
-        self.path = Path(path)
+    def __init__(self, path: str | Path | None = None) -> None:
+        self.path = Path(path) if path is not None else state_path("strategy_performance.db")
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(self.path) as conn:
             conn.execute(
@@ -70,6 +148,91 @@ class ShadowJournal:
                 """
             )
             conn.execute("CREATE INDEX IF NOT EXISTS idx_shadow_decisions_symbol ON shadow_decisions(symbol, id)")
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS discovery_cycles (
+                    cycle_id TEXT PRIMARY KEY,
+                    created_at TEXT NOT NULL,
+                    universe TEXT,
+                    scanners TEXT,
+                    rows_per_scanner INTEGER,
+                    quote_budget INTEGER,
+                    market_data_type INTEGER,
+                    session TEXT,
+                    market_open INTEGER
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS discovery_funnel (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    cycle_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    con_id INTEGER,
+                    sec_type TEXT,
+                    exchange TEXT,
+                    currency TEXT,
+                    best_rank INTEGER,
+                    sources TEXT,
+                    status TEXT NOT NULL,
+                    reason TEXT,
+                    reference_price REAL,
+                    spread_bps REAL,
+                    volume REAL,
+                    liquidity_score REAL
+                )
+                """
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_discovery_funnel_cycle ON discovery_funnel(cycle_id)")
+            # EXPLORATORY, write-only: every strategy evaluation of a decision (engine/opportunity.py).
+            # Not FWD evidence; the FWD evaluator never reads it (docs/FWD_PROTOCOL.md §Exploratory).
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS shadow_opportunities (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    decision_id INTEGER NOT NULL,
+                    cycle_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    opportunity_version TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    asset_class TEXT,
+                    strategy TEXT NOT NULL,
+                    lifecycle TEXT,
+                    direction TEXT,
+                    regime TEXT,
+                    heuristic_score REAL,
+                    regime_adjustment REAL,
+                    evidence_adjustment REAL,
+                    adjusted_score REAL,
+                    eligibility TEXT,
+                    selected INTEGER,
+                    entry REAL,
+                    stop REAL,
+                    target REAL,
+                    risk_pct REAL,
+                    reward_risk REAL,
+                    spread_slip_fee_pct REAL,
+                    spread_slip_fee_in_r REAL,
+                    context_bars INTEGER
+                )
+                """
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_shadow_opportunities_decision ON shadow_opportunities(decision_id)")
+            # Point-in-time IBKR instrument types of every name looked up (FWD3 universe filter).
+            conn.execute(
+                """CREATE TABLE IF NOT EXISTS instrument_types (
+                       id INTEGER PRIMARY KEY AUTOINCREMENT, looked_up_at TEXT NOT NULL,
+                       symbol TEXT NOT NULL, con_id INTEGER, stock_type TEXT)""")
+            existing = {row[1] for row in conn.execute("PRAGMA table_info(shadow_decisions)")}
+            for name, ddl in _DECISION_EXTRA_COLUMNS:
+                if name not in existing:
+                    conn.execute("ALTER TABLE shadow_decisions ADD COLUMN " + name + " " + ddl)
+            existing = {row[1] for row in conn.execute("PRAGMA table_info(discovery_cycles)")}
+            for name, ddl in _CYCLE_EXTRA_COLUMNS:
+                if name not in existing:
+                    conn.execute("ALTER TABLE discovery_cycles ADD COLUMN " + name + " " + ddl)
 
     @staticmethod
     def new_cycle_id() -> str:
@@ -91,19 +254,148 @@ class ShadowJournal:
             )
         return len(rows)
 
+    def record_cycle(self, cycle_id: str, *, universe: str | None, scanners: list[str],
+                     rows_per_scanner: int | None, quote_budget: int | None,
+                     market_data_type: int | None, session: str | None, market_open: bool | None,
+                     run_mode: str | None = None) -> None:
+        # run_mode is written at START so an interrupted (incomplete) cycle still belongs to
+        # its process and is seen by the quality gates.
+        with sqlite3.connect(self.path) as conn:
+            conn.execute(
+                """INSERT OR IGNORE INTO discovery_cycles (cycle_id, created_at, universe, scanners,
+                   rows_per_scanner, quote_budget, market_data_type, session, market_open, run_mode)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (cycle_id, datetime.now(timezone.utc).isoformat(), universe, json.dumps(list(scanners)),
+                 rows_per_scanner, quote_budget, market_data_type, session,
+                 None if market_open is None else int(bool(market_open)), run_mode),
+            )
+
+    def record_cycle_end(self, cycle_id: str, *, eligible: int, attempted: int, errors: int,
+                         max_candidates: int, run_mode: str, learning_mode: str,
+                         scanner_rows: dict | None = None, scanner_errors: dict | None = None,
+                         config_hash: str | None = None) -> None:
+        """Completion marker: a cycle without ``cycle_end`` is INCOMPLETE for research."""
+        with sqlite3.connect(self.path) as conn:
+            conn.execute(
+                """UPDATE discovery_cycles SET cycle_end=?, eligible_count=?, candidates_attempted=?,
+                   candidate_errors=?, max_candidates=?, run_mode=?, learning_mode=?, code_version=?,
+                   decision_version=?, scanner_rows=?, scanner_errors=?, config_hash=?, decision_fingerprint=?
+                   WHERE cycle_id=?""",
+                (datetime.now(timezone.utc).isoformat(), int(eligible), int(attempted), int(errors),
+                 int(max_candidates), run_mode, learning_mode, code_version(), DECISION_VERSION,
+                 None if scanner_rows is None else json.dumps(scanner_rows, sort_keys=True),
+                 None if scanner_errors is None else json.dumps(scanner_errors, sort_keys=True), config_hash,
+                 decision_fingerprint(), cycle_id),
+            )
+
+    def would_be_entries_on(self, utc_date: str, run_mode: str) -> list[dict]:
+        """Canonical SHADOW_SUBMIT rows of a UTC date (to rebuild the virtual book after a restart)."""
+        with sqlite3.connect(self.path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """SELECT symbol, con_id, quantity, notional, entry FROM shadow_decisions
+                   WHERE action='SHADOW_SUBMIT' AND duplicate_of IS NULL AND run_mode=?
+                     AND substr(created_at, 1, 10)=? ORDER BY id""",
+                (run_mode, utc_date)).fetchall()
+        return [dict(r) for r in rows]
+
+    def record_opportunities(self, decision_id: int, cycle_id: str, opportunities,
+                             created_at: datetime | None = None) -> int:
+        from engine.opportunity import OPPORTUNITY_VERSION
+
+        now = (created_at or datetime.now(timezone.utc)).isoformat()
+        rows = [(int(decision_id), cycle_id, now, OPPORTUNITY_VERSION, o.symbol, o.asset_class, o.strategy,
+                 o.lifecycle, o.direction, o.regime, o.heuristic_score, o.regime_adjustment,
+                 o.evidence_adjustment, o.adjusted_score, o.eligibility, int(bool(o.selected)), o.entry, o.stop,
+                 o.target, o.risk_pct, o.reward_risk, o.spread_slip_fee_pct, o.spread_slip_fee_in_r,
+                 o.context_bars)
+                for o in opportunities]
+        with sqlite3.connect(self.path) as conn:
+            conn.executemany(
+                """INSERT INTO shadow_opportunities (decision_id, cycle_id, created_at, opportunity_version, symbol,
+                   asset_class, strategy, lifecycle, direction, regime, heuristic_score, regime_adjustment,
+                   evidence_adjustment, adjusted_score, eligibility, selected, entry, stop, target, risk_pct,
+                   reward_risk, spread_slip_fee_pct, spread_slip_fee_in_r, context_bars)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                rows,
+            )
+        return len(rows)
+
+    def record_instrument_type(self, symbol: str, con_id: int, stock_type: str | None) -> None:
+        with sqlite3.connect(self.path) as conn:
+            conn.execute("INSERT INTO instrument_types (looked_up_at, symbol, con_id, stock_type) VALUES (?, ?, ?, ?)",
+                         (datetime.now(timezone.utc).isoformat(), symbol, int(con_id or 0), stock_type))
+
+    def record_funnel(self, cycle_id: str, funnel) -> int:
+        now = datetime.now(timezone.utc).isoformat()
+        rows = [
+            (cycle_id, now, r.symbol, r.con_id, r.sec_type, r.exchange, r.currency, r.best_rank,
+             json.dumps([list(x) for x in r.sources]), r.status, r.reason, r.reference_price,
+             r.spread_bps, r.volume, r.liquidity_score)
+            for r in funnel
+        ]
+        with sqlite3.connect(self.path) as conn:
+            conn.executemany(
+                """INSERT INTO discovery_funnel (cycle_id, created_at, symbol, con_id, sec_type, exchange,
+                   currency, best_rank, sources, status, reason, reference_price, spread_bps, volume,
+                   liquidity_score) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                rows,
+            )
+        return len(rows)
+
     def record_decision(self, cycle_id: str, *, symbol: str, con_id: int, bar_time, timeframe: str,
                         regime: str, action: str, strategy: str | None, side: str | None,
                         score: float | None, entry: float | None, stop: float | None,
-                        target: float | None, reason: str | None) -> int:
+                        target: float | None, reason: str | None, top: dict | None = None,
+                        context: dict | None = None, created_at: datetime | None = None) -> int:
+        """Record one decision (append-only; never updated).
+
+        ``top`` = best directional evaluation even when below the threshold (keys strategy,
+        side, score, entry, stop, target) so NO_TRADE can be scored counterfactually;
+        ``context`` = atr, adx, volatility_stress, liquidity_score, selector_threshold.
+        """
+        top = top or {}
+        context = context or {}
+        bar_text = None if bar_time is None else str(bar_time)
+        run_mode = context.get("run_mode")
+        con_id = int(con_id or 0)
         with sqlite3.connect(self.path) as conn:
-            cur = conn.execute(
-                """INSERT INTO shadow_decisions (cycle_id, created_at, symbol, con_id, bar_time, timeframe,
-                   regime, action, strategy, side, score, entry, stop, target, reason)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (cycle_id, datetime.now(timezone.utc).isoformat(), symbol, int(con_id or 0),
-                 None if bar_time is None else str(bar_time), timeframe, regime, action, strategy, side,
-                 score, entry, stop, target, reason),
-            )
+            # Shadow cycles run more often than bars complete: the first decision on a
+            # completed bar is canonical, later ones are kept for audit but flagged. Keyed by
+            # conId (symbol only when unknown) and run mode: two processes never dedupe each other.
+            first = None if bar_text is None else conn.execute(
+                """SELECT id, strategy, side, input_hash FROM shadow_decisions
+                   WHERE (CASE WHEN ? > 0 THEN con_id=? ELSE symbol=? END) AND bar_time=? AND timeframe=?
+                   AND decision_version=? AND COALESCE(run_mode,'')=COALESCE(?,'') AND duplicate_of IS NULL
+                   ORDER BY id LIMIT 1""",
+                (con_id, con_id, symbol, bar_text, timeframe, DECISION_VERSION, run_mode),
+            ).fetchone()
+            # Same bar, same code, SAME input bars, different selector output = non-determinism.
+            # Different output on revised input (IBKR corrects the last bar after the close) is
+            # not a conflict; it stays a duplicate of the canonical row.
+            same_input = first is not None and first[3] is not None and first[3] == context.get("input_hash")
+            conflict = int(first[0]) if same_input and (first[1], first[2]) != (strategy, side) else None
+            session_open = context.get("session_open")
+            columns = {
+                "cycle_id": cycle_id, "created_at": (created_at or datetime.now(timezone.utc)).isoformat(),
+                "symbol": symbol, "con_id": con_id, "bar_time": bar_text, "timeframe": timeframe,
+                "regime": regime, "action": action, "strategy": strategy, "side": side, "score": score,
+                "entry": entry, "stop": stop, "target": target, "reason": reason,
+                "top_strategy": top.get("strategy"), "top_side": top.get("side"), "top_score": top.get("score"),
+                "top_entry": top.get("entry"), "top_stop": top.get("stop"), "top_target": top.get("target"),
+                "decision_version": DECISION_VERSION,
+                "duplicate_of": None if first is None else int(first[0]), "conflict_with": conflict,
+                "session_open": None if session_open is None else int(bool(session_open)),
+            }
+            for key in ("atr", "adx", "volatility_stress", "liquidity_score", "selector_threshold",
+                        "reference_close", "run_mode", "learning_mode", "selector_bonus", "bar_count",
+                        "first_bar_time", "sector", "correlation", "quantity", "notional", "risk_amount",
+                        "volatility_multiplier", "reference_price", "reference_data_type", "input_hash",
+                        "stock_type"):
+                columns[key] = context.get(key)
+            names = ", ".join(columns)
+            marks = ", ".join("?" for _ in columns)
+            cur = conn.execute(f"INSERT INTO shadow_decisions ({names}) VALUES ({marks})", tuple(columns.values()))
             return int(cur.lastrowid)
 
 
@@ -115,47 +407,109 @@ class DecisionOutcome:
     exit: float | None
     return_pct: float | None
     bars_held: int
+    mae_pct: float | None = None  # worst adverse excursion from the entry fill, % (<= 0)
+    mfe_pct: float | None = None  # best favourable excursion from the entry fill, % (>= 0)
+    resolved: bool = True         # False when the bracket is still open at the end of the data
 
 
 def score_decision(side: str, stop: float, target: float, bars_after: list[PriceBar],
-                   costs: CostModel = BASELINE, max_bars: int = 60) -> DecisionOutcome:
-    """Outcome of a LONG/SHORT bracket placed at the open of ``bars_after[0]``.
+                   costs: CostModel = BASELINE, max_bars: int = 60,
+                   limit: float | None = None, valid_on=None) -> DecisionOutcome:
+    """Outcome of a LONG/SHORT bracket evaluated on ``bars_after`` (bars after the decision).
 
-    ``bars_after`` must start with the first bar AFTER the decision bar. Returns net
-    return per share (entry/exit costs in bps; commission excluded because it depends on
-    size). Unresolved after ``max_bars`` -> exit at that bar's close ("timeout").
+    Entry:
+    * ``limit is None`` — marketable at ``bars_after[0].open`` (legacy research mode);
+    * ``limit`` given — the executor's model: LIMIT, DAY validity (bars of the first
+      bar's exchange date). An open through the limit fills at the open (capped at the
+      limit); otherwise it fills only if price trades strictly through the limit.
+      Unfilled by the end of that date -> ``limit_not_filled`` (resolved).
+      ``valid_on`` = the exchange date of the SESSION the order was placed in (the date of
+      ``created_at``). A DAY order placed at 15:05 dies at that day's close: it must never be
+      simulated in the next session (open gap). Default: the first bar's date (legacy).
+    Exits: gap-aware stop-market, limit target, stop wins ties. After an INTRABAR limit
+    fill the target is not allowed on the fill bar (the high may have come first).
+    MAE/MFE are measured from the entry fill and clipped at the exit price on the exit bar.
+    Net return per share after spread/slippage/fees (commission excluded: size-dependent).
     """
     side = side.upper()
     if side not in {"LONG", "SHORT"} or not bars_after:
-        return DecisionOutcome(False, "no_data", None, None, None, 0)
+        return DecisionOutcome(False, "no_data", None, None, None, 0, resolved=bool(bars_after))
     long = side == "LONG"
-    raw_entry = float(bars_after[0].open)
-    if (long and not stop < raw_entry < target) or (not long and not target < raw_entry < stop):
-        return DecisionOutcome(False, "gapped_past_bracket", None, None, None, 0)
-    entry = costs.marketable_fill(raw_entry, buy=long)
-    for k, bar in enumerate(bars_after[:max_bars]):
+    window = bars_after[:max_bars]
+
+    fill_index, entry, at_open = None, None, False
+    if limit is None:
+        raw_entry = float(window[0].open)
+        if (long and not stop < raw_entry < target) or (not long and not target < raw_entry < stop):
+            return DecisionOutcome(False, "gapped_past_bracket", None, None, None, 0)
+        fill_index, entry, at_open = 0, costs.marketable_fill(raw_entry, buy=long), True
+    else:
+        day = valid_on or _bar_date(window[0])
+        for k, bar in enumerate(window):
+            if _bar_date(bar) != day:
+                return DecisionOutcome(False, "limit_not_filled", None, None, None, 0)
+            if long and bar.open <= limit:
+                fill_index, entry, at_open = k, min(limit, costs.marketable_fill(float(bar.open), buy=True)), True
+            elif long and bar.low < limit:
+                fill_index, entry = k, float(limit)
+            elif not long and bar.open >= limit:
+                fill_index, entry, at_open = k, max(limit, costs.marketable_fill(float(bar.open), buy=False)), True
+            elif not long and bar.high > limit:
+                fill_index, entry = k, float(limit)
+            if fill_index is not None:
+                break
+        if fill_index is None:
+            return DecisionOutcome(False, "limit_not_filled", None, None, None, 0,
+                                   resolved=len(window) >= max_bars)
+
+    worst = best = 0.0
+    for k in range(fill_index, len(window)):
+        bar = window[k]
+        target_allowed = k > fill_index or at_open
+        exit_raw, reason, marketable = None, "", True
         if long:
-            if bar.open <= stop:
-                raw, reason, marketable = float(bar.open), "stop_gap", True
+            if bar.open <= stop and (k > fill_index or at_open):
+                exit_raw, reason = float(bar.open), "stop_gap"
             elif bar.low <= stop:
-                raw, reason, marketable = stop, "stop", True
-            elif bar.high >= target:
-                raw, reason, marketable = target, "target", False
-            else:
-                continue
+                exit_raw, reason = stop, "stop"
+            elif target_allowed and bar.high >= target:
+                exit_raw, reason, marketable = target, "target", False
         else:
-            if bar.open >= stop:
-                raw, reason, marketable = float(bar.open), "stop_gap", True
+            if bar.open >= stop and (k > fill_index or at_open):
+                exit_raw, reason = float(bar.open), "stop_gap"
             elif bar.high >= stop:
-                raw, reason, marketable = stop, "stop", True
-            elif bar.low <= target:
-                raw, reason, marketable = target, "target", False
+                exit_raw, reason = stop, "stop"
+            elif target_allowed and bar.low <= target:
+                exit_raw, reason, marketable = target, "target", False
+        low, high = float(bar.low), float(bar.high)
+        if exit_raw is not None:
+            # Clip the exit bar at the exit price: nothing beyond the fill counts as excursion.
+            stopped = reason.startswith("stop")
+            if long:
+                low, high = (max(low, exit_raw), high) if stopped else (low, min(high, exit_raw))
             else:
-                continue
-        exit_ = costs.marketable_fill(raw, buy=not long) if marketable else raw
-        ret = (exit_ / entry - 1) * (1 if long else -1) * 100
-        return DecisionOutcome(True, reason, entry, exit_, ret, k + 1)
-    last = bars_after[:max_bars][-1]
+                low, high = (low, min(high, exit_raw)) if stopped else (max(low, exit_raw), high)
+        up, down = (high / entry - 1) * 100, (low / entry - 1) * 100
+        adverse, favourable = (down, up) if long else (-up, -down)
+        worst, best = min(worst, adverse), max(best, favourable)
+        if exit_raw is not None:
+            exit_ = costs.marketable_fill(exit_raw, buy=not long) if marketable else exit_raw
+            ret = (exit_ / entry - 1) * (1 if long else -1) * 100 - _fee_pct(costs)
+            return DecisionOutcome(True, reason, entry, exit_, ret, k - fill_index + 1, worst, best)
+    last = window[-1]
     exit_ = costs.marketable_fill(float(last.close), buy=not long)
-    ret = (exit_ / entry - 1) * (1 if long else -1) * 100
-    return DecisionOutcome(True, "timeout", entry, exit_, ret, len(bars_after[:max_bars]))
+    ret = (exit_ / entry - 1) * (1 if long else -1) * 100 - _fee_pct(costs)
+    return DecisionOutcome(True, "timeout", entry, exit_, ret, len(window) - fill_index, worst, best,
+                           resolved=len(window) >= max_bars)
+
+
+def _bar_date(bar: PriceBar):
+    from backtest.metrics import as_datetime
+
+    dt = as_datetime(bar.time)
+    return None if dt is None else dt.date()
+
+
+def _fee_pct(costs: CostModel) -> float:
+    """Sell-side regulatory fee in % of price (sells happen on long exit / short entry)."""
+    return costs.sell_fee_bps / 100

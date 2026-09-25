@@ -26,9 +26,24 @@ then cleanup with all three legs cancelled, zero fills. If anything fills: stop 
 
 ## Step B — one strategy-originated signal, max 1 share
 ```bash
-KNT_SIGNAL_PAPER_ACK=I_UNDERSTAND_KNT_WILL_SUBMIT_ONE_PAPER_SIGNAL KNT_SIGNAL_PAPER_MAX_QTY=1 python run_knt_signal_paper_once.py
+python run_paper_preflight.py   # read-only; must print READY_FOR_SUPERVISED_PLUMBING
+KNT_SIGNAL_PAPER_ACK=I_UNDERSTAND_KNT_WILL_SUBMIT_ONE_PAPER_SIGNAL KNT_SIGNAL_PAPER_MAX_QTY=1 python run_knt_signal_paper_once.py --confirm-paper-plumbing
 ```
+Full procedure, confirmations and rollback: `docs/PAPER_PLUMBING_TEST.md` (max 1 share, the ACK
+must not be stored in `.env`, in-process preflight incl. every client's open orders).
 Expect either `no strategy setup passed every gate` (valid outcome) or exactly one bracket.
+Other valid, fail-closed outcomes added in session 2 (nothing is sent):
+- `PORTFOLIO_REJECTED ... sector_metadata_missing` — IBKR contract details had no industry for the
+  candidate or an existing exposure (ETFs often lack it);
+- `correlation_unavailable` / `correlation_limit` — also counts working orders;
+- entries locked by the multi-day drawdown guard (`state/drawdown_state.json`; `MAX_DRAWDOWN_PCT`
+  default 15 %). On an account that already has daily history in `state/risk_state.json` but no
+  drawdown file (every install upgraded to this code) the guard refuses to invent a high-water
+  mark and locks entries; `run_paper_preflight.py` reports `drawdown_state_initialized` FAIL.
+  Review, then run `DRAWDOWN_RESET_ACK=... python run_reset_drawdown_lock.py` once. If a lock
+  appears unexpectedly, stop and inspect.
+- `execution_lock_present` — a previous run left the broker state uncertain
+  (`state/execution_lock.json`); check TWS, then `run_reset_execution_lock.py` (ACK + flat check).
 Log line `PAPER VERIFICATION | verified=True reason=verified_paper account=DU***xx` must appear;
 if `verified=False`, the run must place nothing — that is the guard working.
 

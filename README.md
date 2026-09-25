@@ -62,8 +62,8 @@ python run_score_shadow.py --source ibkr    # score TRADE and NO_TRADE decisions
 python run_fetch_journal_bars.py     # bars for every name the scanners surfaced (incl. later delistings)
 ```
 
-Replaying the journal universe (`run_pipeline_backtest.py --universe files --cache-dir reports/pit_cache
---universe-source journal`) requires a protocol v2 time split written down BEFORE looking at
+Replaying the journal universe (`run_pipeline_backtest.py --profile intraday_1y --universe files
+--cache-dir reports/pit_cache --universe-source journal`) requires a protocol v2 time split written down BEFORE looking at
 results; forward data must not be reinterpreted through the v1 holdout flags.
 
 ## Supervised human procedures

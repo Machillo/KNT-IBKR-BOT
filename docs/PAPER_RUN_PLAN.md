@@ -29,6 +29,12 @@ then cleanup with all three legs cancelled, zero fills. If anything fills: stop 
 KNT_SIGNAL_PAPER_ACK=I_UNDERSTAND_KNT_WILL_SUBMIT_ONE_PAPER_SIGNAL KNT_SIGNAL_PAPER_MAX_QTY=1 python run_knt_signal_paper_once.py
 ```
 Expect either `no strategy setup passed every gate` (valid outcome) or exactly one bracket.
+Other valid, fail-closed outcomes added in session 2 (nothing is sent):
+- `PORTFOLIO_REJECTED ... sector_metadata_missing` — IBKR contract details had no industry for the
+  candidate or an existing exposure (ETFs often lack it);
+- `correlation_unavailable` / `correlation_limit` — also counts working orders;
+- entries locked by the multi-day drawdown guard (`state/drawdown_state.json`, created on first
+  run; `MAX_DRAWDOWN_PCT` default 15 %). If a lock appears unexpectedly, stop and inspect.
 Log line `PAPER VERIFICATION | verified=True reason=verified_paper account=DU***xx` must appear;
 if `verified=False`, the run must place nothing — that is the guard working.
 

@@ -16,15 +16,32 @@ from dataclasses import replace
 from config.config import STATE_DIR, BotConfig, config, read_only_ibkr_settings
 
 
-EXPECTED_READONLY_LOCK = "paper_account_unverified:readonly_session"
+def research_locked(supervisor, equity: float | None) -> str | None:
+    """Reason the research decisions must be treated as locked, or None.
 
-
-def research_lock(risk) -> bool:
-    """Lock state used for research decisions. The read-only session is (correctly) never
-    verified as paper, which locks entries; in this order-incapable process that lock is
-    expected and would otherwise turn every decision into 'allocation_unavailable'. Any
-    other lock (daily loss, drawdown, monitoring error) is kept."""
-    return bool(risk.trading_locked) and str(risk.lock_reason) != EXPECTED_READONLY_LOCK
+    Computed INDEPENDENTLY from each real source instead of from ``RiskManager.lock_reason``:
+    in this read-only process the paper-verification lock (expected: a readonly session is
+    never verified as paper) is applied first and would mask any later lock's reason.
+    Sources: persisted sticky daily kill, daily-loss limit, multi-day drawdown lock, and an
+    unavailable/invalid equity reading (fail closed).
+    """
+    context = supervisor.context
+    if context is None or equity is None or equity <= 0:
+        return "equity_unavailable"
+    if getattr(supervisor, "_kill_persisted", False):
+        return "sticky_daily_kill"
+    daily = context.risk.daily_state(starting_equity=context.starting_equity, current_equity=equity)
+    if daily.kill_switch_required:
+        return "daily_loss_limit"
+    drawdown = getattr(supervisor, "drawdown", None)
+    if drawdown is not None:
+        try:
+            record = drawdown.store.get(context.account)
+        except Exception:
+            return "drawdown_state_unavailable"
+        if record is not None and record.locked:
+            return "multi_day_drawdown"
+    return None
 
 
 def shadow_only_config(base: BotConfig) -> BotConfig:
@@ -73,14 +90,15 @@ async def main_async(args) -> None:
         while args.cycles == 0 or cycle < args.cycles:
             try:
                 await supervisor.evaluate()
-                if research_lock(context.risk):
-                    research_risk.lock_trading(context.risk.lock_reason)
+                snapshot = await supervisor.accounts.snapshot(context.account, log=False)
+                reason = research_locked(supervisor, snapshot.net_liquidation)
+                if reason:
+                    research_risk.lock_trading(reason)
                 else:
                     research_risk.trading_locked, research_risk.lock_reason = False, ""
-                snapshot = await supervisor.accounts.snapshot(context.account, log=False)
                 state = states.build(snapshot, starting_equity=context.starting_equity,
                                      daily_loss_limit_pct=cfg.risk.max_daily_loss_pct,
-                                     trading_locked=research_lock(context.risk))
+                                     trading_locked=research_risk.trading_locked)
                 await shadow.run_once(cfg.runtime.discovery_rows, portfolio_state=state)
             except Exception as exc:
                 logger.exception("SHADOW-ONLY cycle failed | error=%s", exc)

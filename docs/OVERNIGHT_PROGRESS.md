@@ -1,8 +1,10 @@
 # Overnight progress — checkpoint (session 2)
 
-Branch `claude/overnight-hardening` (pushed; draft PR #2, base `feature/paper-alpha`), created from
-`feature/paper-alpha` @ 0b9e191. Never merged. No orders, no IBKR connection this session;
-local `.env` keeps `AUTONOMOUS_TRADING_ENABLED=false`.
+Session 1 (`claude/overnight-hardening`, up to 868f7d9) was merged by Kenneth into
+`feature/paper-alpha` via PR #2 (merge commit 0356044). Session 2 work lives on a NEW branch,
+`claude/overnight-session2`, replayed onto the current `feature/paper-alpha` (identical tree to the
+old branch tip), with its own draft PR (base `feature/paper-alpha`). Nothing merged into `main`.
+No orders, no IBKR connection this session; local `.env` keeps `AUTONOMOUS_TRADING_ENABLED=false`.
 
 ## Session 1 (see git log up to 868f7d9)
 Paper guard, executor gates, backtester v2, leak-free validation, pipeline replay, protocol v1,

@@ -25,10 +25,51 @@ def test_shadow_only_runner_never_builds_an_executor():
     assert "paper_executor=None" in text
 
 
-def test_research_lock_ignores_only_the_expected_readonly_lock():
+def _supervisor(state_dir, net_liq, **risk):
+    import asyncio
     from types import SimpleNamespace
-    from run_shadow_only import EXPECTED_READONLY_LOCK, research_lock
 
-    assert research_lock(SimpleNamespace(trading_locked=True, lock_reason=EXPECTED_READONLY_LOCK)) is False
-    assert research_lock(SimpleNamespace(trading_locked=True, lock_reason="Daily loss limit reached")) is True
-    assert research_lock(SimpleNamespace(trading_locked=False, lock_reason="")) is False
+    from engine.supervisor import PaperSupervisor
+
+    class FakeIB:
+        client = SimpleNamespace(port=7497)
+
+        def isConnected(self):
+            return True
+
+        def managedAccounts(self):
+            return ["DU0000001"]
+
+        async def accountSummaryAsync(self, account):
+            return [SimpleNamespace(account="DU0000001", tag="NetLiquidation", currency="BASE", value=str(net_liq))]
+
+        def positions(self):
+            return []
+
+        def openTrades(self):
+            return []
+
+    cfg = shadow_only_config(BotConfig(ibkr=IBKRConfig(port=7497, allow_live_trading=False),
+                                       risk=RiskConfig(**risk), runtime=RuntimeConfig()))
+    sup = PaperSupervisor(FakeIB(), cfg, state_dir=state_dir)
+    asyncio.run(sup.initialize())
+    return sup
+
+
+def test_research_lock_sees_real_locks_despite_the_readonly_lock(isolated_state_dir):
+    from run_shadow_only import research_locked
+
+    sup = _supervisor(isolated_state_dir, 100_000)
+    # The readonly session is never verified as paper: the real RiskManager is locked for that.
+    assert sup.context.risk.trading_locked and "readonly_session" in sup.context.risk.lock_reason
+    assert research_locked(sup, 100_000) is None                    # nothing else wrong
+    assert research_locked(sup, 85_000) == "daily_loss_limit"       # -15 % today (limit 10 %)
+    assert research_locked(sup, None) == "equity_unavailable"
+
+
+def test_research_lock_sees_a_persisted_drawdown_lock(isolated_state_dir):
+    from run_shadow_only import research_locked
+
+    sup = _supervisor(isolated_state_dir, 100_000, max_drawdown_pct=0.05, max_daily_loss_pct=0.5)
+    sup.drawdown.evaluate(94_000)                                   # -6 % from the high-water mark
+    assert research_locked(sup, 94_000) == "multi_day_drawdown"

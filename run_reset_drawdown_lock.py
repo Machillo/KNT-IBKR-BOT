@@ -19,7 +19,7 @@ from core.paper_guard import mask_account, verify_paper_account
 from risk.drawdown_guard import RESET_ACK, DrawdownStateStore
 
 
-async def main() -> None:
+async def main(state_dir=None) -> None:
     if dotenv_values(".env").get("DRAWDOWN_RESET_ACK"):
         raise SystemExit("DRAWDOWN_RESET_ACK must not be stored in .env; export it for this run only")
     if getenv("DRAWDOWN_RESET_ACK", "") != RESET_ACK:
@@ -36,7 +36,7 @@ async def main() -> None:
         account = await AccountService(ib).snapshot(config.ibkr.account, log=False)
         if not account.net_liquidation or account.net_liquidation <= 0:
             raise SystemExit("NetLiquidation unavailable; nothing reset")
-        store = DrawdownStateStore(STATE_DIR / "drawdown_state.json")
+        store = DrawdownStateStore((state_dir or STATE_DIR) / "drawdown_state.json")
         before = store.get(account.account)
         if before is not None:
             dd = max(0.0, (before.peak_equity - account.net_liquidation) / before.peak_equity) * 100
@@ -50,4 +50,11 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    import argparse
+    from pathlib import Path
+
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--state-dir", default=None,
+                    help="state directory to reset (default: repo state/; shadow-only uses state/shadow_only)")
+    args = ap.parse_args()
+    asyncio.run(main(Path(args.state_dir) if args.state_dir else None))

@@ -84,3 +84,29 @@ def test_pending_entries_count_against_the_cash_reserve():
     with_pending = PortfolioSnapshot(100_000, 100_000, 0, 0, 50_000, 0, 10_000)
     decision = brain.evaluate(with_pending, opp)
     assert (decision.approved, decision.reason) == (False, "cash_reserve_limit")
+
+
+def test_sector_metadata_expires_and_ambiguous_details_fail_closed():
+    import asyncio
+    from types import SimpleNamespace
+
+    from portfolio.metadata import ContractMetadataService
+
+    calls, now = [], [0.0]
+
+    async def details(contract):
+        calls.append(contract.conId)
+        if contract.conId == 2:
+            return [SimpleNamespace(industry="A"), SimpleNamespace(industry="B")]
+        return [SimpleNamespace(industry="Technology", category="x")]
+
+    svc = ContractMetadataService(SimpleNamespace(reqContractDetailsAsync=details), ttl_seconds=100,
+                                  clock=lambda: now[0])
+    one = SimpleNamespace(conId=1)
+    assert asyncio.run(svc.get(one)).sector == "Technology"
+    asyncio.run(svc.get(one))
+    assert calls == [1]                        # cached
+    now[0] = 101.0
+    asyncio.run(svc.get(one))
+    assert calls == [1, 1]                     # expired -> refreshed
+    assert asyncio.run(svc.get(SimpleNamespace(conId=2))) is None

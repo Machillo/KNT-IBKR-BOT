@@ -7,7 +7,10 @@ admission layer can fail closed when sector metadata is required.
 """
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
+
+CACHE_TTL_SECONDS = 24 * 3600  # sector classifications change rarely, but never trust a stale one forever
 
 
 @dataclass(frozen=True)
@@ -21,14 +24,17 @@ class InstrumentMetadata:
 
 
 class ContractMetadataService:
-    def __init__(self, ib) -> None:
+    def __init__(self, ib, ttl_seconds: float = CACHE_TTL_SECONDS, clock=time.monotonic) -> None:
         self.ib = ib
-        self._cache: dict[int, InstrumentMetadata] = {}
+        self.ttl = float(ttl_seconds)
+        self._clock = clock
+        self._cache: dict[int, tuple[float, InstrumentMetadata]] = {}
 
     async def get(self, contract) -> InstrumentMetadata | None:
         con_id = int(getattr(contract, "conId", 0) or 0)
-        if con_id and con_id in self._cache:
-            return self._cache[con_id]
+        cached = self._cache.get(con_id) if con_id else None
+        if cached is not None and self._clock() - cached[0] < self.ttl:
+            return cached[1]
         request = getattr(self.ib, "reqContractDetailsAsync", None)
         if request is None:
             return None
@@ -38,11 +44,13 @@ class ContractMetadataService:
             return None
         if not details:
             return None
+        if len(details) != 1:
+            return None  # ambiguous contract: fail closed instead of guessing a sector
         detail = details[0]
         meta = InstrumentMetadata(
             sector=(getattr(detail, "industry", "") or "").strip() or None,
             industry_category=(getattr(detail, "category", "") or "").strip() or None,
         )
         if con_id and meta.known:
-            self._cache[con_id] = meta
+            self._cache[con_id] = (self._clock(), meta)
         return meta

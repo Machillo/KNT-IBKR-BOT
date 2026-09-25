@@ -70,7 +70,7 @@ def test_each_broker_failure_blocks(isolated_state_dir):
         "account_flat": (FakeIB(positions=[position]), Quotes()),
         "no_open_orders_any_client": (FakeIB(orders=[working]), Quotes()),
         "live_two_sided_quote": (FakeIB(), Quotes(data_type=3)),
-        "paper_account_verifiable": (FakeIB(accounts=("U1234567",)), Quotes()),
+        "paper_account_verifiable": (FakeIB(accounts=("U0000001",)), Quotes()),
     }
     for name, (ib, quotes) in cases.items():
         _, failed = verdict(run(ib, quotes, isolated_state_dir))

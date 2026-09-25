@@ -231,7 +231,7 @@ class BacktestEngine:
                     elif bar.low <= pos.target:
                         raw_exit, reason, marketable = pos.target, "target", False
                 if raw_exit is not None:
-                    trade, equity_delta, exit_costs, exit_spread = self._close(pos, raw_exit, reason, marketable, i)
+                    trade, equity_delta, exit_costs, exit_spread = self._close(pos, raw_exit, reason, marketable, i, bars)
                     trades.append(trade)
                     trade_returns.append(trade.return_pct / 100)
                     equity += equity_delta
@@ -254,7 +254,8 @@ class BacktestEngine:
                 direction = 1 if position.side == SignalSide.LONG else -1
                 close = float(bar.close)
                 marked = (equity + (close - position.entry_fill) * position.qty * direction
-                          - costs.commission(position.qty, close))
+                          - costs.estimated_exit_cost(position.qty, close,
+                                                      long=position.side == SignalSide.LONG))
             peak_marked = max(peak_marked, marked)
             drawdown = (peak_marked - marked) / peak_marked if peak_marked else 0.0
             max_dd = max(max_dd, drawdown)
@@ -262,7 +263,7 @@ class BacktestEngine:
 
         if position is not None and bars:
             trade, equity_delta, exit_costs, exit_spread = self._close(
-                position, float(bars[-1].close), "end_of_data", True, len(bars) - 1)
+                position, float(bars[-1].close), "end_of_data", True, len(bars) - 1, bars)
             trades.append(trade)
             trade_returns.append(trade.return_pct / 100)
             equity += equity_delta
@@ -276,12 +277,26 @@ class BacktestEngine:
         return self._result(equity, max_dd, trades, trade_returns, curve, total_commission,
                             total_spread_slip, bars_in_market, bars_counted, skipped_min_qty)
 
+    @staticmethod
+    def held_days(bars: list[PriceBar], entry_index: int, exit_index: int) -> float:
+        """Calendar days between entry and exit bars; one day per bar if times are unparseable."""
+        start, end = as_datetime(bars[entry_index].time), as_datetime(bars[exit_index].time)
+        if start is not None and end is not None:
+            try:
+                return max(0.0, (end - start).total_seconds() / 86_400)
+            except TypeError:
+                pass
+        return float(max(0, exit_index - entry_index))
+
     def _close(self, pos: _OpenPosition, raw_exit: float, reason: str, marketable: bool,
-               index: int) -> tuple[BacktestTrade, float, float, float]:
-        """Return (trade, equity change at exit, exit commission+fees, exit spread/slippage)."""
+               index: int, bars: list[PriceBar]) -> tuple[BacktestTrade, float, float, float]:
+        """Return (trade, equity change at exit, exit commission+fees+borrow, exit spread/slippage)."""
         exit_fill = self._exit_fill(pos.side, raw_exit, marketable=marketable)
         commission = self.costs.commission(pos.qty, exit_fill)
-        fee = self.costs.sell_fee(pos.qty, exit_fill) if pos.side == SignalSide.LONG else 0.0
+        if pos.side == SignalSide.LONG:
+            fee = self.costs.sell_fee(pos.qty, exit_fill)
+        else:
+            fee = self.costs.borrow_cost(pos.entry_fill * pos.qty, self.held_days(bars, pos.entry_index, index))
         direction = 1 if pos.side == SignalSide.LONG else -1
         gross = (exit_fill - pos.entry_fill) * pos.qty * direction
         pnl = gross - pos.entry_cost - commission - fee

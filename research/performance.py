@@ -328,10 +328,12 @@ class StrategyPerformanceStore:
                 FROM strategy_performance sp
                 JOIN research_runs rr ON rr.id=sp.run_id
                 WHERE sp.symbol=? AND sp.asset_class=? AND sp.timeframe=?
-                  AND sp.regime=? AND sp.strategy=? AND rr.status='COMPLETED'
-                  AND sp.split='OOS' AND sp.engine_version>=?
+                  AND sp.strategy=? AND rr.status='COMPLETED' AND sp.engine_version>=?
                 """,
-                (symbol.upper(), asset_class.upper(), timeframe, regime, strategy,
+                # Latest run for the context REGARDLESS of regime: if that run had no
+                # OOS trades in this regime, there is no evidence — older runs must
+                # not silently resurface.
+                (symbol.upper(), asset_class.upper(), timeframe, strategy,
                  MIN_ADMISSIBLE_ENGINE_VERSION),
             ).fetchone()
             run_id = None if latest is None else latest["run_id"]

@@ -47,17 +47,15 @@ def _strategy_by_name(name: str):
 
 
 def _monthly_returns(result) -> dict[str, float]:
+    """Calendar-month returns; the first month is measured from the initial equity."""
     if not result.equity_curve:
         return {}
     ends = {}
     for p in result.equity_curve:
         ends[str(p.time)[:7]] = p.equity
-    keys = sorted(ends)
-    if len(keys) < 2:
-        return {}
     out = {}
-    prev = ends[keys[0]]
-    for key in keys[1:]:
+    prev = result.initial_equity
+    for key in sorted(ends):
         cur = ends[key]
         if prev > 0:
             out[key] = (cur / prev - 1) * 100

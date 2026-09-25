@@ -29,11 +29,12 @@ def run(*,universe:str,profile:str,target_pct:float,cache_dir:str,output_dir:str
     for row in all_rows: by_strategy[row.strategy].append(row)
     summary=[]
     for strategy,rows in by_strategy.items():
-        profitable=sum(r.oos_compounded_monthly_pct>0 for r in rows); avg_oos=sum(r.oos_compounded_monthly_pct for r in rows)/len(rows); avg_full=sum(r.compounded_monthly_pct for r in rows)/len(rows); avg_dd=sum(r.max_drawdown_pct for r in rows)/len(rows); score=avg_oos*4+avg_full*2+profitable/len(rows)*10-avg_dd*.5; summary.append((score,strategy,len(rows),avg_full,avg_oos,profitable/len(rows)*100,avg_dd))
+        # Rank on DEVELOPMENT metrics only; holdout (oos_*) columns are printed, never scored.
+        dev_positive=sum(r.compounded_monthly_pct>0 for r in rows); avg_oos=sum(r.oos_compounded_monthly_pct for r in rows)/len(rows); oos_positive=sum(r.oos_compounded_monthly_pct>0 for r in rows); avg_full=sum(r.compounded_monthly_pct for r in rows)/len(rows); avg_dd=sum(r.max_drawdown_pct for r in rows)/len(rows); score=avg_full*2+dev_positive/len(rows)*10-avg_dd*.5; summary.append((score,strategy,len(rows),avg_full,avg_oos,oos_positive/len(rows)*100,avg_dd))
     summary.sort(reverse=True)
     print("\n=== GEN2 TOP 20 ROWS ===")
     for i,row in enumerate(ranked[:20],1): print(f"{i:2d}. {row.symbol:6s} {row.profile:12s} {row.strategy:42s} cmpd/mo={row.compounded_monthly_pct:7.2f}% median={row.median_monthly_pct:7.2f}% positive={row.positive_month_rate_pct:5.1f}% DD={row.max_drawdown_pct:6.2f}% OOS/mo={row.oos_compounded_monthly_pct:7.2f}% OOS_DD={row.oos_max_drawdown_pct:6.2f}%")
-    print("\n=== GEN2 CROSS-DATASET TOP 15 VARIANTS ===")
+    print("\n=== GEN2 CROSS-DATASET TOP 15 VARIANTS (ranked on DEVELOPMENT only; OOS shown, never used to rank) ===")
     for i,(_,strategy,n,avg_full,avg_oos,oos_positive,avg_dd) in enumerate(summary[:15],1): print(f"{i:2d}. {strategy:42s} datasets={n:3d} avg_full={avg_full:6.2f}% avg_OOS={avg_oos:6.2f}% OOS_positive={oos_positive:5.1f}% avg_DD={avg_dd:5.2f}%")
     print(f"\nSUMMARY | variants={len(strategies)} datasets={datasets} rows={len(all_rows)} local_backtests~{local_backtests} cache_missing={missing} target={target_pct:.2f}%/month"); print(f"Reports: {out.resolve()}")
 

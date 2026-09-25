@@ -32,10 +32,14 @@ class CostModel:
     half_spread_bps: float = 1.5
     slippage_bps: float = 2.0
     sell_fee_bps: float = 0.3
+    # Stock-borrow cost for shorts, annualized % of notional (easy-to-borrow large caps
+    # are usually below this; hard-to-borrow names can be far higher).
+    short_borrow_annual_pct: float = 1.0
 
     def __post_init__(self) -> None:
         for field_name in ("commission_per_share", "commission_min", "commission_max_pct",
-                           "commission_bps", "half_spread_bps", "slippage_bps", "sell_fee_bps"):
+                           "commission_bps", "half_spread_bps", "slippage_bps", "sell_fee_bps",
+                           "short_borrow_annual_pct"):
             if getattr(self, field_name) < 0:
                 raise ValueError(f"{field_name} must be >= 0")
 
@@ -59,6 +63,14 @@ class CostModel:
     def sell_fee(self, quantity: float, price: float) -> float:
         return abs(quantity) * price * self.sell_fee_bps / 10_000
 
+    def borrow_cost(self, notional: float, days: float) -> float:
+        return abs(notional) * self.short_borrow_annual_pct / 100 * max(0.0, days) / 360
+
+    def estimated_exit_cost(self, quantity: float, price: float, *, long: bool) -> float:
+        """Cost to close at ``price`` with a marketable order (for mark-to-market)."""
+        cost = self.commission(quantity, price) + abs(quantity) * price * self.marketable_bps / 10_000
+        return cost + (self.sell_fee(quantity, price) if long else 0.0)
+
     def marketable_fill(self, reference: float, *, buy: bool) -> float:
         """Price paid/received by a marketable order at ``reference``."""
         adj = self.marketable_bps / 10_000
@@ -74,12 +86,12 @@ class CostModel:
 
     @classmethod
     def zero(cls) -> "CostModel":
-        return cls("zero_cost", 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        return cls("zero_cost", 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
 
     @classmethod
     def legacy_bps(cls, commission_bps: float, slippage_bps: float) -> "CostModel":
         """Old engine semantics: a flat bps charge per side on notional."""
-        return cls("legacy_bps", 0.0, 0.0, 0.0, float(commission_bps), 0.0, float(slippage_bps), 0.0)
+        return cls("legacy_bps", 0.0, 0.0, 0.0, float(commission_bps), 0.0, float(slippage_bps), 0.0, 0.0)
 
 
 BASELINE = CostModel()

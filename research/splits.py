@@ -70,9 +70,12 @@ def run_window(engine: BacktestEngine, bars: list[PriceBar], strategy, window: W
 
 
 def rolling_windows(n_bars: int, *, train: int, test: int, step: int) -> list[tuple[Window, Window]]:
-    """Walk-forward (train, test) pairs; test windows never overlap each other when step >= test."""
+    """Walk-forward (train, test) pairs. ``step >= test`` is required so OOS windows never
+    overlap: overlapping windows would count the same OOS trades several times."""
     if train < 1 or test < 1 or step < 1:
         raise ValueError("invalid rolling window sizes")
+    if step < test:
+        raise ValueError("step must be >= test so OOS windows do not overlap")
     pairs = []
     start = 0
     while start + train + test <= n_bars:
